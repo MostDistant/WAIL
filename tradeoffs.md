@@ -24,8 +24,8 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 | I1 | No `Default` for `ClockSync` → added `impl Default` | 67a02c2 |
 | I2 | No `Default` for `IpcRecvBuffer` → added `impl Default` | 67a02c2 |
 | I3 | Magic number `10` for snapshot interval → `SNAPSHOT_INTERVAL_TICKS` constant | 67a02c2 |
-| W1 | Duplicate AudioBridge → deleted old bridge, plugin uses `wail_audio::AudioBridge` | pending |
-| W14 | Audio IPC not wired → TCP IPC between plugin and app, bidirectional audio intervals | pending |
+| W1 | Duplicate AudioBridge → deleted old bridge, plugin uses `wail_audio::AudioBridge` | 085a16e |
+| W14 | Audio IPC not wired → TCP IPC between plugin and app, bidirectional audio intervals | 085a16e |
 
 ---
 
