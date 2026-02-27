@@ -25,11 +25,10 @@ crates/
 │   ├── signaling.rs   WebSocket signaling client
 │   └── peer.rs        WebRTC peer with "sync" + "audio" DataChannels
 ├── wail-plugin/      CLAP/VST3 plugin (nih-plug, built separately)
-│   ├── lib.rs         Plugin entry point + CLAP/VST3 export
-│   ├── params.rs      Plugin parameters (bars, quantum, volume, bitrate)
-│   └── audio_bridge.rs Bridge between audio thread and encoding
+│   ├── lib.rs         Plugin entry point, IPC thread, uses wail_audio::AudioBridge
+│   └── params.rs      Plugin parameters (bars, quantum, volume, bitrate)
 ├── wail-app/         CLI binary
-│   └── main.rs        Wires Link + WebRTC + audio together
+│   └── main.rs        Wires Link + WebRTC + IPC together
 └── wail-signaling/   Signaling server binary
     └── main.rs        WebSocket room-based relay
 
@@ -102,7 +101,7 @@ Binary header (48 bytes) + Opus data:
 ## Testing
 
 ```sh
-cargo test                    # run all tests (49 tests)
+cargo test                    # run all tests (86 tests)
 cargo test -p wail-core       # core library tests only
 cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
 ```

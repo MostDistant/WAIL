@@ -1,13 +1,18 @@
 /// Length-prefixed IPC framing for Plugin ↔ App communication.
 ///
-/// Frame format over Unix socket / TCP:
+/// Frame format over TCP:
 /// ```text
 /// [4 bytes] payload_length: u32 LE
-/// [N bytes] payload (AudioWire binary data)
+/// [N bytes] payload (IpcMessage-encoded data)
 /// ```
 ///
-/// Simple, zero-copy-friendly framing. The payload is always an AudioWire
-/// message (which starts with "WAIL" magic and is self-describing).
+/// Message format inside each frame:
+/// ```text
+/// [1 byte]  tag (0x01 = AudioInterval)
+/// [1 byte]  peer_id_len
+/// [N bytes] peer_id (UTF-8, empty for outgoing from plugin)
+/// [M bytes] AudioWire data
+/// ```
 ///
 /// The framer operates on byte buffers, not sockets directly, so it's
 /// testable without I/O.
@@ -79,6 +84,46 @@ impl IpcRecvBuffer {
     /// Number of buffered bytes not yet consumed.
     pub fn buffered(&self) -> usize {
         self.buf.len()
+    }
+}
+
+const IPC_TAG_AUDIO: u8 = 0x01;
+
+/// IPC message encoding for Plugin ↔ App audio transport.
+///
+/// Each IPC frame payload contains a tagged message:
+/// - Plugin→App (outgoing): peer_id is empty, wire_data is the encoded interval
+/// - App→Plugin (incoming): peer_id identifies the remote peer
+pub struct IpcMessage;
+
+impl IpcMessage {
+    /// Encode an audio interval message.
+    pub fn encode_audio(peer_id: &str, wire_data: &[u8]) -> Vec<u8> {
+        let pid_bytes = peer_id.as_bytes();
+        let pid_len = pid_bytes.len().min(255) as u8;
+        let mut msg = Vec::with_capacity(2 + pid_len as usize + wire_data.len());
+        msg.push(IPC_TAG_AUDIO);
+        msg.push(pid_len);
+        msg.extend_from_slice(&pid_bytes[..pid_len as usize]);
+        msg.extend_from_slice(wire_data);
+        msg
+    }
+
+    /// Decode an audio interval message. Returns `(peer_id, wire_data)`.
+    pub fn decode_audio(payload: &[u8]) -> Option<(String, Vec<u8>)> {
+        if payload.len() < 2 {
+            return None;
+        }
+        if payload[0] != IPC_TAG_AUDIO {
+            return None;
+        }
+        let pid_len = payload[1] as usize;
+        if payload.len() < 2 + pid_len {
+            return None;
+        }
+        let peer_id = String::from_utf8_lossy(&payload[2..2 + pid_len]).to_string();
+        let wire_data = payload[2 + pid_len..].to_vec();
+        Some((peer_id, wire_data))
     }
 }
 
@@ -240,5 +285,51 @@ mod tests {
         assert_eq!(decoded.sample_rate, 48000);
         assert_eq!(decoded.channels, 2);
         assert!((decoded.bpm - 140.0).abs() < f64::EPSILON);
+    }
+
+    // --- IpcMessage ---
+
+    #[test]
+    fn ipc_message_roundtrip_with_peer_id() {
+        let wire_data = vec![0x01, 0x02, 0x03, 0x04];
+        let encoded = IpcMessage::encode_audio("peer-abc", &wire_data);
+        let (peer_id, decoded_wire) = IpcMessage::decode_audio(&encoded).unwrap();
+        assert_eq!(peer_id, "peer-abc");
+        assert_eq!(decoded_wire, wire_data);
+    }
+
+    #[test]
+    fn ipc_message_roundtrip_empty_peer_id() {
+        let wire_data = vec![0xAA, 0xBB];
+        let encoded = IpcMessage::encode_audio("", &wire_data);
+        let (peer_id, decoded_wire) = IpcMessage::decode_audio(&encoded).unwrap();
+        assert_eq!(peer_id, "");
+        assert_eq!(decoded_wire, wire_data);
+    }
+
+    #[test]
+    fn ipc_message_decode_rejects_short() {
+        assert!(IpcMessage::decode_audio(&[]).is_none());
+        assert!(IpcMessage::decode_audio(&[0x01]).is_none());
+    }
+
+    #[test]
+    fn ipc_message_decode_rejects_wrong_tag() {
+        assert!(IpcMessage::decode_audio(&[0xFF, 0x00]).is_none());
+    }
+
+    #[test]
+    fn ipc_message_through_framing() {
+        let wire_data = vec![0xDE, 0xAD];
+        let msg = IpcMessage::encode_audio("peer-1", &wire_data);
+        let frame = IpcFramer::encode_frame(&msg);
+
+        let mut recv = IpcRecvBuffer::new();
+        recv.push(&frame);
+        let payload = recv.next_frame().unwrap();
+
+        let (peer_id, decoded) = IpcMessage::decode_audio(&payload).unwrap();
+        assert_eq!(peer_id, "peer-1");
+        assert_eq!(decoded, vec![0xDE, 0xAD]);
     }
 }

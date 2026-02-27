@@ -11,6 +11,6 @@ mod pipeline;
 pub use bridge::AudioBridge;
 pub use codec::{AudioDecoder, AudioEncoder};
 pub use interval::{AudioInterval, IntervalRecorder, IntervalPlayer};
-pub use ipc::{IpcFramer, IpcRecvBuffer};
+pub use ipc::{IpcFramer, IpcMessage, IpcRecvBuffer};
 pub use ring::{CompletedInterval, IntervalRing};
 pub use wire::AudioWire;

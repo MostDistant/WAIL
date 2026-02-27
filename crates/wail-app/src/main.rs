@@ -2,9 +2,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use wail_audio::AudioWire;
+use wail_audio::{IpcFramer, IpcMessage, IpcRecvBuffer};
 use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
 use wail_net::PeerMesh;
 
@@ -38,6 +40,10 @@ enum Commands {
         /// Quantum (beats per bar / time signature numerator)
         #[arg(short, long, default_value_t = 4.0)]
         quantum: f64,
+
+        /// IPC port for plugin communication
+        #[arg(long, default_value_t = 9191)]
+        ipc_port: u16,
     },
 }
 
@@ -59,17 +65,25 @@ async fn main() -> Result<()> {
             bpm,
             bars,
             quantum,
+            ipc_port,
         } => {
-            run_peer(server, room, bpm, bars, quantum).await?;
+            run_peer(server, room, bpm, bars, quantum, ipc_port).await?;
         }
     }
 
     Ok(())
 }
 
-async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f64) -> Result<()> {
+async fn run_peer(
+    server: String,
+    room: String,
+    bpm: f64,
+    bars: u32,
+    quantum: f64,
+    ipc_port: u16,
+) -> Result<()> {
     let peer_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-    info!(%peer_id, %room, bpm, bars, quantum, "Starting WAIL peer");
+    info!(%peer_id, %room, bpm, bars, quantum, ipc_port, "Starting WAIL peer");
 
     // Initialize Ableton Link
     let link = LinkBridge::new(bpm, quantum);
@@ -92,13 +106,72 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
     let mut last_broadcast_bpm: f64 = bpm;
 
     // Audio interval stats
-    let audio_intervals_sent: u64 = 0;
+    let mut audio_intervals_sent: u64 = 0;
     let mut audio_intervals_received: u64 = 0;
+
+    // IPC: listen for plugin connections
+    let ipc_listener = tokio::net::TcpListener::bind(("127.0.0.1", ipc_port)).await?;
+    info!(port = ipc_port, "IPC listening for plugin connections");
+
+    // IPC state: writer to send remote audio to plugin, reader channel for incoming from plugin
+    let mut ipc_writer: Option<tokio::net::tcp::OwnedWriteHalf> = None;
+    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
     info!("WAIL peer running. Waiting for peers...");
 
     loop {
         tokio::select! {
+            // --- Accept plugin IPC connection ---
+            result = ipc_listener.accept() => {
+                match result {
+                    Ok((stream, addr)) => {
+                        info!(%addr, "Plugin IPC connected");
+                        let (read_half, write_half) = stream.into_split();
+                        ipc_writer = Some(write_half);
+
+                        // Spawn reader task for this plugin connection
+                        let tx = ipc_from_plugin_tx.clone();
+                        tokio::spawn(async move {
+                            let mut recv_buf = IpcRecvBuffer::new();
+                            let mut buf = [0u8; 65536];
+                            let mut reader = read_half;
+                            loop {
+                                match reader.read(&mut buf).await {
+                                    Ok(0) => {
+                                        info!("Plugin IPC disconnected");
+                                        break;
+                                    }
+                                    Ok(n) => {
+                                        recv_buf.push(&buf[..n]);
+                                        while let Some(frame) = recv_buf.next_frame() {
+                                            if tx.send(frame).is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "Plugin IPC read error");
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to accept IPC connection");
+                    }
+                }
+            }
+
+            // --- Audio from plugin IPC → broadcast to WebRTC peers ---
+            Some(frame) = ipc_from_plugin_rx.recv() => {
+                if let Some((_peer_id, wire_data)) = IpcMessage::decode_audio(&frame) {
+                    mesh.broadcast_audio(&wire_data).await;
+                    audio_intervals_sent += 1;
+                    debug!(wire_bytes = wire_data.len(), "Forwarded plugin audio to peers");
+                }
+            }
+
             // --- Signaling messages (peer discovery, WebRTC negotiation) ---
             event = mesh.poll_signaling() => {
                 match event {
@@ -206,25 +279,22 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
                 }
             }
 
-            // --- Incoming audio data from peers (binary DataChannel) ---
+            // --- Incoming audio data from peers (binary DataChannel) → forward to plugin ---
             Some((from, data)) = audio_rx.recv() => {
-                match AudioWire::decode(&data) {
-                    Ok(audio_interval) => {
-                        audio_intervals_received += 1;
-                        info!(
-                            peer = %from,
-                            interval = audio_interval.index,
-                            sample_rate = audio_interval.sample_rate,
-                            channels = audio_interval.channels,
-                            frames = audio_interval.num_frames,
-                            opus_bytes = audio_interval.opus_data.len(),
-                            bpm = format!("{:.1}", audio_interval.bpm),
-                            "Received audio interval"
-                        );
-                        // TODO: Forward to local plugin via IPC for playback
-                    }
-                    Err(e) => {
-                        warn!(peer = %from, error = %e, "Failed to decode audio wire data");
+                audio_intervals_received += 1;
+                debug!(
+                    peer = %from,
+                    wire_bytes = data.len(),
+                    "Received audio interval from peer"
+                );
+
+                // Forward to plugin via IPC
+                if let Some(ref mut writer) = ipc_writer {
+                    let msg = IpcMessage::encode_audio(&from, &data);
+                    let frame = IpcFramer::encode_frame(&msg);
+                    if let Err(e) = writer.write_all(&frame).await {
+                        warn!(error = %e, "Failed to write to plugin IPC");
+                        ipc_writer = None;
                     }
                 }
             }
@@ -303,6 +373,7 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
                         interval_bars = interval.bars(),
                         audio_sent = audio_intervals_sent,
                         audio_recv = audio_intervals_received,
+                        ipc_plugin = ipc_writer.is_some(),
                         "Status"
                     );
                 }

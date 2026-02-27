@@ -16,24 +16,20 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 | W9 | Dead code warnings → `#[allow(dead_code)]` with comments, removed unused imports/mut | f4c1f83 |
 | W13 | Unused `WailTask` enum → removed, `type BackgroundTask = ()` | f4c1f83 |
 | I8 | Redundant `use serde_json;` in signaling server → removed | f4c1f83 |
-| W5 | `let _ =` send failures → tiered logging: `warn!` for critical paths (signaling, Link events), `debug!` for hot paths. Link poller breaks on receiver drop. | pending |
-| W12 | DataChannel send() silent when None → `debug!` log when channel not ready | pending |
-| W17 | `mem::replace` receiver swap → `Option<Receiver>` with `.take()` methods | pending |
-| W2 | Plugin hardcoded 128kbps bitrate → passes `bitrate_kbps` param through | pending |
-| W3 | Plugin hardcoded 2 channels → derives from `audio_io_layout` | pending |
-| I1 | No `Default` for `ClockSync` → added `impl Default` | pending |
-| I2 | No `Default` for `IpcRecvBuffer` → added `impl Default` | pending |
-| I3 | Magic number `10` for snapshot interval → `SNAPSHOT_INTERVAL_TICKS` constant | pending |
+| W5 | `let _ =` send failures → tiered logging: `warn!` for critical paths, `debug!` for hot paths | 67a02c2 |
+| W12 | DataChannel send() silent when None → `debug!` log when channel not ready | 67a02c2 |
+| W17 | `mem::replace` receiver swap → `Option<Receiver>` with `.take()` methods | 67a02c2 |
+| W2 | Plugin hardcoded 128kbps bitrate → passes `bitrate_kbps` param through | 67a02c2 |
+| W3 | Plugin hardcoded 2 channels → derives from `audio_io_layout` | 67a02c2 |
+| I1 | No `Default` for `ClockSync` → added `impl Default` | 67a02c2 |
+| I2 | No `Default` for `IpcRecvBuffer` → added `impl Default` | 67a02c2 |
+| I3 | Magic number `10` for snapshot interval → `SNAPSHOT_INTERVAL_TICKS` constant | 67a02c2 |
+| W1 | Duplicate AudioBridge → deleted old bridge, plugin uses `wail_audio::AudioBridge` | pending |
+| W14 | Audio IPC not wired → TCP IPC between plugin and app, bidirectional audio intervals | pending |
 
 ---
 
 ## Deferred — Infrastructure (revisit when deploying)
-
-### W1. Duplicate AudioBridge implementations
-**Status:** Deferred — migrate when wiring audio IPC (W14)
-**Files:** `crates/wail-plugin/src/audio_bridge.rs` (old) vs `crates/wail-audio/src/bridge.rs` (new)
-**Problem:** Two bridge implementations with different APIs. Plugin uses old one. New one in wail-audio uses IntervalRing.
-**Decision:** W2/W3 bugs fixed independently. Full migration deferred until W14 (audio IPC wiring) since the plugin's separate capture/playback API would need restructuring to match the unified `process()` API.
 
 ### W6. Unbounded channels everywhere (12 instances)
 **Status:** Deferred — infrastructure concern
@@ -62,12 +58,6 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 ---
 
 ## Deferred — Feature Work
-
-### W14. Audio IPC not wired — received audio is dropped
-**Status:** Feature work, not a fix
-**File:** `crates/wail-app/src/main.rs:218`
-**Problem:** Decoded audio intervals are logged but never forwarded to plugin.
-**Scope:** Requires IPC protocol design and plugin-side receive logic. Trigger W1 migration at this time.
 
 ### W15. Clock offset computed but never applied
 **Status:** Feature work, not a fix
