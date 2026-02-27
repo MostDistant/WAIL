@@ -27,8 +27,20 @@ pub struct AudioBridge {
 
 impl AudioBridge {
     pub fn new(sample_rate: u32, channels: u16, bars: u32, quantum: f64, bitrate_kbps: u32) -> Self {
-        let encoder = AudioEncoder::new(sample_rate, channels, bitrate_kbps).ok();
-        let decoder = AudioDecoder::new(sample_rate, channels).ok();
+        let encoder = match AudioEncoder::new(sample_rate, channels, bitrate_kbps) {
+            Ok(enc) => Some(enc),
+            Err(e) => {
+                tracing::warn!(error = %e, sample_rate, channels, bitrate_kbps, "Failed to create Opus encoder — audio encoding disabled");
+                None
+            }
+        };
+        let decoder = match AudioDecoder::new(sample_rate, channels) {
+            Ok(dec) => Some(dec),
+            Err(e) => {
+                tracing::warn!(error = %e, sample_rate, channels, "Failed to create Opus decoder — audio decoding disabled");
+                None
+            }
+        };
 
         Self {
             ring: IntervalRing::new(sample_rate, channels, bars, quantum),
@@ -120,8 +132,12 @@ impl AudioBridge {
     /// Reset all state (on transport stop, etc.)
     pub fn reset(&mut self) {
         self.ring.reset();
-        self.encoder = AudioEncoder::new(self.sample_rate, self.channels, self.bitrate_kbps).ok();
-        self.decoder = AudioDecoder::new(self.sample_rate, self.channels).ok();
+        self.encoder = AudioEncoder::new(self.sample_rate, self.channels, self.bitrate_kbps)
+            .map_err(|e| { tracing::warn!(error = %e, "Failed to recreate Opus encoder on reset"); e })
+            .ok();
+        self.decoder = AudioDecoder::new(self.sample_rate, self.channels)
+            .map_err(|e| { tracing::warn!(error = %e, "Failed to recreate Opus decoder on reset"); e })
+            .ok();
     }
 
     pub fn sample_rate(&self) -> u32 {

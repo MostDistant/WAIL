@@ -83,7 +83,13 @@ impl Plugin for WailPlugin {
             self.params.quantum(),
         );
 
-        *self.bridge.lock().unwrap() = Some(bridge);
+        match self.bridge.lock() {
+            Ok(mut guard) => *guard = Some(bridge),
+            Err(_) => {
+                nih_log::error!("WAIL plugin bridge mutex poisoned, initialization failed");
+                return false;
+            }
+        }
 
         nih_log::info!(
             "WAIL plugin initialized: {}Hz, {} channels, {} bars",

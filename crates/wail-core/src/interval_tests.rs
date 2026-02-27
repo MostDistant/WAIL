@@ -84,4 +84,42 @@ mod tests {
         assert_eq!(tracker.bars(), 4);
         assert_eq!(tracker.quantum(), 4.0);
     }
+
+    #[test]
+    fn zero_bars_clamped_to_one() {
+        let tracker = IntervalTracker::new(0, 4.0);
+        assert_eq!(tracker.bars(), 1);
+        assert_eq!(tracker.beats_per_interval(), 4.0);
+        // Must not produce NaN
+        assert!(tracker.interval_index(10.0).is_positive());
+    }
+
+    #[test]
+    fn zero_quantum_clamped_to_epsilon() {
+        let tracker = IntervalTracker::new(4, 0.0);
+        assert!(tracker.quantum() > 0.0);
+        assert!(tracker.beats_per_interval() > 0.0);
+        // Must not produce NaN
+        let idx = tracker.interval_index(10.0);
+        assert!(idx >= 0);
+    }
+
+    #[test]
+    fn negative_quantum_clamped_to_epsilon() {
+        let tracker = IntervalTracker::new(4, -1.0);
+        assert!(tracker.quantum() > 0.0);
+    }
+
+    #[test]
+    fn set_config_clamps_zero_values() {
+        let mut tracker = IntervalTracker::new(4, 4.0);
+        tracker.set_config(0, 0.0);
+        assert_eq!(tracker.bars(), 1);
+        assert!(tracker.quantum() > 0.0);
+        // Must not panic or produce NaN
+        let mut tracker2 = IntervalTracker::new(4, 4.0);
+        tracker2.update(0.0);
+        tracker2.set_config(0, 0.0);
+        assert!(tracker2.update(10.0).is_some());
+    }
 }

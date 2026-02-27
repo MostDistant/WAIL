@@ -55,6 +55,8 @@ struct RemoteInterval {
 impl IntervalRing {
     /// Create a new interval ring buffer.
     pub fn new(sample_rate: u32, channels: u16, bars: u32, quantum: f64) -> Self {
+        let bars = bars.max(1);
+        let quantum = quantum.max(f64::EPSILON);
         let beats_per_interval = bars as f64 * quantum;
         // Pre-allocate for max expected interval size at 200 BPM (fast tempo = short intervals)
         // At 60 BPM, 16 beats = 16 seconds. At 200 BPM, 16 beats = 4.8 seconds.
@@ -148,8 +150,8 @@ impl IntervalRing {
 
     /// Update interval configuration (bars, quantum).
     pub fn set_config(&mut self, bars: u32, quantum: f64) {
-        self.bars = bars;
-        self.quantum = quantum;
+        self.bars = bars.max(1);
+        self.quantum = quantum.max(f64::EPSILON);
     }
 
     /// Reset all state.
@@ -503,5 +505,38 @@ mod tests {
         let boundary = ring.process(&input, &mut output, 16.001);
         assert_eq!(boundary, Some(0));
         assert_eq!(ring.current_interval(), Some(1));
+    }
+
+    #[test]
+    fn zero_bars_clamped_to_one() {
+        let mut ring = IntervalRing::new(SR, CH, 0, QUANTUM);
+        let input = vec![0.0f32; 64];
+        let mut output = vec![0.0f32; 64];
+        // Must not panic — bars=0 is clamped to 1, so interval = 1*4 = 4 beats
+        ring.process(&input, &mut output, 0.0);
+        assert_eq!(ring.current_interval(), Some(0));
+    }
+
+    #[test]
+    fn zero_quantum_clamped() {
+        let mut ring = IntervalRing::new(SR, CH, BARS, 0.0);
+        let input = vec![0.0f32; 64];
+        let mut output = vec![0.0f32; 64];
+        // Must not panic or produce NaN interval index
+        ring.process(&input, &mut output, 10.0);
+        assert!(ring.current_interval().is_some());
+    }
+
+    #[test]
+    fn set_config_clamps_zero_values() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 64];
+        let mut output = vec![0.0f32; 64];
+
+        ring.process(&input, &mut output, 0.0);
+        ring.set_config(0, 0.0);
+        // Must not panic
+        ring.process(&input, &mut output, 10.0);
+        assert!(ring.current_interval().is_some());
     }
 }

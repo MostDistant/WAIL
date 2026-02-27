@@ -11,8 +11,8 @@ pub struct IntervalTracker {
 impl IntervalTracker {
     pub fn new(bars: u32, quantum: f64) -> Self {
         Self {
-            bars,
-            quantum,
+            bars: bars.max(1),
+            quantum: quantum.max(f64::EPSILON),
             last_interval_index: None,
         }
     }
@@ -54,8 +54,8 @@ impl IntervalTracker {
     }
 
     pub fn set_config(&mut self, bars: u32, quantum: f64) {
-        self.bars = bars;
-        self.quantum = quantum;
+        self.bars = bars.max(1);
+        self.quantum = quantum.max(f64::EPSILON);
         self.last_interval_index = None; // reset
     }
 }

@@ -64,7 +64,13 @@ impl SignalingClient {
                     outgoing = outgoing_rx.recv() => {
                         match outgoing {
                             Some(msg) => {
-                                let text = serde_json::to_string(&msg).unwrap();
+                                let text = match serde_json::to_string(&msg) {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        error!(error = %e, "Failed to serialize signaling message");
+                                        continue;
+                                    }
+                                };
                                 if let Err(e) = write.send(Message::Text(text.into())).await {
                                     error!(error = %e, "Signaling write error");
                                     break;

@@ -24,8 +24,20 @@ pub struct AudioBridge {
 
 impl AudioBridge {
     pub fn new(sample_rate: u32, channels: u16, bars: u32, quantum: f64) -> Self {
-        let encoder = AudioEncoder::new(sample_rate, channels, 128).ok();
-        let decoder = AudioDecoder::new(sample_rate, channels).ok();
+        let encoder = match AudioEncoder::new(sample_rate, channels, 128) {
+            Ok(enc) => Some(enc),
+            Err(e) => {
+                tracing::warn!(error = %e, sample_rate, channels, "Failed to create Opus encoder — audio encoding disabled");
+                None
+            }
+        };
+        let decoder = match AudioDecoder::new(sample_rate, channels) {
+            Ok(dec) => Some(dec),
+            Err(e) => {
+                tracing::warn!(error = %e, sample_rate, channels, "Failed to create Opus decoder — audio decoding disabled");
+                None
+            }
+        };
 
         Self {
             recorder: IntervalRecorder::new(sample_rate, channels),
@@ -112,8 +124,12 @@ impl AudioBridge {
         self.player.clear();
         self.current_interval_index = None;
         // Re-create encoder/decoder in case params changed
-        self.encoder = AudioEncoder::new(self.sample_rate, self.channels, self.bitrate_kbps).ok();
-        self.decoder = AudioDecoder::new(self.sample_rate, self.channels).ok();
+        self.encoder = AudioEncoder::new(self.sample_rate, self.channels, self.bitrate_kbps)
+            .map_err(|e| { tracing::warn!(error = %e, "Failed to recreate Opus encoder on reset"); e })
+            .ok();
+        self.decoder = AudioDecoder::new(self.sample_rate, self.channels)
+            .map_err(|e| { tracing::warn!(error = %e, "Failed to recreate Opus decoder on reset"); e })
+            .ok();
     }
 
     /// Finish the current interval, encode with Opus, and queue for transmission.
