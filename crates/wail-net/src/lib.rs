@@ -97,7 +97,8 @@ impl PeerMesh {
             SignalMessage::PeerList { peers } => {
                 info!(peers = ?peers, "Received peer list");
                 for remote_id in peers {
-                    if remote_id != self.peer_id {
+                    // Same tie-breaking as PeerJoined: lower peer_id initiates
+                    if remote_id != self.peer_id && self.peer_id < remote_id {
                         self.initiate_connection(&remote_id).await?;
                     }
                 }

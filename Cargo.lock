@@ -2514,9 +2514,11 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "wail-audio",
  "wail-core",
+ "wail-signaling",
  "webrtc",
 ]
 
