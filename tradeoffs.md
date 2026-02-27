@@ -26,7 +26,7 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 | I3 | Magic number `10` for snapshot interval → `SNAPSHOT_INTERVAL_TICKS` constant | 67a02c2 |
 | W1 | Duplicate AudioBridge → deleted old bridge, plugin uses `wail_audio::AudioBridge` | 085a16e |
 | W14 | Audio IPC not wired → TCP IPC between plugin and app, bidirectional audio intervals | 085a16e |
-| W6 | Unbounded audio channels → bounded(64) with drop-on-full for 3 audio channels; sync/signaling/ICE left unbounded | pending |
+| W6 | Unbounded audio channels → bounded(64) with drop-on-full for 3 audio channels; sync/signaling/ICE left unbounded | 36272e4 |
 
 ---
 
