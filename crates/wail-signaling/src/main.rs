@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use serde_json;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::tungstenite::Message;

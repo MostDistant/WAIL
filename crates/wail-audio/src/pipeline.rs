@@ -11,10 +11,8 @@
 #[cfg(test)]
 mod tests {
     use crate::bridge::AudioBridge;
-    use crate::codec::{AudioDecoder, AudioEncoder};
-    use crate::interval::AudioInterval;
+    use crate::codec::AudioDecoder;
     use crate::ipc::{IpcFramer, IpcRecvBuffer};
-    use crate::ring::IntervalRing;
     use crate::wire::AudioWire;
 
     const SR: u32 = 48000;

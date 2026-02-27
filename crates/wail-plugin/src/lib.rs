@@ -61,7 +61,7 @@ impl Plugin for WailPlugin {
     const SAMPLE_ACCURATE_AUTOMATION: bool = false;
 
     type SysExMessage = ();
-    type BackgroundTask = WailTask;
+    type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
@@ -169,19 +169,6 @@ impl Plugin for WailPlugin {
     }
 }
 
-/// Background tasks for the plugin.
-pub enum WailTask {
-    /// Encode a completed interval and send to wail-app
-    EncodeAndSend {
-        interval_index: i64,
-        samples: Vec<f32>,
-        sample_rate: u32,
-        channels: u16,
-        bpm: f64,
-        quantum: f64,
-        bars: u32,
-    },
-}
 
 impl ClapPlugin for WailPlugin {
     const CLAP_ID: &'static str = "com.wail.intervalic-audio";

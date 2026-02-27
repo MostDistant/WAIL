@@ -48,7 +48,6 @@ impl Default for WailParams {
                 0.8,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
-            .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             bitrate_kbps: IntParam::new(

@@ -92,7 +92,7 @@ async fn run_peer(server: String, room: String, bpm: f64, bars: u32, quantum: f6
     let mut last_broadcast_bpm: f64 = bpm;
 
     // Audio interval stats
-    let mut audio_intervals_sent: u64 = 0;
+    let audio_intervals_sent: u64 = 0;
     let mut audio_intervals_received: u64 = 0;
 
     info!("WAIL peer running. Waiting for peers...");

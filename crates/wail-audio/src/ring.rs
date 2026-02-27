@@ -31,8 +31,10 @@ pub struct IntervalRing {
     completed: Vec<CompletedInterval>,
     /// Remote peer intervals waiting to be mixed into next playback slot
     pending_remote: Vec<RemoteInterval>,
-    /// Audio parameters
+    /// Audio parameters (retained for future use in resampling/diagnostics)
+    #[allow(dead_code)]
     sample_rate: u32,
+    #[allow(dead_code)]
     channels: u16,
     /// Interval parameters
     bars: u32,
@@ -46,9 +48,10 @@ pub struct CompletedInterval {
 }
 
 /// A received remote interval to mix into playback.
+#[allow(dead_code)] // index/peer_id retained for future per-peer mixing control
 struct RemoteInterval {
-    pub index: i64,
-    pub peer_id: String,
+    index: i64,
+    peer_id: String,
     pub samples: Vec<f32>,
 }
 

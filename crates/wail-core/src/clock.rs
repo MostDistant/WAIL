@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use crate::protocol::SyncMessage;
@@ -15,7 +15,7 @@ pub struct ClockSync {
 
 struct PeerClock {
     /// (rtt_us, offset_us) samples
-    samples: Vec<(i64, i64)>,
+    samples: VecDeque<(i64, i64)>,
     /// Median offset in microseconds (remote - local)
     offset_us: i64,
     /// Median RTT in microseconds
@@ -59,20 +59,26 @@ impl ClockSync {
     pub fn handle_pong(&mut self, peer_id: &str, ping_sent_at_us: i64, pong_sent_at_us: i64) {
         let now = self.now_us();
         let rtt = now - ping_sent_at_us;
+
+        // Discard samples with negative RTT (clock anomaly)
+        if rtt < 0 {
+            return;
+        }
+
         // offset = remote_time - local_time (at the moment the pong was sent)
         // pong_sent_at_us ≈ local_midpoint + offset
         // local_midpoint = ping_sent_at_us + rtt/2
-        let offset = pong_sent_at_us - (ping_sent_at_us + rtt / 2);
+        let offset = pong_sent_at_us.saturating_sub(ping_sent_at_us.saturating_add(rtt / 2));
 
         let clock = self.per_peer.entry(peer_id.to_string()).or_insert(PeerClock {
-            samples: Vec::new(),
+            samples: VecDeque::with_capacity(WINDOW_SIZE),
             offset_us: 0,
             rtt_us: 0,
         });
 
-        clock.samples.push((rtt, offset));
+        clock.samples.push_back((rtt, offset));
         if clock.samples.len() > WINDOW_SIZE {
-            clock.samples.remove(0);
+            clock.samples.pop_front();
         }
 
         // Use median offset (robust to outliers)

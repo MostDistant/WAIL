@@ -102,6 +102,7 @@ pub struct IntervalPlayer {
     crossfade_samples: usize,
 }
 
+#[allow(dead_code)] // index retained for future interval ordering/debugging
 struct DecodedInterval {
     index: i64,
     samples: Vec<f32>,
