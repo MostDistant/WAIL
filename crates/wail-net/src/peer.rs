@@ -1,9 +1,71 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
+
+/// Max payload per DataChannel message. SCTP default max is 64KB;
+/// use 16KB to stay well under the limit with room for overhead.
+const CHUNK_MAX: usize = 16384;
+/// Magic bytes for chunked audio messages.
+const CHUNK_MAGIC: &[u8; 4] = b"WACH";
+const CHUNK_HEADER_SIZE: usize = 8; // 4 magic + 4 total_len
+const CHUNK_MAX_PAYLOAD: usize = CHUNK_MAX - CHUNK_HEADER_SIZE;
+
+/// Reassembly buffer for chunked audio messages arriving on a DataChannel.
+struct AudioReassembly {
+    buffer: Vec<u8>,
+    expected_len: usize,
+}
+
+/// Create a shared audio message handler that reassembles chunked messages.
+/// Returns a closure suitable for `dc.on_message()`.
+fn make_audio_handler(
+    tx: mpsc::Sender<Vec<u8>>,
+) -> (
+    Arc<Mutex<Option<AudioReassembly>>>,
+    impl Fn(DataChannelMessage) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync + 'static,
+) {
+    let reassembly = Arc::new(Mutex::new(None::<AudioReassembly>));
+    let reassembly_clone = reassembly.clone();
+
+    let handler = move |msg: DataChannelMessage| {
+        let tx = tx.clone();
+        let reassembly = reassembly_clone.clone();
+        Box::pin(async move {
+            let data = msg.data.to_vec();
+
+            // Check if this is a chunked message
+            if data.len() >= CHUNK_HEADER_SIZE && &data[0..4] == CHUNK_MAGIC {
+                let total_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+                let payload = &data[CHUNK_HEADER_SIZE..];
+
+                let mut guard = reassembly.lock().unwrap();
+                let state = guard.get_or_insert_with(|| AudioReassembly {
+                    buffer: Vec::with_capacity(total_len),
+                    expected_len: total_len,
+                });
+                state.buffer.extend_from_slice(payload);
+
+                if state.buffer.len() >= state.expected_len {
+                    let complete = std::mem::take(&mut state.buffer);
+                    *guard = None;
+                    if tx.try_send(complete).is_err() {
+                        debug!("Audio channel full — dropping reassembled frame");
+                    }
+                }
+            } else {
+                // Non-chunked message (small enough to fit in one DC message)
+                if tx.try_send(data).is_err() {
+                    debug!("Audio channel full — dropping frame");
+                }
+            }
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    };
+
+    (reassembly, handler)
+}
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
@@ -164,15 +226,8 @@ impl PeerConnection {
                     }
                     "audio" => {
                         let _ = dc_audio_slot.set(dc.clone());
-                        let tx = audio_tx.clone();
-                        dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                            let tx = tx.clone();
-                            Box::pin(async move {
-                                if tx.try_send(msg.data.to_vec()).is_err() {
-                                    debug!("Audio channel full — dropping frame");
-                                }
-                            })
-                        }));
+                        let (_reassembly, handler) = make_audio_handler(audio_tx.clone());
+                        dc.on_message(Box::new(handler));
                     }
                     other => {
                         debug!(peer = %rpid, label = %other, "Ignoring unknown data channel");
@@ -257,10 +312,33 @@ impl PeerConnection {
     }
 
     /// Send binary audio data over the "audio" DataChannel.
+    /// Large messages are chunked to stay under the SCTP max message size.
     pub async fn send_audio(&self, data: &[u8]) -> Result<()> {
         match self.dc_audio.get() {
             Some(dc) if dc.ready_state() == RTCDataChannelState::Open => {
-                dc.send(&Bytes::copy_from_slice(data)).await?;
+                if data.len() <= CHUNK_MAX {
+                    // Fits in a single message — send as-is (no header)
+                    dc.send(&Bytes::copy_from_slice(data)).await?;
+                } else {
+                    // Chunk it: each chunk = [WACH][total_len u32 LE][payload]
+                    let total_len = data.len() as u32;
+                    let mut offset = 0;
+                    while offset < data.len() {
+                        let end = (offset + CHUNK_MAX_PAYLOAD).min(data.len());
+                        let mut chunk = Vec::with_capacity(CHUNK_HEADER_SIZE + (end - offset));
+                        chunk.extend_from_slice(CHUNK_MAGIC);
+                        chunk.extend_from_slice(&total_len.to_le_bytes());
+                        chunk.extend_from_slice(&data[offset..end]);
+                        dc.send(&Bytes::from(chunk)).await?;
+                        offset = end;
+                    }
+                    debug!(
+                        peer = %self.remote_peer_id,
+                        total = data.len(),
+                        chunks = (data.len() + CHUNK_MAX_PAYLOAD - 1) / CHUNK_MAX_PAYLOAD,
+                        "Sent chunked audio"
+                    );
+                }
             }
             Some(_) => {
                 debug!(peer = %self.remote_peer_id, "Audio DataChannel not open yet — data dropped");
@@ -305,7 +383,6 @@ impl PeerConnection {
 
     /// Set up message handling on the "audio" data channel (initiator path).
     async fn setup_audio_channel(&mut self, dc: Arc<RTCDataChannel>) {
-        let audio_tx = self.audio_tx.clone();
         let rpid = self.remote_peer_id.clone();
 
         let dc_clone = dc.clone();
@@ -314,15 +391,8 @@ impl PeerConnection {
             Box::pin(async {})
         }));
 
-        let tx = audio_tx.clone();
-        dc.on_message(Box::new(move |msg: DataChannelMessage| {
-            let tx = tx.clone();
-            Box::pin(async move {
-                if tx.try_send(msg.data.to_vec()).is_err() {
-                    debug!("Audio channel full — dropping frame");
-                }
-            })
-        }));
+        let (_reassembly, handler) = make_audio_handler(self.audio_tx.clone());
+        dc.on_message(Box::new(handler));
 
         let _ = self.dc_audio.set(dc);
     }
