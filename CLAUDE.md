@@ -24,7 +24,7 @@ crates/
 │   ├── lib.rs         PeerMesh: manages all WebRTC connections
 │   ├── signaling.rs   WebSocket signaling client
 │   └── peer.rs        WebRTC peer with "sync" + "audio" DataChannels
-├── wail-plugin/      CLAP/VST3 plugin (nih-plug, built separately)
+├── wail-plugin/      CLAP/VST3 plugin (nih-plug)
 │   ├── lib.rs         Plugin entry point, IPC thread, uses wail_audio::AudioBridge
 │   └── params.rs      Plugin parameters (bars, quantum, volume, bitrate)
 ├── wail-app/         CLI binary
@@ -43,11 +43,17 @@ Requires: Rust 1.75+, CMake 3.14+, C++ compiler (for rusty_link/Ableton Link SDK
 ```sh
 git submodule update --init --recursive   # fetch Link 4 SDK
 cargo build                               # build workspace
-cargo run -p wail-signaling               # start signaling server on :9090
-cargo run -p wail-app -- join --room test --server ws://localhost:9090
+cargo test                                # run all tests
 
-# Build CLAP/VST3 plugin (separate from workspace, uses nih-plug git dep)
-cargo build -p wail-plugin --release
+# Plugin (install bundler once)
+cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
+cargo xtask build-plugin                  # → target/bundled/wail-plugin.{clap,vst3}
+cargo xtask install-plugin                # build + install to system plugin dirs
+
+# Run locally
+cargo xtask run-signaling                 # signaling server on :9090
+cargo xtask run-peer                      # peer A (defaults: room=test, bpm=120, ipc=9191)
+cargo xtask run-peer --bpm 96 --ipc-port 9192  # peer B
 ```
 
 ## Key Dependencies
