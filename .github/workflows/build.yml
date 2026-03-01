@@ -36,7 +36,7 @@ jobs:
         run: which cargo-binstall || curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
 
       - name: Install cargo-nih-plug
-        run: which cargo-nih-plug || cargo binstall cargo-nih-plug --no-confirm || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
+        run: which cargo-nih-plug || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 
       - name: Install tauri-cli
         env:
@@ -112,8 +112,7 @@ jobs:
       - name: Install cargo-nih-plug
         run: |
           if (!(Get-Command cargo-nih-plug -ErrorAction SilentlyContinue)) {
-            cargo binstall cargo-nih-plug --no-confirm
-            if ($LASTEXITCODE -ne 0) { cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug }
+            cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
           }
         shell: pwsh
 
