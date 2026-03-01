@@ -23,7 +23,7 @@ crates/
 ├── wail-core/        Core sync library (no networking)
 ├── wail-audio/       Audio encoding and intervalic ring buffer
 ├── wail-net/         WebRTC peer mesh and signaling client
-├── wail-plugin/      CLAP/VST3 plugin (nih-plug, built separately)
+├── wail-plugin/      CLAP/VST3 plugin (nih-plug)
 ├── wail-app/         CLI binary
 └── wail-signaling/   WebSocket signaling server
 ```
@@ -35,15 +35,37 @@ Requires: **Rust 1.75+**, CMake 3.14+, a C++ compiler, and libopus-dev.
 ```sh
 git submodule update --init --recursive   # fetch Ableton Link SDK
 cargo build                               # build workspace
-cargo run -p wail-signaling               # start signaling server on :9090
-cargo run -p wail-app -- join --room test --server ws://localhost:9090
 ```
 
-Build the CLAP/VST3 plugin (separate from the workspace):
+### Plugin
+
+Install the bundler once, then use `cargo xtask`:
 
 ```sh
-cargo build -p wail-plugin --release
+cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
+
+cargo xtask build-plugin        # build CLAP + VST3 bundles → target/bundled/
+cargo xtask install-plugin      # build and install to system plugin directories
+cargo xtask install-plugin --no-build  # install already-built bundles
 ```
+
+Plugin directories:
+- **macOS** — `~/Library/Audio/Plug-Ins/{CLAP,VST3}/`
+- **Linux** — `~/.clap/` and `~/.vst3/`
+- **Windows** — `%COMMONPROGRAMFILES%\{CLAP,VST3}\`
+
+### Running locally
+
+```sh
+cargo xtask run-signaling       # start signaling server on :9090
+
+# two terminals — different IPC ports so they don't collide
+cargo xtask run-peer                        # peer A (BPM 120, IPC 9191)
+cargo xtask run-peer --bpm 96 --ipc-port 9192  # peer B
+```
+
+All `run-peer` flags map directly to `wail-app join` options (see `--help`).
+Defaults: `--room test --server ws://localhost:9090 --bars 4 --quantum 4`.
 
 ## Testing
 
