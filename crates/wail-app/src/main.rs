@@ -104,6 +104,8 @@ async fn run_peer(
 
     // Track last broadcast tempo to avoid echo loops
     let mut last_broadcast_bpm: f64 = bpm;
+    // One-shot join-time beat sync: snap local beat clock to first remote StateSnapshot
+    let mut beat_synced = false;
 
     // Audio interval stats
     let mut audio_intervals_sent: u64 = 0;
@@ -240,13 +242,32 @@ async fn run_peer(
                         }
                     }
 
-                    SyncMessage::StateSnapshot { bpm: remote_bpm, beat, .. } => {
+                    SyncMessage::StateSnapshot { bpm: remote_bpm, beat: remote_beat, .. } => {
                         tracing::debug!(
                             peer = %from,
                             bpm = format!("{:.1}", remote_bpm),
-                            beat = format!("{:.2}", beat),
+                            beat = format!("{:.2}", remote_beat),
                             "Remote state snapshot"
                         );
+                        // One-shot join-time beat sync: snap our beat clock to the
+                        // remote's on the very first snapshot we receive, before our
+                        // own interval counter has any history. This eliminates the
+                        // persistent 1-interval offset caused by different absolute
+                        // beat counts when Link sessions merge.
+                        if !beat_synced {
+                            beat_synced = true;
+                            info!(
+                                peer = %from,
+                                beat = format!("{:.2}", remote_beat),
+                                "Join-time beat sync — snapping local beat clock to remote"
+                            );
+                            if link_cmd_tx.send(LinkCommand::ForceBeat(remote_beat)).is_err() {
+                                warn!("Link bridge stopped — cannot force beat");
+                            }
+                            // Also reset the interval tracker so the next update()
+                            // fires a fresh boundary at the correct index.
+                            interval.set_config(bars, quantum);
+                        }
                         // Apply tempo if significantly different
                         if (remote_bpm - last_broadcast_bpm).abs() > 0.01 {
                             last_broadcast_bpm = remote_bpm;
@@ -279,6 +300,20 @@ async fn run_peer(
                             size = wire_size,
                             "Audio interval incoming"
                         );
+                    }
+
+                    SyncMessage::IntervalBoundary { index } => {
+                        let local = interval.current_index();
+                        let behind = local.map_or(true, |l| index > l);
+                        if behind {
+                            warn!(
+                                local = ?local,
+                                remote = index,
+                                peer = %from,
+                                "Interval index behind remote — syncing forward"
+                            );
+                            interval.sync_to(index);
+                        }
                     }
                 }
             }
@@ -322,6 +357,7 @@ async fn run_peer(
                         // Check interval boundary
                         if let Some(idx) = interval.update(beat) {
                             info!(interval = idx, beat = format!("{:.1}", beat), ">>> INTERVAL BOUNDARY <<<");
+                            mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
                         }
                     }
 
@@ -339,6 +375,7 @@ async fn run_peer(
                         // Check interval boundary
                         if let Some(idx) = interval.update(beat) {
                             info!(interval = idx, beat = format!("{:.1}", beat), ">>> INTERVAL BOUNDARY <<<");
+                            mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
                         }
                     }
                 }

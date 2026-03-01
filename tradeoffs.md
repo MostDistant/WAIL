@@ -60,6 +60,13 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ## Deferred — Feature Work
 
+### W18. Interval index drifts by 1 when Link sessions have different absolute beat counts
+**Status:** Fixed for join-time via one-shot `ForceBeat`; residual warn suppressed by monotonic `update()`. Residual drift under high-latency still possible.
+**File:** `crates/wail-app/src/main.rs`, `crates/wail-core/src/interval.rs`
+**Problem:** Link syncs tempo and phase but not absolute beat count. On the first `StateSnapshot` received, WAIL calls `forceBeatAtTime` to snap the local beat clock to the remote's. This resolves the join-time offset. Residual `IntervalBoundary` mismatches are handled by monotonic `sync_to` without flapping.
+**Known limitation — same-LAN disruption:** `forceBeatAtTime` propagates to all LAN Link peers. If the joining peer (C) and the existing peers (A, B) share a LAN, C's snap will jolt A and B by approximately `RTT/2 * BPM/60` beats. At 100ms RTT, 120 BPM this is ~0.1 beats — imperceptible. At 500ms RTT it's ~0.5 beats — audible. In the typical WAIL use case (musicians on separate LANs), there is no cross-LAN Link interaction so no disruption occurs.
+**Known limitation — latency compensation:** ForceBeat uses `link.clock_micros()` (local time, now) and `remote_beat` (remote time, past). The beat value is slightly stale by `RTT/2`. A future improvement could add `RTT/2 * BPM/60` beats to compensate, once ClockSync is wired to the Link clock domain.
+
 ### W15. Clock offset computed but never applied
 **Status:** Won't fix — clock domain mismatch
 **File:** `crates/wail-app/src/main.rs:150-153`

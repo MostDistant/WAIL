@@ -59,6 +59,20 @@ impl LinkBridge {
         info!("Ableton Link disabled");
     }
 
+    /// Snap the local beat clock to `beat` at the current Link time.
+    ///
+    /// Uses `forceBeatAtTime` from the Link SDK — an immediate, non-negotiated
+    /// timeline edit. Intended for one-shot join-time sync only; calling it
+    /// repeatedly is disruptive to LAN Link peers.
+    pub fn force_beat(&mut self, beat: f64) {
+        let time = self.link.clock_micros();
+        self.link.capture_app_session_state(&mut self.session_state);
+        self.session_state.force_beat_at_time(beat, time, self.quantum);
+        self.link.commit_app_session_state(&self.session_state);
+        self.echo_guard_until = Some(Instant::now() + ECHO_GUARD_DURATION);
+        info!(beat, "Forced beat position for join-time sync");
+    }
+
     /// Apply a remote tempo change to the local Link session.
     pub fn set_tempo(&mut self, bpm: f64) {
         let time = self.link.clock_micros();
@@ -158,6 +172,9 @@ impl LinkBridge {
                             Some(LinkCommand::SetTempo(bpm)) => {
                                 self.set_tempo(bpm);
                             }
+                            Some(LinkCommand::ForceBeat(beat)) => {
+                                self.force_beat(beat);
+                            }
                             Some(LinkCommand::GetState(tx)) => {
                                 if tx.send(self.state()).is_err() {
                                     debug!("GetState caller dropped receiver");
@@ -177,6 +194,8 @@ impl LinkBridge {
 /// Commands sent to the Link bridge polling task.
 pub enum LinkCommand {
     SetTempo(f64),
+    /// Snap the local beat clock to the given position (join-time sync only).
+    ForceBeat(f64),
     GetState(tokio::sync::oneshot::Sender<LinkState>),
 }
 

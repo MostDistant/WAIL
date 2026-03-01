@@ -56,6 +56,13 @@ pub enum SyncMessage {
         /// Size of the upcoming binary audio message in bytes
         wire_size: u32,
     },
+    /// Interval boundary announcement for cross-peer index synchronisation.
+    /// When a peer crosses a boundary it broadcasts this; receivers adopt the
+    /// index if theirs differs, correcting any drift caused by divergent beat
+    /// positions at Link session merge.
+    IntervalBoundary {
+        index: i64,
+    },
 }
 
 /// Messages exchanged over the WebSocket signaling channel.
@@ -94,4 +101,20 @@ pub enum SignalPayload {
     Offer { sdp: String },
     Answer { sdp: String },
     IceCandidate { candidate: String, sdp_mid: Option<String>, sdp_mline_index: Option<u16> },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_message_interval_boundary_roundtrip() {
+        let msg = SyncMessage::IntervalBoundary { index: 42 };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let decoded: SyncMessage = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            SyncMessage::IntervalBoundary { index } => assert_eq!(index, 42),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
 }
