@@ -146,10 +146,8 @@ jobs:
           New-Item -ItemType Directory -Force dist
           Copy-Item target\release\wail-app.exe dist\
           Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
-          Copy-Item -Recurse target\bundled\wail-plugin.clap dist\wail-plugin.clap
+          Copy-Item target\bundled\wail-plugin.clap dist\
           Copy-Item -Recurse target\bundled\wail-plugin.vst3 dist\wail-plugin.vst3
-          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\wail-plugin.vst3\Contents\x86_64-win\
-          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\wail-plugin.clap\
           if (Test-Path target\release\bundle\nsis\*.exe) { Copy-Item target\release\bundle\nsis\*.exe dist\ }
           if (Test-Path target\release\bundle\msi\*.msi) { Copy-Item target\release\bundle\msi\*.msi dist\ }
 
