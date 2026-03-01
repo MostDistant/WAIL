@@ -119,7 +119,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if (!(Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
-            $tag = (gh api repos/tauri-apps/tauri/releases --jq '[.[] | select(.tag_name | startswith(\"tauri-cli-v\"))][0].tag_name') | Out-String | ForEach-Object { $_.Trim() }
+            $tag = (gh api repos/tauri-apps/tauri/releases --jq '[.[] | select(.tag_name | startswith("tauri-cli-v"))][0].tag_name') | Out-String | ForEach-Object { $_.Trim() }
             gh release download $tag --repo tauri-apps/tauri --pattern "cargo-tauri-x86_64-pc-windows-msvc.zip" --dir $env:TEMP
             Expand-Archive "$env:TEMP\cargo-tauri-x86_64-pc-windows-msvc.zip" -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
           }
