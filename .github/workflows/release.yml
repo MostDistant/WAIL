@@ -34,14 +34,16 @@ jobs:
         run: which cargo-binstall || curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
 
       - name: Install cargo-nih-plug
-        run: which cargo-nih-plug || cargo binstall cargo-nih-plug -y --no-confirm || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
+        run: which cargo-nih-plug || cargo binstall cargo-nih-plug --no-confirm || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 
       - name: Install tauri-cli
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           which cargo-tauri && exit 0
-          TAURI_TAG=$(curl -s https://api.github.com/repos/tauri-apps/tauri/releases | python3 -c "import sys,json; print(next(r['tag_name'] for r in json.load(sys.stdin) if r['tag_name'].startswith('tauri-cli-v')))")
-          curl -fsSL "https://github.com/tauri-apps/tauri/releases/download/${TAURI_TAG}/cargo-tauri-aarch64-apple-darwin.zip" -o /tmp/tauri.zip
-          unzip -o /tmp/tauri.zip -d ~/.cargo/bin/
+          TAURI_TAG=$(gh api repos/tauri-apps/tauri/releases --jq '[.[] | select(.tag_name | startswith("tauri-cli-v"))][0].tag_name')
+          gh release download "$TAURI_TAG" --repo tauri-apps/tauri --pattern "cargo-tauri-aarch64-apple-darwin.zip" --dir /tmp
+          unzip -o /tmp/cargo-tauri-aarch64-apple-darwin.zip -d ~/.cargo/bin/
 
       - name: Build CLI binary
         run: cargo build -p wail-app --release
@@ -108,17 +110,19 @@ jobs:
       - name: Install cargo-nih-plug
         run: |
           if (!(Get-Command cargo-nih-plug -ErrorAction SilentlyContinue)) {
-            cargo binstall cargo-nih-plug -y --no-confirm
+            cargo binstall cargo-nih-plug --no-confirm
             if ($LASTEXITCODE -ne 0) { cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug }
           }
         shell: pwsh
 
       - name: Install tauri-cli
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if (!(Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
-            $tag = (Invoke-RestMethod https://api.github.com/repos/tauri-apps/tauri/releases) | Where-Object { $_.tag_name -like 'tauri-cli-v*' } | Select-Object -First 1 -ExpandProperty tag_name
-            Invoke-WebRequest "https://github.com/tauri-apps/tauri/releases/download/$tag/cargo-tauri-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP\tauri.zip"
-            Expand-Archive "$env:TEMP\tauri.zip" -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
+            $tag = (gh api repos/tauri-apps/tauri/releases --jq '[.[] | select(.tag_name | startswith(\"tauri-cli-v\"))][0].tag_name') | Out-String | ForEach-Object { $_.Trim() }
+            gh release download $tag --repo tauri-apps/tauri --pattern "cargo-tauri-x86_64-pc-windows-msvc.zip" --dir $env:TEMP
+            Expand-Archive "$env:TEMP\cargo-tauri-x86_64-pc-windows-msvc.zip" -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
           }
         shell: pwsh
 
