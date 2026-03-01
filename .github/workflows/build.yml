@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install opus via vcpkg
+        run: vcpkg install opus:x64-windows
+
+      - name: Install pkg-config
+        run: choco install pkgconfiglite -y
+
+      - name: Build
+        env:
+          PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
+        run: cargo build -p wail-app -p wail-signaling --release
+
+      - name: Collect artifacts
+        run: |
+          mkdir dist
+          copy target\release\wail-app.exe dist\
+          copy target\release\wail-signaling.exe dist\
+          copy C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: wail-windows-x64
+          path: dist\

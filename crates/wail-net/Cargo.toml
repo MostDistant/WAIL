@@ -1,0 +1,23 @@
+[package]
+name = "wail-net"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wail-core = { path = "../wail-core" }
+wail-audio = { path = "../wail-audio" }
+webrtc = "0.11"
+webrtc-ice = "0.11"
+bytes = "1"
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+wail-signaling = { path = "../wail-signaling" }
+tracing-subscriber = { workspace = true }

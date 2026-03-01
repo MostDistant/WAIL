@@ -1,0 +1,15 @@
+[package]
+name = "wail-plugin"
+version.workspace = true
+edition.workspace = true
+description = "WAIL CLAP/VST3 plugin - intervalic audio over WebRTC"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wail-audio = { path = "../wail-audio" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+crossbeam-channel = "0.5"
+tracing = { workspace = true }
+anyhow = { workspace = true }

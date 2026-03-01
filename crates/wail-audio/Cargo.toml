@@ -1,0 +1,11 @@
+[package]
+name = "wail-audio"
+version.workspace = true
+edition.workspace = true
+description = "Audio interval encoding/decoding for WAIL (Opus over WebRTC DataChannels)"
+
+[dependencies]
+audiopus = "0.3.0-rc.0"
+serde = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
