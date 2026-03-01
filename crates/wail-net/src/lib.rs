@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 
 use wail_core::protocol::{SignalMessage, SignalPayload, SyncMessage};
@@ -33,7 +34,7 @@ pub fn ice_servers_with_turn(turn_url: &str, username: &str, credential: &str) -
             urls: vec![turn_url.to_string()],
             username: username.to_string(),
             credential: credential.to_string(),
-            ..Default::default()
+            credential_type: RTCIceCredentialType::Password,
         },
     ]
 }
@@ -80,7 +81,25 @@ impl PeerMesh {
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
-        let signaling = SignalingClient::connect(server_url, room, peer_id, password).await?;
+        Self::connect_with_options(server_url, room, peer_id, password, ice_servers, 5_000).await
+    }
+
+    /// Connect with custom ICE servers and signaling poll interval.
+    pub async fn connect_with_options(
+        server_url: &str,
+        room: &str,
+        peer_id: &str,
+        password: &str,
+        ice_servers: Vec<RTCIceServer>,
+        poll_interval_ms: u64,
+    ) -> Result<(
+        Self,
+        mpsc::UnboundedReceiver<(String, SyncMessage)>,
+        mpsc::Receiver<(String, Vec<u8>)>,
+    )> {
+        let signaling = SignalingClient::connect_with_poll_interval(
+            server_url, room, peer_id, password, poll_interval_ms,
+        ).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(64);
 

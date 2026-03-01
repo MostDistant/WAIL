@@ -38,8 +38,19 @@ impl SignalingClient {
     ///
     /// Sends a `join` request, then spawns a background polling loop that:
     /// - Drains outgoing signals and POSTs them as `?action=signal`
-    /// - Polls `?action=poll` every 200ms for incoming messages
+    /// - Polls `?action=poll` at the configured interval
     pub async fn connect(base_url: &str, room: &str, peer_id: &str, password: &str) -> Result<Self> {
+        Self::connect_with_poll_interval(base_url, room, peer_id, password, 5_000).await
+    }
+
+    /// Connect with a custom poll interval (milliseconds).
+    pub async fn connect_with_poll_interval(
+        base_url: &str,
+        room: &str,
+        peer_id: &str,
+        password: &str,
+        poll_interval_ms: u64,
+    ) -> Result<Self> {
         let client = Client::new();
         let base = base_url.trim_end_matches('/').to_string();
 
@@ -84,7 +95,7 @@ impl SignalingClient {
         let poll_peer = peer_id.to_string();
         tokio::spawn(async move {
             let mut last_seq: i64 = 0;
-            let base_poll_ms: u64 = 5_000;
+            let base_poll_ms: u64 = poll_interval_ms;
             let mut current_poll_ms: u64 = base_poll_ms;
             let max_backoff_ms: u64 = 30_000;
 

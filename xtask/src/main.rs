@@ -331,6 +331,7 @@ fn run_turn(args: &[String]) -> Result<()> {
     let user = get_flag("--user", "wail:wailpass");
     let min_port = get_flag("--min-port", "49152");
     let max_port = get_flag("--max-port", "49252");
+    let realm = "wail";
 
     // Detect local IP
     let local_ip = detect_local_ip().unwrap_or_else(|| "0.0.0.0".to_string());
@@ -342,19 +343,30 @@ fn run_turn(args: &[String]) -> Result<()> {
         local_ip.clone()
     });
 
+    let username = user.split(':').next().unwrap_or("wail");
+    let password = user.split(':').nth(1).unwrap_or("wailpass");
+
     println!("Local IP:  {local_ip}");
     println!("Public IP: {public_ip}");
     println!("TURN port: {port}");
     println!("Relay ports: {min_port}-{max_port}");
-    println!("Credentials: {user}");
+    println!("Credentials: {username}:{password}");
     println!();
     println!("Configure your WAIL client with:");
     println!("  TURN Server:   turn:{public_ip}:{port}");
-    println!("  TURN Username: {}", user.split(':').next().unwrap_or("wail"));
-    println!("  TURN Password: {}", user.split(':').nth(1).unwrap_or("wailpass"));
+    println!("  TURN Username: {username}");
+    println!("  TURN Password: {password}");
     println!();
     println!("Make sure to forward ports {port} (TCP+UDP) and {min_port}-{max_port} (UDP) on your router.");
     println!();
+
+    // Compute lt-cred-mech key: MD5(username:realm:password)
+    let key = {
+        use std::io::Write;
+        let mut ctx = md5::Context::new();
+        write!(ctx, "{username}:{realm}:{password}").unwrap();
+        format!("0x{:x}", ctx.compute())
+    };
 
     // Find turnserver binary
     let turnserver = which_turnserver()?;
@@ -366,8 +378,8 @@ fn run_turn(args: &[String]) -> Result<()> {
         .arg(format!("--listening-port={port}"))
         .arg(format!("--listening-ip={local_ip}"))
         .arg(format!("--external-ip={public_ip}/{local_ip}"))
-        .arg("--realm=wail")
-        .arg(format!("--user={user}"))
+        .arg(format!("--realm={realm}"))
+        .arg(format!("--user={username}:{key}"))
         .arg("--lt-cred-mech")
         .arg("--no-tls")
         .arg("--no-dtls")
