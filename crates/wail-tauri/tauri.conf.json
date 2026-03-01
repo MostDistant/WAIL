@@ -1,6 +1,6 @@
 {
   "productName": "WAIL",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.wail.desktop",
   "build": {
     "frontendDist": "ui"
@@ -18,9 +18,9 @@
     ]
   },
   "bundle": {
-    "resources": {
-      "../../target/bundled/wail-plugin.clap": "plugins/wail-plugin.clap",
-      "../../target/bundled/wail-plugin.vst3": "plugins/wail-plugin.vst3"
-    }
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
   }
 }
