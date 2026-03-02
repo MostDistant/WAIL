@@ -322,10 +322,11 @@ impl PeerMesh {
 
         tokio::spawn(async move {
             while let Some(data) = rx.recv().await {
+                info!(peer = %rid, bytes = data.len(), "[AUDIO READER] forwarding to mesh");
                 match audio_tx.try_send((rid.clone(), data)) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        debug!(peer = %rid, "Mesh audio channel full — dropping frame");
+                        info!(peer = %rid, "Mesh audio channel full — dropping frame");
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => break,
                 }

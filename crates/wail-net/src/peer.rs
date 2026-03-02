@@ -5,9 +5,12 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
-/// Max payload per DataChannel message. SCTP default max is 64KB;
-/// use 16KB to stay well under the limit with room for overhead.
-const CHUNK_MAX: usize = 16384;
+/// Max payload per DataChannel message.  Keep each chunk small enough
+/// to fit in a single DTLS record / UDP datagram (~1200 bytes MTU on
+/// typical internet paths).  webrtc-rs SCTP fragmentation of large
+/// messages is unreliable over real networks, so we chunk at the
+/// application level instead.
+const CHUNK_MAX: usize = 1200;
 /// Magic bytes for chunked audio messages.
 const CHUNK_MAGIC: &[u8; 4] = b"WACH";
 const CHUNK_HEADER_SIZE: usize = 8; // 4 magic + 4 total_len
@@ -57,14 +60,16 @@ fn make_audio_handler(
                 if state.buffer.len() >= state.expected_len {
                     let complete = std::mem::take(&mut state.buffer);
                     *guard = None;
+                    info!("[DC AUDIO IN] reassembled chunked {} bytes", complete.len());
                     if tx.try_send(complete).is_err() {
-                        debug!("Audio channel full — dropping reassembled frame");
+                        info!("[DC AUDIO IN] channel full — dropping reassembled frame");
                     }
                 }
             } else {
                 // Non-chunked message (small enough to fit in one DC message)
+                info!("[DC AUDIO IN] non-chunked {} bytes", data.len());
                 if tx.try_send(data).is_err() {
-                    debug!("Audio channel full — dropping frame");
+                    info!("[DC AUDIO IN] channel full — dropping frame");
                 }
             }
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
@@ -321,6 +326,7 @@ impl PeerConnection {
             Some(dc) if dc.ready_state() == RTCDataChannelState::Open => {
                 if data.len() <= CHUNK_MAX {
                     // Fits in a single message — send as-is (no header)
+                    info!(peer = %self.remote_peer_id, bytes = data.len(), "[DC AUDIO OUT] sending single message");
                     dc.send(&Bytes::copy_from_slice(data)).await?;
                 } else {
                     // Chunk it: each chunk = [WACH][total_len u32 LE][payload]
@@ -343,11 +349,11 @@ impl PeerConnection {
                     );
                 }
             }
-            Some(_) => {
-                debug!(peer = %self.remote_peer_id, "Audio DataChannel not open yet — data dropped");
+            Some(dc) => {
+                info!(peer = %self.remote_peer_id, state = ?dc.ready_state(), "Audio DataChannel not open — data dropped");
             }
             None => {
-                debug!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");
+                info!(peer = %self.remote_peer_id, "Audio DataChannel not ready — data dropped");
             }
         }
         Ok(())
