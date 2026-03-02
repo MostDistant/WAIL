@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.3 (2026-03-02)
+
+### Features
+
+- add automatic releases on PR merge to main (#30)
+- add public rooms with discovery UI (#31)
+
+### Fixes
+
+- strip nested directory from knope tarball in CI (#32)
+- split release CI into two phases for branch protection (#33)
+
 ## 0.4.2 (2026-03-02)
 
 ### Features
