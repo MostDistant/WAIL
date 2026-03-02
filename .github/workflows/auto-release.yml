@@ -1,22 +1,21 @@
-name: Auto Release
+name: Prepare Release
 
 on:
   push:
     branches: [main]
 
 concurrency:
-  group: auto-release
-  cancel-in-progress: false
+  group: prepare-release
+  cancel-in-progress: true
 
 jobs:
-  release:
-    # Skip the version-bump commit that knope pushes.
-    # Belt-and-suspenders: GITHUB_TOKEN pushes don't trigger workflows anyway.
-    if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
+  prepare-release:
+    # Skip if this push is the release PR being merged
+    if: "!contains(github.event.head_commit.message, 'chore: prepare release')"
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      actions: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,12 +39,10 @@ jobs:
           HAS_CHANGESETS=false
           HAS_CONVENTIONAL=false
 
-          # Check for changeset files
           if ls .changeset/*.md 1>/dev/null 2>&1; then
             HAS_CHANGESETS=true
           fi
 
-          # Check for conventional commits since last tag
           if [ -n "$LAST_TAG" ]; then
             RANGE="${LAST_TAG}..HEAD"
           else
@@ -62,16 +59,31 @@ jobs:
             printf -- '---\ntype: patch\n---\n\n%s\n' "$COMMIT_MSG" > .changeset/auto-patch.md
           fi
 
-      - name: Run knope release
+      - name: Run knope prepare-release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: knope release
+        run: knope prepare-release
 
-      - name: Trigger release build
+      - name: Create or update release PR
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//;s/"//')
-          TAG="v${VERSION}"
-          echo "Triggering release build for ${TAG}"
-          gh workflow run release.yml --ref "${TAG}" -f tag="${TAG}"
+          EXISTING_PR=$(gh pr list --head release --base main --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          BODY="Automated release preparation for v${VERSION}.
+
+          Merging this PR will create GitHub release v${VERSION} and trigger artifact builds."
+
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr edit "$EXISTING_PR" \
+              --title "chore: prepare release v${VERSION}" \
+              --body "$BODY"
+            echo "Updated existing PR #${EXISTING_PR}"
+          else
+            gh pr create \
+              --head release \
+              --base main \
+              --title "chore: prepare release v${VERSION}" \
+              --body "$BODY"
+          fi

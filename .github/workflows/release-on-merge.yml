@@ -1,0 +1,48 @@
+name: Release on Merge
+
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install knope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -sSfL "https://github.com/knope-dev/knope/releases/latest/download/knope-x86_64-unknown-linux-musl.tgz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin/
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: knope release
+
+      - name: Trigger release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+          TAG="v${VERSION}"
+          echo "Triggering release build for ${TAG}"
+          gh workflow run release.yml --ref "${TAG}" -f tag="${TAG}"
+
+      - name: Delete release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/${{ github.repository }}/git/refs/heads/release -X DELETE || true
