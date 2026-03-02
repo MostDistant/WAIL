@@ -145,6 +145,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist
           Copy-Item target\release\wail-app.exe dist\
+          Copy-Item target\release\wail-tauri.exe dist\
           Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
           Copy-Item target\bundled\wail-plugin.clap dist\
           Copy-Item -Recurse target\bundled\wail-plugin.vst3 dist\wail-plugin.vst3
