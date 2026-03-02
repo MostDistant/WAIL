@@ -74,15 +74,17 @@ impl Plugin for WailRecvPlugin {
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        // Stereo in/out with 7 per-peer aux stereo outputs
+        // Stereo in/out with 15 per-peer aux stereo outputs
         AudioIOLayout {
             main_input_channels: NonZeroU32::new(2),
             main_output_channels: NonZeroU32::new(2),
-            aux_output_ports: &[new_nonzero_u32(2); 7],
+            aux_output_ports: &[new_nonzero_u32(2); 15],
             names: PortNames {
                 aux_outputs: &[
                     "Peer 1", "Peer 2", "Peer 3", "Peer 4",
-                    "Peer 5", "Peer 6", "Peer 7",
+                    "Peer 5", "Peer 6", "Peer 7", "Peer 8",
+                    "Peer 9", "Peer 10", "Peer 11", "Peer 12",
+                    "Peer 13", "Peer 14", "Peer 15",
                 ],
                 ..PortNames::const_default()
             },

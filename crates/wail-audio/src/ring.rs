@@ -1,5 +1,5 @@
 /// Maximum number of remote peers with independent audio channels.
-pub const MAX_REMOTE_PEERS: usize = 7;
+pub const MAX_REMOTE_PEERS: usize = 15;
 
 /// Per-peer isolated playback slot.
 pub struct PeerSlot {

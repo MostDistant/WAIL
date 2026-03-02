@@ -93,3 +93,12 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 | I5 | `now_us()` cast u128→i64 overflows after 292 years | `crates/wail-core/src/clock.rs:36` | Open |
 | I6 | Median uses upper-median for even-length arrays | `crates/wail-core/src/clock.rs:87` | Open |
 | I7 | Echo guard 150ms window suppresses legit fast tempo changes | `crates/wail-core/src/link.rs:89-94` | Open |
+| I9 | DAW aux output ports show "Peer 1–15" instead of actual peer display names | `crates/wail-plugin-recv/src/lib.rs:83-87` | Open |
+
+### I9. Static peer names in DAW aux outputs
+**Status:** Open — plugin API limitation
+**File:** `crates/wail-plugin-recv/src/lib.rs:83-87`
+**Problem:** DAW shows "Peer 1", "Peer 2", etc. instead of the peer's chosen display name (e.g. "Ringo"). Peer display names already flow through the protocol (`SyncMessage::Hello.display_name`) and are tracked in the Tauri session, but cannot be surfaced in DAW port labels.
+**Root cause:** nih_plug `PortNames` are `&'static str` (compile-time only). VST3 has no bus rename API. CLAP has `host.audio_ports->rescan(RESCAN_NAMES)` but nih_plug doesn't expose it.
+**Workaround:** Show "Peer 1 = Ringo" mapping in wail-app UI so users know which aux output corresponds to which musician.
+**Fix when ready:** Upstream nih_plug enhancement to expose CLAP's `rescan(RESCAN_NAMES)`, or use CLAP's `extensible_audio_ports` draft extension for dynamic port creation with correct names.
