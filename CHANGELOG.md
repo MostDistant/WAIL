@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 (2026-03-02)
+
+### Features
+
+- add Linux support (#27)
+
 ## 0.4.1 (2026-03-02)
 
 ### Fixes
