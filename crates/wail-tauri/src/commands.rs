@@ -15,14 +15,40 @@ pub struct JoinResult {
     pub bpm: f64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PublicRoomInfo {
+    pub room: String,
+    pub peer_count: u32,
+    pub bpm: Option<f64>,
+    pub display_names: Vec<String>,
+    pub created_at: i64,
+}
+
+#[tauri::command]
+pub async fn list_public_rooms(server: String) -> Result<Vec<PublicRoomInfo>, String> {
+    let rooms = wail_net::signaling::list_public_rooms(&server)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(rooms
+        .into_iter()
+        .map(|r| PublicRoomInfo {
+            room: r.room,
+            peer_count: r.peer_count,
+            bpm: r.bpm,
+            display_names: r.display_names,
+            created_at: r.created_at,
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub fn join_room(
     app: tauri::AppHandle,
     state: State<'_, SessionState>,
     server: String,
     room: String,
-    password: String,
-    display_name: Option<String>,
+    password: Option<String>,
+    display_name: String,
     bpm: Option<f64>,
     bars: Option<u32>,
     quantum: Option<f64>,
