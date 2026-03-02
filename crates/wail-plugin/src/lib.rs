@@ -18,6 +18,10 @@ use wail_audio::{
 /// Default IPC address (overridable via WAIL_IPC_ADDR env var).
 const DEFAULT_IPC_ADDR: &str = "127.0.0.1:9191";
 
+const BARS: u32 = 4;
+const QUANTUM: f64 = 4.0;
+const BITRATE_KBPS: u32 = 128;
+
 /// Raw completed interval with config snapshot, sent from audio thread to IPC
 /// thread for Opus encoding (keeps Opus off the real-time audio callback).
 struct RawInterval {
@@ -145,9 +149,9 @@ impl Plugin for WailPlugin {
         let bridge = AudioBridge::new(
             buffer_config.sample_rate as u32,
             channels,
-            self.params.bars.value() as u32,
-            self.params.quantum(),
-            self.params.bitrate_kbps.value() as u32,
+            BARS,
+            QUANTUM,
+            BITRATE_KBPS,
         );
 
         // Pre-allocate reusable audio buffers (max_buffer_size * channels)
@@ -178,7 +182,7 @@ impl Plugin for WailPlugin {
 
         let ipc_sample_rate = buffer_config.sample_rate as u32;
         let ipc_channels = channels;
-        let ipc_bitrate = self.params.bitrate_kbps.value() as u32;
+        let ipc_bitrate = BITRATE_KBPS;
 
         std::thread::Builder::new()
             .name("wail-ipc".into())
@@ -191,7 +195,7 @@ impl Plugin for WailPlugin {
             "WAIL plugin initialized: {}Hz, {} channels, {} bars",
             buffer_config.sample_rate,
             channels,
-            self.params.bars.value()
+            BARS
         );
 
         true
@@ -235,24 +239,16 @@ impl Plugin for WailPlugin {
         };
         self.cumulative_samples += num_samples as u64;
 
-        let send_enabled = self.params.send_enabled.value();
-        let receive_enabled = self.params.receive_enabled.value();
-        let volume = self.params.volume.value();
-
         if let Ok(mut bridge_guard) = self.bridge.try_lock() {
             if let Some(ref mut bridge) = *bridge_guard {
-                // Update interval config if params changed
-                bridge.update_config(
-                    self.params.bars.value() as u32,
-                    self.params.quantum(),
-                    bpm,
-                );
+                // Update interval config if bpm changed
+                bridge.update_config(BARS, QUANTUM, bpm);
 
                 // Interleave input into pre-allocated buffer (zeros if not recording)
                 let buf_size = num_samples * num_channels as usize;
                 ensure_buf(&mut self.interleave_buf, buf_size);
                 let interleave = &mut self.interleave_buf[..buf_size];
-                if send_enabled && playing {
+                if playing {
                     for sample_idx in 0..num_samples {
                         for ch in 0..num_channels as usize {
                             interleave[sample_idx * num_channels as usize + ch] =
@@ -281,12 +277,10 @@ impl Plugin for WailPlugin {
                 });
 
                 // Mix playback into DAW main output
-                if receive_enabled {
-                    for sample_idx in 0..num_samples {
-                        for ch in 0..num_channels as usize {
-                            let pb_idx = sample_idx * num_channels as usize + ch;
-                            buffer.as_slice()[ch][sample_idx] += playback[pb_idx] * volume;
-                        }
+                for sample_idx in 0..num_samples {
+                    for ch in 0..num_channels as usize {
+                        let pb_idx = sample_idx * num_channels as usize + ch;
+                        buffer.as_slice()[ch][sample_idx] += playback[pb_idx];
                     }
                 }
 
@@ -306,7 +300,7 @@ impl Plugin for WailPlugin {
                     for sample_idx in 0..n {
                         for ch in 0..aux_ch.min(num_channels as usize) {
                             let pb_idx = sample_idx * num_channels as usize + ch;
-                            aux_buf.as_slice()[ch][sample_idx] = peer_buf[pb_idx] * volume;
+                            aux_buf.as_slice()[ch][sample_idx] = peer_buf[pb_idx];
                         }
                     }
                 }
