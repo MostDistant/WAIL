@@ -167,15 +167,15 @@ jobs:
       - name: Zip platform artifacts
         run: |
           cd wail-release-macos/dist && zip -r ../../wail-macos-x64.zip . && cd ../..
-          cd wail-release-windows/dist && zip -r ../../wail-windows-x64.zip . && cd ..
+          cd wail-release-windows && zip -r ../wail-windows-x64.zip . && cd ..
 
       - name: Find individual installers
         id: files
         run: |
           echo "pkg=$(ls wail-release-macos/target/wail-plugin-*-macos.pkg 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
           echo "dmg=$(ls wail-release-macos/dist/*.dmg 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
-          echo "nsis=$(ls wail-release-windows/dist/*.exe 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
-          echo "msi=$(ls wail-release-windows/dist/*.msi 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
+          echo "nsis=$(ls wail-release-windows/*.exe 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
+          echo "msi=$(ls wail-release-windows/*.msi 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v2
         with:
