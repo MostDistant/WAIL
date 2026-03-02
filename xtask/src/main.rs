@@ -167,7 +167,12 @@ fn install_plugin(args: &[String]) -> Result<()> {
 
 fn package_plugin(args: &[String]) -> Result<()> {
     #[cfg(not(target_os = "macos"))]
-    bail!("package-plugin is only supported on macOS");
+    {
+        let _ = args;
+        println!("package-plugin is only supported on macOS (creates .pkg installer).");
+        println!("On Linux, use `cargo xtask install-plugin` to install plugins to ~/.clap and ~/.vst3.");
+        return Ok(());
+    }
 
     #[cfg(target_os = "macos")]
     {
@@ -350,24 +355,52 @@ fn which_turnserver() -> Result<String> {
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
-    bail!("coturn not found. Install with: brew install coturn")
+    #[cfg(target_os = "macos")]
+    bail!("coturn not found. Install with: brew install coturn");
+    #[cfg(target_os = "linux")]
+    bail!("coturn not found. Install with: sudo apt install coturn");
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    bail!("coturn not found. See https://github.com/coturn/coturn for installation instructions.")
 }
 
 fn detect_local_ip() -> Option<String> {
-    // Try en0 first (Wi-Fi on macOS), then en1
-    for iface in &["en0", "en1"] {
-        let output = Command::new("ipconfig")
-            .args(["getifaddr", iface])
-            .output()
-            .ok()?;
-        if output.status.success() {
-            let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !ip.is_empty() {
-                return Some(ip);
+    #[cfg(target_os = "macos")]
+    {
+        // Try en0 first (Wi-Fi on macOS), then en1
+        for iface in &["en0", "en1"] {
+            let output = Command::new("ipconfig")
+                .args(["getifaddr", iface])
+                .output()
+                .ok()?;
+            if output.status.success() {
+                let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !ip.is_empty() {
+                    return Some(ip);
+                }
             }
         }
+        None
     }
-    None
+
+    #[cfg(target_os = "linux")]
+    {
+        // hostname -I returns space-separated non-loopback IPs
+        let output = Command::new("hostname").arg("-I").output().ok()?;
+        if output.status.success() {
+            let ips = String::from_utf8_lossy(&output.stdout);
+            if let Some(ip) = ips.split_whitespace().next() {
+                if !ip.is_empty() {
+                    return Some(ip.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
 }
 
 fn detect_public_ip() -> Option<String> {

@@ -10,6 +10,8 @@ Download the latest release from the [Releases page](https://github.com/quasor/W
 
 **Windows** — Run the NSIS installer. Plugins are bundled as CLAP and VST3 files — copy them to your DAW's plugin directory.
 
+**Linux** — Download the AppImage and make it executable (`chmod +x WAIL_*.AppImage`), or install the `.deb` package with `sudo dpkg -i wail_*.deb`. Copy the plugin files to `~/.clap/` and `~/.vst3/`.
+
 > **Important:** Enable Ableton Link in your DAW before using WAIL. In Ableton Live, go to Preferences > Link, Tempo, MIDI and turn on "Show Link Toggle" then enable Link. Other DAWs have similar settings — check your DAW's documentation for Link support.
 
 ## Components
@@ -61,6 +63,12 @@ val-town/
 ## Build from source
 
 Requires: **Rust 1.75+**, CMake 3.14+, a C++ compiler, and libopus-dev.
+
+**Linux build dependencies (Debian/Ubuntu):**
+```sh
+sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  librsvg2-dev libxdo-dev libssl-dev patchelf libopus-dev cmake g++
+```
 
 ```sh
 git submodule update --init --recursive   # fetch Ableton Link SDK
