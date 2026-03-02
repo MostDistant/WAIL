@@ -30,7 +30,15 @@ val-town/
 └── signaling.ts      HTTP signaling server (deployed to Val Town)
 ```
 
-## Build
+## Install
+
+Download the latest release from the [Releases page](https://github.com/quasor/WAIL/releases).
+
+**macOS** — Open the DMG and drag WAIL to Applications. For the audio plugins, run the included `.pkg` installer.
+
+**Windows** — Run the NSIS installer. Plugins are bundled as CLAP and VST3 files — copy them to your DAW's plugin directory.
+
+## Build from source
 
 Requires: **Rust 1.75+**, CMake 3.14+, a C++ compiler, and libopus-dev.
 
