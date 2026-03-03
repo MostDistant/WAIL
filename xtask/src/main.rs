@@ -14,7 +14,8 @@ cargo xtask <TASK> [OPTIONS]
 
 TASKS:
   install         Build and install plugins to system plugin directories
-  build-plugin    Build the CLAP and VST3 plugin bundles
+  build-plugin    Build the CLAP and VST3 plugin bundles (requires cargo-nih-plug)
+  bundle-plugin   Build and assemble plugin bundles without cargo-nih-plug
   install-plugin  Build (optional) and install to system plugin directories
   package-plugin  Create a macOS .pkg installer (macOS only)
   run-tauri       Run the Tauri desktop app in dev mode
@@ -24,7 +25,7 @@ TASKS:
 OPTIONS (install):
   --no-plugin-build  Skip plugin build; use existing bundles in target/bundled/
 
-OPTIONS (build-plugin, install-plugin):
+OPTIONS (build-plugin, bundle-plugin, install-plugin):
   --debug         Build in debug mode instead of release
 
 OPTIONS (install-plugin):
@@ -43,6 +44,7 @@ EXAMPLES:
   cargo xtask install
   cargo xtask install --no-plugin-build
   cargo xtask build-plugin
+  cargo xtask bundle-plugin
   cargo xtask install-plugin
   cargo xtask install-plugin --no-build
   cargo xtask package-plugin
@@ -67,6 +69,10 @@ fn main() -> Result<()> {
         Some("build-plugin") => {
             args.remove(0);
             build_plugin(&args)
+        }
+        Some("bundle-plugin") => {
+            args.remove(0);
+            bundle_plugin(&args)
         }
         Some("install-plugin") => {
             args.remove(0);
@@ -122,6 +128,171 @@ fn build_plugin(args: &[String]) -> Result<()> {
     println!("  target/bundled/wail-plugin-recv.vst3");
     println!("\nBuilt with profile: {profile}");
     Ok(())
+}
+
+/// Assemble CLAP and VST3 plugin bundles without requiring an external
+/// `cargo-nih-plug` installation. Intended for CI and Homebrew formula builds.
+///
+/// On macOS each format is a bundle directory:
+///   PluginName.clap/Contents/MacOS/PluginName + Info.plist
+///   PluginName.vst3/Contents/MacOS/PluginName + Info.plist
+///
+/// On Linux, CLAP is a flat renamed .so; VST3 uses the x86_64-linux layout.
+/// On Windows, CLAP is a flat renamed .dll; VST3 uses the x86_64-win layout.
+fn bundle_plugin(args: &[String]) -> Result<()> {
+    let release = !args.contains(&"--debug".to_string());
+    let profile = if release { "release" } else { "debug" };
+
+    let root = workspace_dir();
+    let version = cargo_version(&root)?;
+
+    // (cargo-package-name, lib-stem, display-name, bundle-id-prefix)
+    let plugins: &[(&str, &str, &str, &str)] = &[
+        (
+            "wail-plugin-send",
+            "wail_plugin_send",
+            "WAIL Send",
+            "com.wail.wail-plugin-send",
+        ),
+        (
+            "wail-plugin-recv",
+            "wail_plugin_recv",
+            "WAIL Recv",
+            "com.wail.wail-plugin-recv",
+        ),
+    ];
+
+    for &(pkg, lib, display_name, bundle_id) in plugins {
+        println!("Building {pkg} ({profile})...");
+        let mut cmd = Command::new(env!("CARGO"));
+        cmd.args(["build", "--package", pkg, "--lib"]);
+        if release {
+            cmd.arg("--release");
+        }
+        cmd.current_dir(&root);
+        run_cmd(cmd).with_context(|| format!("cargo build {pkg} failed"))?;
+
+        let out = root.join("target").join(profile);
+        let bundled = root.join("target/bundled");
+        fs::create_dir_all(&bundled)?;
+
+        #[cfg(target_os = "macos")]
+        {
+            let dylib = out.join(format!("lib{lib}.dylib"));
+            if !dylib.exists() {
+                bail!("dylib not found: {}", dylib.display());
+            }
+            for ext in ["clap", "vst3"] {
+                let bundle = bundled.join(format!("{pkg}.{ext}"));
+                let macos_dir = bundle.join("Contents/MacOS");
+                if bundle.exists() {
+                    fs::remove_dir_all(&bundle)?;
+                }
+                fs::create_dir_all(&macos_dir)?;
+                fs::copy(&dylib, macos_dir.join(pkg))
+                    .with_context(|| format!("copy dylib into {pkg}.{ext}"))?;
+                fs::write(
+                    bundle.join("Contents/Info.plist"),
+                    make_plist(pkg, display_name, bundle_id, ext, &version),
+                )?;
+                println!("  Bundled: {}", bundle.display());
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let so = out.join(format!("lib{lib}.so"));
+            if !so.exists() {
+                bail!("shared library not found: {}", so.display());
+            }
+            // CLAP on Linux: flat renamed .so
+            let clap = bundled.join(format!("{pkg}.clap"));
+            if clap.exists() {
+                fs::remove_file(&clap)?;
+            }
+            fs::copy(&so, &clap)?;
+            println!("  Bundled: {}", clap.display());
+            // VST3 on Linux: bundle with x86_64-linux sub-dir
+            let vst3 = bundled.join(format!("{pkg}.vst3"));
+            if vst3.exists() {
+                fs::remove_dir_all(&vst3)?;
+            }
+            let vst3_dir = vst3.join("Contents/x86_64-linux");
+            fs::create_dir_all(&vst3_dir)?;
+            fs::copy(&so, vst3_dir.join(format!("{pkg}.so")))?;
+            println!("  Bundled: {}", vst3.display());
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let dll = out.join(format!("{lib}.dll"));
+            if !dll.exists() {
+                bail!("dll not found: {}", dll.display());
+            }
+            // CLAP on Windows: flat renamed .dll
+            let clap = bundled.join(format!("{pkg}.clap"));
+            if clap.exists() {
+                fs::remove_file(&clap)?;
+            }
+            fs::copy(&dll, &clap)?;
+            println!("  Bundled: {}", clap.display());
+            // VST3 on Windows: bundle with x86_64-win sub-dir
+            let vst3 = bundled.join(format!("{pkg}.vst3"));
+            if vst3.exists() {
+                fs::remove_dir_all(&vst3)?;
+            }
+            let vst3_dir = vst3.join("Contents/x86_64-win");
+            fs::create_dir_all(&vst3_dir)?;
+            fs::copy(&dll, vst3_dir.join(format!("{pkg}.vst3")))?;
+            println!("  Bundled: {}", vst3.display());
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        bail!("bundle-plugin is not supported on this platform");
+    }
+
+    println!("\nPlugin bundles (no cargo-nih-plug required):");
+    println!("  target/bundled/wail-plugin-send.clap");
+    println!("  target/bundled/wail-plugin-send.vst3");
+    println!("  target/bundled/wail-plugin-recv.clap");
+    println!("  target/bundled/wail-plugin-recv.vst3");
+    println!("Built with profile: {profile}");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn make_plist(
+    executable: &str,
+    display_name: &str,
+    bundle_id: &str,
+    ext: &str,
+    version: &str,
+) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>{executable}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{bundle_id}.{ext}</string>
+    <key>CFBundleName</key>
+    <string>{display_name}</string>
+    <key>CFBundleDisplayName</key>
+    <string>{display_name}</string>
+    <key>CFBundlePackageType</key>
+    <string>BNDL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>MIT</string>
+</dict>
+</plist>
+"#
+    )
 }
 
 fn install_plugin(args: &[String]) -> Result<()> {

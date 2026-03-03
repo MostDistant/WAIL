@@ -11,6 +11,44 @@ on:
         type: string
 
 jobs:
+  # Build a "fat" source tarball that includes the vendor/link git submodule.
+  # GitHub's auto-generated archives omit submodule contents, so we produce our
+  # own tarball and upload it as a release artifact.  The Homebrew formula uses
+  # this tarball as its `url` so that the Ableton Link SDK is available during
+  # `brew install --build-from-source`.
+  build-homebrew-tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          submodules: recursive
+
+      - name: Create fat source tarball
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          STAGING="wail-${VERSION}"
+          # Export the repo tree (excludes .git) into a named staging directory
+          mkdir -p "/tmp/${STAGING}"
+          git archive --format=tar HEAD | tar -x -C "/tmp/${STAGING}"
+          # Overlay the submodule contents (git archive omits them)
+          cp -r vendor/link "/tmp/${STAGING}/vendor/link"
+          # Package and compute checksum
+          tar -czf "wail-${VERSION}-src.tar.gz" -C /tmp "${STAGING}"
+          sha256sum "wail-${VERSION}-src.tar.gz" | awk '{print $1}' > "wail-${VERSION}-src.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wail-homebrew-src
+          path: |
+            wail-*-src.tar.gz
+            wail-*-src.tar.gz.sha256
+
   build-macos:
     runs-on: macos-latest
     steps:
@@ -232,7 +270,7 @@ jobs:
           path: dist/
 
   create-release:
-    needs: [build-macos, build-windows, build-linux]
+    needs: [build-macos, build-windows, build-linux, build-homebrew-tarball]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -243,10 +281,12 @@ jobs:
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            TAG="${{ inputs.tag }}"
           else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            TAG="${GITHUB_REF#refs/tags/}"
           fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Zip platform artifacts
         run: |
@@ -263,6 +303,7 @@ jobs:
           echo "msi=$(ls wail-release-windows/*.msi 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "appimage=$(ls wail-release-linux/*.AppImage 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "deb=$(ls wail-release-linux/*.deb 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
+          echo "src_tarball=$(ls wail-homebrew-src/wail-*-src.tar.gz 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -277,3 +318,30 @@ jobs:
             ${{ steps.files.outputs.msi }}
             ${{ steps.files.outputs.appimage }}
             ${{ steps.files.outputs.deb }}
+            ${{ steps.files.outputs.src_tarball }}
+
+      # Update the Homebrew tap formula with the new version and SHA256.
+      # Requires a HOMEBREW_TAP_TOKEN secret with push access to quasor/homebrew-wail.
+      # If the secret is not configured, this step is skipped gracefully.
+      - name: Update Homebrew tap
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          [ -z "${GH_TOKEN}" ] && echo "HOMEBREW_TAP_TOKEN not set, skipping tap update." && exit 0
+          VERSION="${{ steps.tag.outputs.version }}"
+          SHA=$(cat wail-homebrew-src/wail-*-src.tar.gz.sha256 | head -1)
+          URL="https://github.com/quasor/WAIL/releases/download/v${VERSION}/wail-${VERSION}-src.tar.gz"
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/quasor/homebrew-wail.git" tap
+          sed -i \
+            "s|url \".*\"|url \"${URL}\"|" \
+            tap/Formula/wail.rb
+          sed -i \
+            "s|sha256 \".*\"|sha256 \"${SHA}\"|" \
+            tap/Formula/wail.rb
+          cd tap
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git commit -am "Update wail to v${VERSION}"
+          git push

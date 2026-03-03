@@ -8,6 +8,16 @@ Download the latest release from the [Releases page](https://github.com/quasor/W
 
 **macOS** — Open the DMG and drag WAIL to Applications. Run the included `.pkg` installer to install the audio plugins.
 
+**macOS (Homebrew, from source)** — Build and install directly from source:
+
+```sh
+brew tap quasor/wail
+brew install quasor/wail/wail
+wail-install-plugins   # copies CLAP/VST3 plugins to ~/Library/Audio/Plug-Ins/
+```
+
+This builds the WAIL binary and DAW plugins from source. Note: the Homebrew install provides the `wail` command-line binary. For the full macOS `.app` bundle (dock icon, menu bar), use the DMG installer above.
+
 **Windows** — Run the `.exe` installer. Copy the bundled `.clap` and `.vst3` plugin files to your DAW's plugin directory.
 
 **Linux** — Install the `.deb` package (`sudo dpkg -i wail_*.deb`) or download the AppImage and make it executable (`chmod +x WAIL_*.AppImage`). Copy the plugin files to `~/.clap/` and `~/.vst3/`.
