@@ -55,6 +55,12 @@ function saveSettings() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 }
 
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 loadSettings();
 
 // Restore recording options visibility after settings load
@@ -213,6 +219,7 @@ function showSession(room) {
   document.getElementById('session-room').textContent = room;
   document.getElementById('peer-list').innerHTML = '<span class="empty">No peers connected</span>';
   document.getElementById('session-audio').textContent = '0 sent / 0 recv';
+  document.getElementById('session-audio-bytes').textContent = '0 B sent / 0 B recv';
   document.getElementById('session-plugin').textContent = 'disconnected';
   document.getElementById('session-plugin').className = '';
   document.getElementById('session-link-peers').textContent = '0';
@@ -326,6 +333,8 @@ async function setupListeners() {
     document.getElementById('session-link-peers').textContent = s.link_peers;
     document.getElementById('session-audio').textContent =
       `${s.audio_sent} sent / ${s.audio_recv} recv`;
+    document.getElementById('session-audio-bytes').textContent =
+      `${formatBytes(s.audio_bytes_sent)} sent / ${formatBytes(s.audio_bytes_recv)} recv`;
     document.getElementById('session-interval').textContent = `${s.interval_bars} bars`;
     document.getElementById('session-plugin').textContent =
       s.plugin_connected ? 'connected' : 'disconnected';

@@ -302,6 +302,11 @@ summary {
   font-size: 11px;
 }
 
+.audio-bytes {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
 /* Test tone toggle */
 .test-tone-row {
   display: flex;

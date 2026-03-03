@@ -172,6 +172,8 @@ async fn session_loop(
     // Audio interval stats
     let mut audio_intervals_sent: u64 = 0;
     let mut audio_intervals_received: u64 = 0;
+    let mut audio_bytes_sent: u64 = 0;
+    let mut audio_bytes_recv: u64 = 0;
 
     // Test tone state
     let mut test_tone_enabled = test_tone;
@@ -342,6 +344,7 @@ async fn session_loop(
                 if let Some((_peer_id, wire_data)) = IpcMessage::decode_audio(&frame) {
                     mesh.broadcast_audio(&wire_data).await;
                     audio_intervals_sent += 1;
+                    audio_bytes_sent += wire_data.len() as u64;
                     let peers = mesh.connected_peers();
                     ui_info!(&app, "[AUDIO SEND] wire={} bytes, peers=[{}], total_sent={}", wire_data.len(), peers.join(", "), audio_intervals_sent);
 
@@ -501,6 +504,7 @@ async fn session_loop(
             // --- Incoming audio data from peers → forward to plugin ---
             Some((from, data)) = audio_rx.recv() => {
                 audio_intervals_received += 1;
+                audio_bytes_recv += data.len() as u64;
                 let peer_name = peer_names.get(&from).and_then(|n| n.as_deref()).unwrap_or(&from);
 
                 match AudioWire::decode(&data) {
@@ -590,7 +594,7 @@ async fn session_loop(
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
                             if test_tone_enabled {
                                 if let Some(ref mut encoder) = test_tone_encoder {
-                                    send_test_tone(&app, &mesh, encoder, &mut rng, idx, last_broadcast_bpm, bars, quantum, &mut audio_intervals_sent).await;
+                                    send_test_tone(&app, &mesh, encoder, &mut rng, idx, last_broadcast_bpm, bars, quantum, &mut audio_intervals_sent, &mut audio_bytes_sent).await;
                                 }
                             }
                         }
@@ -611,7 +615,7 @@ async fn session_loop(
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
                             if test_tone_enabled {
                                 if let Some(ref mut encoder) = test_tone_encoder {
-                                    send_test_tone(&app, &mesh, encoder, &mut rng, idx, last_broadcast_bpm, bars, quantum, &mut audio_intervals_sent).await;
+                                    send_test_tone(&app, &mesh, encoder, &mut rng, idx, last_broadcast_bpm, bars, quantum, &mut audio_intervals_sent, &mut audio_bytes_sent).await;
                                 }
                             }
                         }
@@ -653,6 +657,8 @@ async fn session_loop(
                         interval_bars: interval.bars(),
                         audio_sent: audio_intervals_sent,
                         audio_recv: audio_intervals_received,
+                        audio_bytes_sent,
+                        audio_bytes_recv,
                         audio_dc_open: dc_open,
                         plugin_connected: !ipc_recv_writers.is_empty(),
                         test_tone_enabled,
@@ -693,6 +699,7 @@ async fn send_test_tone(
     bars: u32,
     quantum: f64,
     audio_intervals_sent: &mut u64,
+    audio_bytes_sent: &mut u64,
 ) {
     let freq: f32 = rng.gen_range(220.0..=880.0);
     let sample_rate: u32 = 48000;
@@ -738,6 +745,7 @@ async fn send_test_tone(
 
             mesh.broadcast_audio(&wire_data).await;
             *audio_intervals_sent += 1;
+            *audio_bytes_sent += wire_data.len() as u64;
 
             let ready_msg = SyncMessage::AudioIntervalReady {
                 interval_index: idx,
