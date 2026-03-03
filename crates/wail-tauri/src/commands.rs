@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use tracing::{info, warn};
 
+use crate::papertrail::TelemetryHandle;
 use crate::recorder::RecordingConfig;
 use crate::session::{SessionCommand, SessionConfig, SessionHandle};
 
@@ -118,6 +119,13 @@ pub fn change_bpm(state: State<'_, SessionState>, bpm: f64) -> Result<(), String
     } else {
         warn!("No active session for BPM change");
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_telemetry(handle: State<'_, TelemetryHandle>, enabled: bool) -> Result<(), String> {
+    handle.set_enabled(enabled);
+    info!(enabled, "Telemetry toggled");
     Ok(())
 }
 

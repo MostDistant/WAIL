@@ -5,7 +5,7 @@ use anyhow::Result;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -78,14 +78,24 @@ pub fn spawn_session(app: AppHandle, config: SessionConfig) -> Result<SessionHan
         room: room.clone(),
     };
 
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = session_loop(app.clone(), config, peer_id, cmd_rx).await {
-            ui_error!(&app, "Session error: {e}");
-            crate::hb::report(&e.to_string()).await;
-            let _ = app.emit("session:error", SessionError { message: e.to_string() });
+    let display_name = config.display_name.clone();
+    let session_span = tracing::info_span!(
+        "session",
+        peer_id = %peer_id,
+        room = %room,
+        display_name = %display_name,
+    );
+    tauri::async_runtime::spawn(
+        async move {
+            if let Err(e) = session_loop(app.clone(), config, peer_id, cmd_rx).await {
+                ui_error!(&app, "Session error: {e}");
+                crate::hb::report(&e.to_string()).await;
+                let _ = app.emit("session:error", SessionError { message: e.to_string() });
+            }
+            let _ = app.emit("session:ended", SessionEnded {});
         }
-        let _ = app.emit("session:ended", SessionEnded {});
-    });
+        .instrument(session_span),
+    );
 
     Ok(handle)
 }

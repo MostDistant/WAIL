@@ -1,12 +1,14 @@
 mod commands;
 pub mod events;
 mod hb;
+mod papertrail;
 mod recorder;
 mod session;
 
 use commands::SessionState;
 use events::LogEntry;
 use tauri::Emitter;
+use tracing_subscriber::prelude::*;
 
 /// Emit a warning log to the frontend.
 pub fn emit_log(app: &tauri::AppHandle, level: &str, message: String) {
@@ -20,21 +22,27 @@ pub fn run() {
     hb::init();
     hb::set_panic_hook();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "wail=info,wail_tauri=info,wail_core=info,wail_net=info".into()
-            }),
-        )
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        "wail=info,wail_tauri=info,wail_core=info,wail_net=info".into()
+    });
+
+    let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
+    let (papertrail_layer, telemetry_handle) = papertrail::PapertrailLayer::new();
+
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(papertrail_layer)
         .init();
 
     tauri::Builder::default()
         .manage(SessionState::default())
+        .manage(telemetry_handle)
         .invoke_handler(tauri::generate_handler![
             commands::join_room,
             commands::disconnect,
             commands::change_bpm,
             commands::set_test_tone,
+            commands::set_telemetry,
             commands::install_plugins,
             commands::check_plugins_installed,
             commands::list_public_rooms,

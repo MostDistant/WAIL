@@ -21,7 +21,7 @@ let roomRefreshTimer = null;
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['room', 'password', 'display-name', 'bars', 'quantum', 'ipc-port', 'test-tone', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
+const rememberFields = ['room', 'password', 'display-name', 'bars', 'quantum', 'ipc-port', 'test-tone', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention', 'telemetry'];
 
 function loadSettings() {
   try {
@@ -182,6 +182,13 @@ document.getElementById('browse-recording-dir').addEventListener('click', async 
     console.error('Failed to get default recording dir:', err);
   }
 });
+
+// --- Telemetry toggle ---
+document.getElementById('telemetry').addEventListener('change', (e) => {
+  invoke('set_telemetry', { enabled: e.target.checked }).catch(() => {});
+});
+// Sync telemetry state on load (respects remembered setting)
+invoke('set_telemetry', { enabled: document.getElementById('telemetry').checked }).catch(() => {});
 
 // Populate default recording dir on load
 invoke('get_default_recording_dir').then(dir => {
