@@ -21,7 +21,7 @@ let roomRefreshTimer = null;
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['room', 'password', 'display-name', 'server', 'bars', 'quantum', 'ipc-port', 'test-tone', 'turn-url', 'turn-username', 'turn-credential', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
+const rememberFields = ['room', 'password', 'display-name', 'bars', 'quantum', 'ipc-port', 'test-tone', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
 
 function loadSettings() {
   try {
@@ -104,9 +104,8 @@ function stopRoomRefresh() {
 }
 
 async function fetchPublicRooms() {
-  const server = document.getElementById('server').value;
   try {
-    const rooms = await invoke('list_public_rooms', { server });
+    const rooms = await invoke('list_public_rooms');
     renderPublicRooms(rooms);
   } catch (err) {
     document.getElementById('public-rooms-list').innerHTML =
@@ -140,7 +139,6 @@ function renderPublicRooms(rooms) {
 
 async function joinPublicRoom(room) {
   const params = {
-    server: document.getElementById('server').value,
     room: room,
     password: null,
     displayName: document.getElementById('display-name').value,
@@ -149,9 +147,6 @@ async function joinPublicRoom(room) {
     quantum: parseFloat(document.getElementById('quantum').value),
     ipcPort: parseInt(document.getElementById('ipc-port').value),
     testTone: document.getElementById('test-tone').checked,
-    turnUrl: document.getElementById('turn-url').value || null,
-    turnUsername: document.getElementById('turn-username').value || null,
-    turnCredential: document.getElementById('turn-credential').value || null,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
     recordingStems: document.getElementById('recording-stems').checked,
@@ -245,7 +240,6 @@ joinForm.addEventListener('submit', async (e) => {
   joinBtn.textContent = 'Connecting...';
 
   const params = {
-    server: document.getElementById('server').value,
     room: document.getElementById('room').value,
     password: document.getElementById('password').value || null,
     displayName: document.getElementById('display-name').value,
@@ -254,9 +248,6 @@ joinForm.addEventListener('submit', async (e) => {
     quantum: parseFloat(document.getElementById('quantum').value),
     ipcPort: parseInt(document.getElementById('ipc-port').value),
     testTone: document.getElementById('test-tone').checked,
-    turnUrl: document.getElementById('turn-url').value || null,
-    turnUsername: document.getElementById('turn-username').value || null,
-    turnCredential: document.getElementById('turn-credential').value || null,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
     recordingStems: document.getElementById('recording-stems').checked,

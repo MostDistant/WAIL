@@ -274,12 +274,6 @@ const LISTENER_HTML = `<!DOCTYPE html>
         <input type="password" id="password" placeholder="room password (empty = public)">
         <label for="display-name">Display Name</label>
         <input type="text" id="display-name" placeholder="Your name" required>
-        <details><summary>Advanced</summary>
-          <div class="advanced-fields">
-            <label for="server-url">Server URL</label>
-            <input type="text" id="server-url" placeholder="signaling server">
-          </div>
-        </details>
         <div id="join-error" class="error" hidden></div>
         <button id="listen-btn">LISTEN</button>
       </div>
@@ -647,8 +641,7 @@ function renderPublicRooms(rooms){
   }).join('');
 }
 function getServerUrl(){
-  var el=document.getElementById('server-url');
-  return(el&&el.value.trim())||defaultSignalingUrl();
+  return defaultSignalingUrl();
 }
 async function joinPublicRoom(room){
   document.getElementById('room').value=room;document.getElementById('password').value='';
