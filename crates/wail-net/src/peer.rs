@@ -60,16 +60,16 @@ fn make_audio_handler(
                 if state.buffer.len() >= state.expected_len {
                     let complete = std::mem::take(&mut state.buffer);
                     *guard = None;
-                    info!("[DC AUDIO IN] reassembled chunked {} bytes", complete.len());
+                    debug!("[DC AUDIO IN] reassembled chunked {} bytes", complete.len());
                     if tx.try_send(complete).is_err() {
-                        info!("[DC AUDIO IN] channel full — dropping reassembled frame");
+                        debug!("[DC AUDIO IN] channel full — dropping reassembled frame");
                     }
                 }
             } else {
                 // Non-chunked message (small enough to fit in one DC message)
-                info!("[DC AUDIO IN] non-chunked {} bytes", data.len());
+                debug!("[DC AUDIO IN] non-chunked {} bytes", data.len());
                 if tx.try_send(data).is_err() {
-                    info!("[DC AUDIO IN] channel full — dropping frame");
+                    debug!("[DC AUDIO IN] channel full — dropping frame");
                 }
             }
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
@@ -293,20 +293,12 @@ impl PeerConnection {
                         }));
 
                         let tx = incoming_tx.clone();
-                        let rpid_sync = rpid.clone();
                         dc.on_message(Box::new(move |msg: DataChannelMessage| {
                             let tx = tx.clone();
-                            let rpid_sync = rpid_sync.clone();
                             Box::pin(async move {
                                 if let Ok(text) = String::from_utf8(msg.data.to_vec()) {
-                                    match serde_json::from_str::<SyncMessage>(&text) {
-                                        Ok(sync_msg) => {
-                                            info!(peer = %rpid_sync, "[SYNC IN] responder received: {:?}", std::mem::discriminant(&sync_msg));
-                                            let _ = tx.send(sync_msg);
-                                        }
-                                        Err(e) => {
-                                            warn!(peer = %rpid_sync, error = %e, "[SYNC IN] responder parse error");
-                                        }
+                                    if let Ok(sync_msg) = serde_json::from_str::<SyncMessage>(&text) {
+                                        let _ = tx.send(sync_msg);
                                     }
                                 }
                             })

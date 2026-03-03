@@ -306,16 +306,12 @@ impl PeerMesh {
             return;
         };
 
-        info!(peer = %remote_id, "[READER] sync reader task spawned");
         tokio::spawn(async move {
-            info!(peer = %rid, "[READER] sync reader task started");
             while let Some(msg) = rx.recv().await {
-                info!(peer = %rid, "[READER] forwarding sync message to session");
                 if sync_tx.send((rid.clone(), msg)).is_err() {
                     break;
                 }
             }
-            info!(peer = %rid, "[READER] sync reader task ended");
         });
     }
 
@@ -329,20 +325,17 @@ impl PeerMesh {
             return;
         };
 
-        info!(peer = %remote_id, "[READER] audio reader task spawned");
         tokio::spawn(async move {
-            info!(peer = %rid, "[READER] audio reader task started");
             while let Some(data) = rx.recv().await {
-                info!(peer = %rid, bytes = data.len(), "[AUDIO READER] forwarding to mesh");
+                debug!(peer = %rid, bytes = data.len(), "[AUDIO READER] forwarding to mesh");
                 match audio_tx.try_send((rid.clone(), data)) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        info!(peer = %rid, "Mesh audio channel full — dropping frame");
+                        debug!(peer = %rid, "Mesh audio channel full — dropping frame");
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
-            info!(peer = %rid, "[READER] audio reader task ended");
         });
     }
 
