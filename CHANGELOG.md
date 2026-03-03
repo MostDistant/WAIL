@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.5 (2026-03-03)
+
+### Features
+
+- add e2e tests for CLAP plugins with IPC integration (#40)
+- add Honeybadger error monitoring (#41)
+- add Papertrail log forwarding with opt-in telemetry (#43)
+
 ## 0.4.4 (2026-03-03)
 
 ### Features
