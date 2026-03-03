@@ -111,6 +111,16 @@ cargo test -p wail-core       # core library tests only
 cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
 ```
 
+Some integration tests are marked `#[ignore]` because they require external resources. Run these during local development to verify end-to-end behaviour:
+
+```sh
+# Requires internet access — hits the live Metered API and asserts valid TURN credentials are returned
+cargo test -p wail-net -- --ignored fetch_metered_ice_servers_live
+
+# Requires coturn installed (brew install coturn) — full WebRTC path through a local TURN relay
+cargo test -p wail-net -- --ignored two_peers_exchange_audio_via_turn
+```
+
 ## Code Conventions
 
 - Async with tokio, channels for cross-task communication

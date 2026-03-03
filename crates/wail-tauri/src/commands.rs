@@ -55,9 +55,6 @@ pub fn join_room(
     quantum: Option<f64>,
     ipc_port: Option<u16>,
     test_tone: Option<bool>,
-    turn_url: Option<String>,
-    turn_username: Option<String>,
-    turn_credential: Option<String>,
     recording_enabled: Option<bool>,
     recording_directory: Option<String>,
     recording_stems: Option<bool>,
@@ -79,9 +76,6 @@ pub fn join_room(
         quantum: quantum.unwrap_or(4.0),
         ipc_port: ipc_port.unwrap_or(9191),
         test_tone: test_tone.unwrap_or(false),
-        turn_url,
-        turn_username,
-        turn_credential,
         recording: if recording_enabled.unwrap_or(false) {
             Some(RecordingConfig {
                 enabled: true,

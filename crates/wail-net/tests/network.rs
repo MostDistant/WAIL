@@ -349,3 +349,39 @@ async fn two_peers_exchange_audio_via_turn() {
     eprintln!("[test] TURN E2E test passed! A→B RMS={energy_at_b:.4}, B→A RMS={energy_at_a:.4}");
     // coturn is killed automatically when `coturn` guard drops
 }
+
+// ---------------------------------------------------------------
+// Test: Metered TURN credential fetch (live network)
+// ---------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore] // Requires internet: cargo test -p wail-net -- --ignored fetch_metered_ice_servers_live
+async fn fetch_metered_ice_servers_live() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .try_init();
+
+    let servers = wail_net::fetch_metered_ice_servers()
+        .await
+        .expect("Metered API call failed");
+
+    assert!(!servers.is_empty(), "Expected at least one ICE server from Metered");
+
+    let turn_servers: Vec<_> = servers
+        .iter()
+        .filter(|s| s.urls.iter().any(|u| u.starts_with("turn:") || u.starts_with("turns:")))
+        .collect();
+
+    assert!(!turn_servers.is_empty(), "Expected at least one TURN server in Metered response");
+
+    for s in &turn_servers {
+        assert!(!s.username.is_empty(), "TURN server should have a username: {:?}", s.urls);
+        assert!(!s.credential.is_empty(), "TURN server should have a credential: {:?}", s.urls);
+    }
+
+    eprintln!(
+        "[test] Metered returned {} ICE servers ({} TURN)",
+        servers.len(),
+        turn_servers.len()
+    );
+}

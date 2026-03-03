@@ -64,9 +64,6 @@ pub struct SessionConfig {
     pub quantum: f64,
     pub ipc_port: u16,
     pub test_tone: bool,
-    pub turn_url: Option<String>,
-    pub turn_username: Option<String>,
-    pub turn_credential: Option<String>,
     pub recording: Option<RecordingConfig>,
 }
 
@@ -108,9 +105,6 @@ async fn session_loop(
         quantum,
         ipc_port,
         test_tone,
-        turn_url,
-        turn_username,
-        turn_credential,
         recording: recording_config,
     } = config;
 
@@ -122,13 +116,16 @@ async fn session_loop(
     let (link_cmd_tx, mut link_event_rx) = link.spawn_poller();
     ui_info!(&app, "Ableton Link enabled");
 
-    // Build ICE servers (STUN + optional TURN)
-    let ice_servers = match (turn_url.as_deref(), turn_username.as_deref(), turn_credential.as_deref()) {
-        (Some(url), Some(user), Some(cred)) => {
-            ui_info!(&app, "TURN server configured: {url}");
-            wail_net::ice_servers_with_turn(url, user, cred)
+    // Fetch ICE servers (STUN + TURN) from Metered; fall back to STUN-only on failure.
+    let ice_servers = match wail_net::fetch_metered_ice_servers().await {
+        Ok(servers) => {
+            ui_info!(&app, "Fetched {} ICE servers from Metered", servers.len());
+            servers
         }
-        _ => wail_net::default_ice_servers(),
+        Err(e) => {
+            ui_warn!(&app, "Metered ICE fetch failed ({e}), using STUN fallback");
+            wail_net::metered_stun_fallback()
+        }
     };
 
     // Connect to signaling server

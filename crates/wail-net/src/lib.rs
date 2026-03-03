@@ -43,6 +43,70 @@ pub fn ice_servers_with_turn(turn_url: &str, username: &str, credential: &str) -
     ]
 }
 
+/// Fetch ICE servers (STUN + TURN with short-lived credentials) from Metered.
+///
+/// Credentials are not stored in source — they are fetched fresh at session start
+/// and expire automatically.
+pub async fn fetch_metered_ice_servers() -> Result<Vec<RTCIceServer>> {
+    #[derive(serde::Deserialize)]
+    struct MeteredServer {
+        urls: MeteredUrls,
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        credential: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum MeteredUrls {
+        Single(String),
+        Multiple(Vec<String>),
+    }
+
+    const API_KEY: &str = "6d995a5ee017979f42b2c0234fd3aca872a1";
+    const URL: &str = "https://wail.metered.live/api/v1/turn/credentials";
+
+    let servers: Vec<MeteredServer> = reqwest::Client::new()
+        .get(URL)
+        .query(&[("apiKey", API_KEY)])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    Ok(servers
+        .into_iter()
+        .map(|m| {
+            let urls = match m.urls {
+                MeteredUrls::Single(s) => vec![s],
+                MeteredUrls::Multiple(v) => v,
+            };
+            let has_cred = !m.credential.is_empty();
+            RTCIceServer {
+                urls,
+                username: m.username,
+                credential: m.credential,
+                credential_type: if has_cred {
+                    RTCIceCredentialType::Password
+                } else {
+                    RTCIceCredentialType::Unspecified
+                },
+            }
+        })
+        .collect())
+}
+
+/// Fallback ICE servers when the Metered API is unreachable — Metered STUN only.
+/// No TURN credentials are stored in source.
+pub fn metered_stun_fallback() -> Vec<RTCIceServer> {
+    vec![RTCIceServer {
+        urls: vec!["stun:stun.relay.metered.ca:80".to_string()],
+        ..Default::default()
+    }]
+}
+
 /// Manages WebRTC connections to all peers in a room.
 ///
 /// Provides two message streams:
