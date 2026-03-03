@@ -293,12 +293,20 @@ impl PeerConnection {
                         }));
 
                         let tx = incoming_tx.clone();
+                        let rpid_sync = rpid.clone();
                         dc.on_message(Box::new(move |msg: DataChannelMessage| {
                             let tx = tx.clone();
+                            let rpid_sync = rpid_sync.clone();
                             Box::pin(async move {
                                 if let Ok(text) = String::from_utf8(msg.data.to_vec()) {
-                                    if let Ok(sync_msg) = serde_json::from_str::<SyncMessage>(&text) {
-                                        let _ = tx.send(sync_msg);
+                                    match serde_json::from_str::<SyncMessage>(&text) {
+                                        Ok(sync_msg) => {
+                                            info!(peer = %rpid_sync, "[SYNC IN] responder received: {:?}", std::mem::discriminant(&sync_msg));
+                                            let _ = tx.send(sync_msg);
+                                        }
+                                        Err(e) => {
+                                            warn!(peer = %rpid_sync, error = %e, "[SYNC IN] responder parse error");
+                                        }
                                     }
                                 }
                             })
