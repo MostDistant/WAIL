@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.6 (2026-03-03)
+
+### Features
+
+- show bytes sent/received for Opus audio in session stats UI (#44)
+- add automatic reconnection for WebRTC peers and signaling server (#46)
+
 ## 0.4.5 (2026-03-03)
 
 ### Features
