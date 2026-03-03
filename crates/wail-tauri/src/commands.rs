@@ -123,22 +123,30 @@ pub fn set_test_tone(state: State<'_, SessionState>, enabled: bool) -> Result<()
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PluginStatus {
-    pub clap: bool,
-    pub vst3: bool,
+    pub send_clap: bool,
+    pub send_vst3: bool,
+    pub recv_clap: bool,
+    pub recv_vst3: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PluginPaths {
-    pub clap_path: String,
-    pub vst3_path: String,
+    pub send_clap_path: String,
+    pub send_vst3_path: String,
+    pub recv_clap_path: String,
+    pub recv_vst3_path: String,
 }
+
+const PLUGIN_NAMES: [&str; 2] = ["wail-plugin-send", "wail-plugin-recv"];
 
 #[tauri::command]
 pub fn check_plugins_installed() -> Result<PluginStatus, String> {
     let (clap_dir, vst3_dir) = plugin_dirs().map_err(|e| e.to_string())?;
     Ok(PluginStatus {
-        clap: clap_dir.join("wail-plugin.clap").exists(),
-        vst3: vst3_dir.join("wail-plugin.vst3").exists(),
+        send_clap: clap_dir.join("wail-plugin-send.clap").exists(),
+        send_vst3: vst3_dir.join("wail-plugin-send.vst3").exists(),
+        recv_clap: clap_dir.join("wail-plugin-recv.clap").exists(),
+        recv_vst3: vst3_dir.join("wail-plugin-recv.vst3").exists(),
     })
 }
 
@@ -149,22 +157,6 @@ pub fn install_plugins(app: tauri::AppHandle) -> Result<PluginPaths, String> {
         .resource_dir()
         .map_err(|e| format!("Cannot find resource dir: {e}"))?;
 
-    let clap_src = resource_path.join("plugins/wail-plugin.clap");
-    let vst3_src = resource_path.join("plugins/wail-plugin.vst3");
-
-    if !clap_src.exists() {
-        return Err(format!(
-            "CLAP plugin not found in app bundle at {}",
-            clap_src.display()
-        ));
-    }
-    if !vst3_src.exists() {
-        return Err(format!(
-            "VST3 plugin not found in app bundle at {}",
-            vst3_src.display()
-        ));
-    }
-
     let (clap_dir, vst3_dir) = plugin_dirs().map_err(|e| e.to_string())?;
 
     std::fs::create_dir_all(&clap_dir)
@@ -172,12 +164,32 @@ pub fn install_plugins(app: tauri::AppHandle) -> Result<PluginPaths, String> {
     std::fs::create_dir_all(&vst3_dir)
         .map_err(|e| format!("Could not create {}: {e}", vst3_dir.display()))?;
 
-    copy_bundle(&clap_src, &clap_dir).map_err(|e| e.to_string())?;
-    copy_bundle(&vst3_src, &vst3_dir).map_err(|e| e.to_string())?;
+    for plugin in &PLUGIN_NAMES {
+        let clap_src = resource_path.join(format!("plugins/{plugin}.clap"));
+        let vst3_src = resource_path.join(format!("plugins/{plugin}.vst3"));
+
+        if !clap_src.exists() {
+            return Err(format!(
+                "CLAP plugin not found in app bundle at {}",
+                clap_src.display()
+            ));
+        }
+        if !vst3_src.exists() {
+            return Err(format!(
+                "VST3 plugin not found in app bundle at {}",
+                vst3_src.display()
+            ));
+        }
+
+        copy_bundle(&clap_src, &clap_dir).map_err(|e| e.to_string())?;
+        copy_bundle(&vst3_src, &vst3_dir).map_err(|e| e.to_string())?;
+    }
 
     Ok(PluginPaths {
-        clap_path: clap_dir.join("wail-plugin.clap").to_string_lossy().into(),
-        vst3_path: vst3_dir.join("wail-plugin.vst3").to_string_lossy().into(),
+        send_clap_path: clap_dir.join("wail-plugin-send.clap").to_string_lossy().into(),
+        send_vst3_path: vst3_dir.join("wail-plugin-send.vst3").to_string_lossy().into(),
+        recv_clap_path: clap_dir.join("wail-plugin-recv.clap").to_string_lossy().into(),
+        recv_vst3_path: vst3_dir.join("wail-plugin-recv.vst3").to_string_lossy().into(),
     })
 }
 

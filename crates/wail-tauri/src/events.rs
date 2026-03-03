@@ -50,6 +50,7 @@ pub struct StatusUpdate {
     pub interval_bars: u32,
     pub audio_sent: u64,
     pub audio_recv: u64,
+    pub audio_dc_open: bool,
     pub plugin_connected: bool,
     pub test_tone_enabled: bool,
 }

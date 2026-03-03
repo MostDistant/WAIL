@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use wail_audio::{AudioDecoder, AudioWire, IpcFramer, IpcMessage, IpcRecvBuffer};
+use wail_audio::{AudioDecoder, AudioWire, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV, IPC_ROLE_SEND};
 use wail_net::PeerMesh;
 
 use common::*;
@@ -448,6 +448,222 @@ async fn multi_interval_full_size_e2e() {
     }
 
     eprintln!("[test] Multi-interval E2E passed! All {num_intervals} intervals received with full audio.");
+
+    sender.abort();
+    app_a.abort();
+    app_b.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Mini App V2: role-aware session loop (send vs recv plugin routing)
+// ---------------------------------------------------------------------------
+
+/// Session loop that reads a role byte from each IPC connection and only
+/// forwards received WebRTC audio to connections that identify as RECV.
+async fn mini_app_session_v2(
+    ipc_port: u16,
+    signaling_url: String,
+    room: String,
+    peer_id: String,
+    password: String,
+    poll_interval_ms: u64,
+) {
+    let ice = wail_net::default_ice_servers();
+    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_with_options(
+        &signaling_url,
+        &room,
+        &peer_id,
+        Some(password.as_str()),
+        ice,
+        poll_interval_ms,
+    )
+    .await
+    .expect("Mini app V2 failed to connect");
+
+    let ipc_listener = TcpListener::bind(("127.0.0.1", ipc_port))
+        .await
+        .expect("Mini app V2 failed to bind IPC port");
+
+    let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(64);
+    let mut ipc_recv_writers: Vec<tokio::net::tcp::OwnedWriteHalf> = Vec::new();
+
+    loop {
+        tokio::select! {
+            result = ipc_listener.accept() => {
+                if let Ok((stream, _addr)) = result {
+                    let (mut read_half, write_half) = stream.into_split();
+
+                    // Read role byte to determine plugin type
+                    let mut role_buf = [0u8; 1];
+                    if read_half.read_exact(&mut role_buf).await.is_err() {
+                        continue;
+                    }
+                    let role = role_buf[0];
+
+                    if role == IPC_ROLE_RECV {
+                        ipc_recv_writers.push(write_half);
+                    }
+                    // For all roles, spawn reader for IPC frames (send plugin writes audio)
+                    let tx = ipc_from_plugin_tx.clone();
+                    tokio::spawn(async move {
+                        let mut recv_buf = IpcRecvBuffer::new();
+                        let mut buf = [0u8; 65536];
+                        loop {
+                            match read_half.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    recv_buf.push(&buf[..n]);
+                                    while let Some(frame) = recv_buf.next_frame() {
+                                        let _ = tx.try_send(frame);
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    });
+                }
+            }
+
+            Some(frame) = ipc_from_plugin_rx.recv() => {
+                if let Some((_peer_id, wire_data)) = IpcMessage::decode_audio(&frame) {
+                    mesh.broadcast_audio(&wire_data).await;
+                }
+            }
+
+            _event = mesh.poll_signaling() => {}
+
+            Some((from, data)) = audio_rx.recv() => {
+                let msg = IpcMessage::encode_audio(&from, &data);
+                let frame = IpcFramer::encode_frame(&msg);
+                for writer in &mut ipc_recv_writers {
+                    let _ = writer.write_all(&frame).await;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test: Dual plugin IPC — only recv plugin gets forwarded audio
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_plugin_ipc_only_recv_gets_audio() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .try_init();
+
+    // 1. Start signaling server
+    let server_url = start_test_signaling_server().await;
+
+    let ipc_port_a = random_port();
+    let ipc_port_b = random_port();
+
+    // 2. Spawn mini_app_a (sender side) with V1 (no role awareness needed)
+    let url = server_url.clone();
+    let app_a = tokio::spawn(mini_app_session(
+        ipc_port_a,
+        url,
+        "dual-room".into(),
+        "peer-a".into(),
+        "test".into(),
+        200,
+    ));
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 3. Spawn mini_app_b (receiver side) with V2 (role-aware)
+    let url = server_url.clone();
+    let app_b = tokio::spawn(mini_app_session_v2(
+        ipc_port_b,
+        url,
+        "dual-room".into(),
+        "peer-b".into(),
+        "test".into(),
+        200,
+    ));
+
+    // 4. Wait for WebRTC connection
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    // 5. Connect simulated SEND plugin to app_b (identifies as SEND role)
+    let send_conn = tokio::spawn(async move {
+        let mut stream = loop {
+            match tokio::net::TcpStream::connect(("127.0.0.1", ipc_port_b)).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        };
+        // Write role byte
+        stream.write_all(&[IPC_ROLE_SEND]).await.expect("send role byte");
+
+        // Try to read — should NOT receive any audio (timeout expected)
+        let mut buf = [0u8; 65536];
+        match tokio::time::timeout(Duration::from_secs(8), stream.read(&mut buf)).await {
+            Ok(Ok(0)) => 0usize, // connection closed — no data, correct
+            Ok(Ok(n)) => n,      // got data — this would be a bug
+            Ok(Err(_)) => 0,     // error — treat as no data
+            Err(_) => 0,         // timeout — correct, no data forwarded
+        }
+    });
+
+    // 6. Connect simulated RECV plugin to app_b (identifies as RECV role)
+    let recv_conn = tokio::spawn(async move {
+        let mut stream = loop {
+            match tokio::net::TcpStream::connect(("127.0.0.1", ipc_port_b)).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        };
+        // Write role byte
+        stream.write_all(&[IPC_ROLE_RECV]).await.expect("recv role byte");
+
+        // Read IPC frames — should receive audio from remote peer
+        let mut recv_buf = IpcRecvBuffer::new();
+        let mut buf = [0u8; 65536];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            tokio::select! {
+                result = stream.read(&mut buf) => {
+                    match result {
+                        Ok(0) => panic!("Recv plugin: connection closed before audio arrived"),
+                        Ok(n) => {
+                            recv_buf.push(&buf[..n]);
+                            if let Some(payload) = recv_buf.next_frame() {
+                                if let Some((peer_id, _wire_data)) = IpcMessage::decode_audio(&payload) {
+                                    return peer_id;
+                                }
+                            }
+                        }
+                        Err(e) => panic!("Recv plugin: read error: {e}"),
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    panic!("Recv plugin: timed out waiting for audio");
+                }
+            }
+        }
+    });
+
+    // 7. Send audio from app_a's plugin side
+    let sender = tokio::spawn(simulated_plugin_send(ipc_port_a, 440.0));
+
+    // 8. Verify recv plugin got the audio
+    let peer_id = tokio::time::timeout(Duration::from_secs(15), recv_conn)
+        .await
+        .expect("Overall timeout")
+        .expect("recv_conn task panicked");
+    assert_eq!(peer_id, "peer-a", "Recv plugin should get audio from peer-a");
+
+    // 9. Verify send plugin did NOT get audio
+    let send_bytes = tokio::time::timeout(Duration::from_secs(2), send_conn)
+        .await
+        .expect("send_conn timeout")
+        .expect("send_conn task panicked");
+    assert_eq!(
+        send_bytes, 0,
+        "Send plugin should NOT receive forwarded audio (got {send_bytes} bytes)"
+    );
 
     sender.abort();
     app_a.abort();

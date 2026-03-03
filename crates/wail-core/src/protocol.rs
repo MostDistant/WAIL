@@ -66,6 +66,13 @@ pub enum SyncMessage {
     IntervalBoundary {
         index: i64,
     },
+    /// Periodic audio pipeline health (broadcast every status tick)
+    AudioStatus {
+        audio_dc_open: bool,
+        intervals_sent: u64,
+        intervals_received: u64,
+        plugin_connected: bool,
+    },
 }
 
 /// Messages exchanged over the WebSocket signaling channel.
@@ -148,6 +155,32 @@ mod tests {
         let decoded: SyncMessage = serde_json::from_str(&json).expect("deserialize");
         match decoded {
             SyncMessage::IntervalBoundary { index } => assert_eq!(index, 42),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn audio_status_roundtrip() {
+        let msg = SyncMessage::AudioStatus {
+            audio_dc_open: true,
+            intervals_sent: 5,
+            intervals_received: 3,
+            plugin_connected: true,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let decoded: SyncMessage = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            SyncMessage::AudioStatus {
+                audio_dc_open,
+                intervals_sent,
+                intervals_received,
+                plugin_connected,
+            } => {
+                assert!(audio_dc_open);
+                assert_eq!(intervals_sent, 5);
+                assert_eq!(intervals_received, 3);
+                assert!(plugin_connected);
+            }
             other => panic!("unexpected variant: {other:?}"),
         }
     }

@@ -1,3 +1,8 @@
+/// IPC role byte sent by plugins on connect to identify themselves.
+pub const IPC_ROLE_SEND: u8 = 0x00;
+/// IPC role byte sent by plugins on connect to identify themselves.
+pub const IPC_ROLE_RECV: u8 = 0x01;
+
 /// Length-prefixed IPC framing for Plugin ↔ App communication.
 ///
 /// Frame format over TCP:
@@ -331,5 +336,13 @@ mod tests {
         let (peer_id, decoded) = IpcMessage::decode_audio(&payload).unwrap();
         assert_eq!(peer_id, "peer-1");
         assert_eq!(decoded, vec![0xDE, 0xAD]);
+    }
+
+    // --- IPC Role ---
+
+    #[test]
+    fn ipc_role_byte_constants_exist() {
+        assert_eq!(IPC_ROLE_SEND, 0x00);
+        assert_eq!(IPC_ROLE_RECV, 0x01);
     }
 }

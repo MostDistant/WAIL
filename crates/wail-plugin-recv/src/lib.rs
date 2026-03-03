@@ -1,4 +1,4 @@
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,6 +12,7 @@ mod params;
 use params::WailRecvParams;
 use wail_audio::{
     nearest_opus_rate, AudioBridge, AudioDecoder, AudioWire, IpcMessage, IpcRecvBuffer,
+    IPC_ROLE_RECV,
 };
 
 /// Default IPC address (overridable via WAIL_IPC_ADDR env var).
@@ -304,6 +305,13 @@ fn ipc_thread_recv(
                 continue;
             }
         };
+
+        // Identify as a recv plugin
+        if stream.write_all(&[IPC_ROLE_RECV]).is_err() {
+            tracing::warn!("WAIL Recv: failed to write role byte — reconnecting");
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
 
         // No read timeout — we block until data arrives or the connection closes
         stream.set_read_timeout(None).ok();

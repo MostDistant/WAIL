@@ -97,6 +97,65 @@ async fn two_peers_exchange_audio_over_webrtc() {
 }
 
 // ---------------------------------------------------------------
+// Test: Audio DataChannel reports open after connection
+// ---------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audio_dc_reports_open_after_connection() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .try_init();
+
+    let server_url = start_test_signaling_server().await;
+
+    let ice = wail_net::default_ice_servers();
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
+        PeerMesh::connect_with_options(&server_url, "test-room", "peer-a", Some("test"), ice.clone(), 200)
+            .await
+            .expect("Peer A failed to connect");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
+        PeerMesh::connect_with_options(&server_url, "test-room", "peer-b", Some("test"), ice, 200)
+            .await
+            .expect("Peer B failed to connect");
+
+    establish_connection(&mut mesh_a, &mut mesh_b).await;
+
+    // Both peers should report audio DC open
+    assert!(
+        mesh_a.any_audio_dc_open(),
+        "Peer A should have an open audio DataChannel"
+    );
+    assert!(
+        mesh_b.any_audio_dc_open(),
+        "Peer B should have an open audio DataChannel"
+    );
+
+    // Verify audio actually flows both directions
+    let wire_a = produce_interval(440.0);
+    let wire_b = produce_interval(880.0);
+    mesh_a.broadcast_audio(&wire_a).await;
+    mesh_b.broadcast_audio(&wire_b).await;
+
+    let (from_at_b, received_at_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
+        .await
+        .expect("Timed out waiting for audio at B")
+        .expect("Audio channel B closed");
+
+    let (from_at_a, received_at_a) = tokio::time::timeout(Duration::from_secs(5), audio_rx_a.recv())
+        .await
+        .expect("Timed out waiting for audio at A")
+        .expect("Audio channel A closed");
+
+    assert_eq!(from_at_b, "peer-a");
+    assert_eq!(from_at_a, "peer-b");
+    assert!(!received_at_b.is_empty());
+    assert!(!received_at_a.is_empty());
+}
+
+// ---------------------------------------------------------------
 // TURN server helpers
 // ---------------------------------------------------------------
 

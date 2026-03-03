@@ -396,14 +396,16 @@ function escapeHtml(text) {
 async function checkPlugins() {
   try {
     const status = await invoke('check_plugins_installed');
-    if (status.clap && status.vst3) {
+    if (status.send_clap && status.send_vst3 && status.recv_clap && status.recv_vst3) {
       pluginStatus.textContent = 'Plugins installed';
       pluginStatus.className = 'connected';
       installPluginsBtn.style.display = 'none';
     } else {
       const missing = [];
-      if (!status.clap) missing.push('CLAP');
-      if (!status.vst3) missing.push('VST3');
+      if (!status.send_clap) missing.push('Send CLAP');
+      if (!status.send_vst3) missing.push('Send VST3');
+      if (!status.recv_clap) missing.push('Recv CLAP');
+      if (!status.recv_vst3) missing.push('Recv VST3');
       pluginStatus.textContent = `Missing: ${missing.join(', ')}`;
       installPluginsBtn.style.display = '';
     }

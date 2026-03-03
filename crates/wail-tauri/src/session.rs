@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use wail_audio::{AudioDecoder, AudioEncoder, AudioInterval, AudioWire, IpcFramer, IpcMessage, IpcRecvBuffer};
+use wail_audio::{AudioDecoder, AudioEncoder, AudioInterval, AudioWire, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
 use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
 use wail_net::PeerMesh;
 
@@ -194,7 +194,7 @@ async fn session_loop(
     let ipc_listener = tokio::net::TcpListener::bind(("127.0.0.1", ipc_port)).await?;
     ui_info!(&app, "IPC listening on port {ipc_port}");
 
-    let mut ipc_writers: Vec<(usize, tokio::net::tcp::OwnedWriteHalf)> = Vec::new();
+    let mut ipc_recv_writers: Vec<(usize, tokio::net::tcp::OwnedWriteHalf)> = Vec::new();
     let mut next_conn_id: usize = 0;
     let (ipc_from_plugin_tx, mut ipc_from_plugin_rx) = mpsc::channel::<Vec<u8>>(64);
     let (ipc_disconnect_tx, mut ipc_disconnect_rx) = mpsc::channel::<usize>(16);
@@ -240,13 +240,33 @@ async fn session_loop(
                         let conn_id = next_conn_id;
                         next_conn_id += 1;
                         ui_info!(&app, "Plugin connected from {addr} (conn {conn_id})");
-                        let (read_half, write_half) = stream.into_split();
-                        ipc_writers.push((conn_id, write_half));
+                        let (mut read_half, write_half) = stream.into_split();
+
+                        // Read role byte to determine plugin type
+                        let mut role_buf = [0u8; 1];
+                        if read_half.read_exact(&mut role_buf).await.is_err() {
+                            ui_warn!(&app, "Plugin (conn {conn_id}): failed to read role byte — dropping");
+                            continue;
+                        }
+                        let role = role_buf[0];
+
+                        let role_name = if role == IPC_ROLE_RECV { "recv" } else { "send" };
+                        ui_info!(&app, "Plugin (conn {conn_id}) identified as {role_name}");
+
+                        // Only recv plugins get forwarded audio from remote peers
+                        if role == IPC_ROLE_RECV {
+                            ipc_recv_writers.push((conn_id, write_half));
+                        } else {
+                            // Send plugin — we don't need its write half (it only sends audio TO us)
+                            drop(write_half);
+                        }
                         let _ = app.emit("plugin:connected", ());
 
+                        // Only send plugins push audio data to us via IPC
                         let tx = ipc_from_plugin_tx.clone();
                         let disconnect_tx = ipc_disconnect_tx.clone();
                         let app2 = app.clone();
+                        let is_send = role != IPC_ROLE_RECV;
                         tokio::spawn(async move {
                             let mut recv_buf = IpcRecvBuffer::new();
                             let mut buf = [0u8; 65536];
@@ -259,16 +279,19 @@ async fn session_loop(
                                         break;
                                     }
                                     Ok(n) => {
-                                        recv_buf.push(&buf[..n]);
-                                        while let Some(frame) = recv_buf.next_frame() {
-                                            match tx.try_send(frame) {
-                                                Ok(()) => {}
-                                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                                    debug!("IPC audio channel full — dropping frame");
+                                        if is_send {
+                                            recv_buf.push(&buf[..n]);
+                                            while let Some(frame) = recv_buf.next_frame() {
+                                                match tx.try_send(frame) {
+                                                    Ok(()) => {}
+                                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                                        debug!("IPC audio channel full — dropping frame");
+                                                    }
+                                                    Err(mpsc::error::TrySendError::Closed(_)) => return,
                                                 }
-                                                Err(mpsc::error::TrySendError::Closed(_)) => return,
                                             }
                                         }
+                                        // recv plugin: we only read to detect disconnect
                                     }
                                     Err(e) => {
                                         ui_warn!(&app2, "Plugin IPC read error (conn {conn_id}): {e}");
@@ -435,6 +458,11 @@ async fn session_loop(
                             interval.sync_to(index);
                         }
                     }
+
+                    SyncMessage::AudioStatus { audio_dc_open, intervals_sent, intervals_received, plugin_connected } => {
+                        let name = peer_names.get(&from).and_then(|n| n.as_deref()).unwrap_or(&from);
+                        ui_info!(&app, "[REMOTE {name}] dc_open={audio_dc_open}, sent={intervals_sent}, recv={intervals_received}, plugin={plugin_connected}");
+                    }
                 }
             }
 
@@ -477,11 +505,11 @@ async fn session_loop(
                     }
                 }
 
-                if !ipc_writers.is_empty() {
+                if !ipc_recv_writers.is_empty() {
                     let msg = IpcMessage::encode_audio(&from, &data);
                     let frame = IpcFramer::encode_frame(&msg);
                     let mut dead = Vec::new();
-                    for (id, writer) in &mut ipc_writers {
+                    for (id, writer) in &mut ipc_recv_writers {
                         if writer.write_all(&frame).await.is_err() {
                             dead.push(*id);
                         }
@@ -490,14 +518,14 @@ async fn session_loop(
                         for id in &dead {
                             ui_warn!(&app, "Removing failed IPC writer (conn {id})");
                         }
-                        ipc_writers.retain(|(id, _)| !dead.contains(id));
+                        ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
                     }
                 }
             }
 
             // --- IPC disconnect notification ---
             Some(conn_id) = ipc_disconnect_rx.recv() => {
-                ipc_writers.retain(|(id, _)| *id != conn_id);
+                ipc_recv_writers.retain(|(id, _)| *id != conn_id);
                 ui_info!(&app, "IPC connection {conn_id} removed");
             }
 
@@ -569,6 +597,7 @@ async fn session_loop(
                 }
                 if let Ok(state) = rx.await {
                     let connected = mesh.connected_peers();
+                    let dc_open = mesh.any_audio_dc_open();
                     let peers: Vec<PeerInfo> = connected
                         .iter()
                         .map(|p| PeerInfo {
@@ -587,9 +616,19 @@ async fn session_loop(
                         interval_bars: interval.bars(),
                         audio_sent: audio_intervals_sent,
                         audio_recv: audio_intervals_received,
-                        plugin_connected: !ipc_writers.is_empty(),
+                        audio_dc_open: dc_open,
+                        plugin_connected: !ipc_recv_writers.is_empty(),
                         test_tone_enabled,
                     });
+
+                    // Broadcast audio pipeline status to remote peers
+                    let status_msg = SyncMessage::AudioStatus {
+                        audio_dc_open: dc_open,
+                        intervals_sent: audio_intervals_sent,
+                        intervals_received: audio_intervals_received,
+                        plugin_connected: !ipc_recv_writers.is_empty(),
+                    };
+                    mesh.broadcast(&status_msg).await;
                 }
             }
         }

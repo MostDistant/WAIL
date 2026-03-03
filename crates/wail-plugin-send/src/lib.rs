@@ -12,7 +12,7 @@ mod params;
 use params::WailSendParams;
 use wail_audio::{
     nearest_opus_rate, AudioBridge, AudioEncoder, AudioInterval, AudioWire, CompletedInterval,
-    IpcFramer, IpcMessage,
+    IpcFramer, IpcMessage, IPC_ROLE_SEND,
 };
 
 /// Default IPC address (overridable via WAIL_IPC_ADDR env var).
@@ -309,6 +309,13 @@ fn ipc_thread_send(
                 continue;
             }
         };
+
+        // Identify as a send plugin
+        if stream.write_all(&[IPC_ROLE_SEND]).is_err() {
+            tracing::warn!("WAIL Send: failed to write role byte — reconnecting");
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
 
         loop {
             // Block waiting for the next interval (with timeout so we detect disconnects)
