@@ -44,10 +44,10 @@ class Wail < Formula
 
     # Install plugin bundles to #{lib}. Run `wail-install-plugins` afterwards
     # to copy them to ~/Library/Audio/Plug-Ins/.
-    (lib/"wail-plugin-send.clap").install Dir["target/bundled/wail-plugin-send.clap/"]
-    (lib/"wail-plugin-recv.clap").install Dir["target/bundled/wail-plugin-recv.clap/"]
-    (lib/"wail-plugin-send.vst3").install Dir["target/bundled/wail-plugin-send.vst3/"]
-    (lib/"wail-plugin-recv.vst3").install Dir["target/bundled/wail-plugin-recv.vst3/"]
+    (lib/"wail-plugin-send.clap").install Dir["target/bundled/wail-plugin-send.clap/*"]
+    (lib/"wail-plugin-recv.clap").install Dir["target/bundled/wail-plugin-recv.clap/*"]
+    (lib/"wail-plugin-send.vst3").install Dir["target/bundled/wail-plugin-send.vst3/*"]
+    (lib/"wail-plugin-recv.vst3").install Dir["target/bundled/wail-plugin-recv.vst3/*"]
 
     # Install the plugin installation helper script (useful for manual reinstall).
     bin.install "scripts/wail-install-plugins.sh" => "wail-install-plugins"
