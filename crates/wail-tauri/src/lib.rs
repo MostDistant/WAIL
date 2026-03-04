@@ -1,13 +1,14 @@
 mod commands;
 pub mod events;
 mod hb;
+mod identity;
 mod loki;
 mod recorder;
 mod session;
 
 use commands::SessionState;
 use events::LogEntry;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tracing_subscriber::prelude::*;
 
 /// Emit a warning log to the frontend.
@@ -37,6 +38,12 @@ pub fn run() {
     tauri::Builder::default()
         .manage(SessionState::default())
         .manage(telemetry_handle)
+        .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            let peer_identity = identity::get_or_create(&data_dir);
+            app.manage(identity::PeerIdentity(peer_identity));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::join_room,
             commands::disconnect,

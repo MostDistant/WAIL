@@ -59,6 +59,7 @@ pub struct SessionConfig {
     pub room: String,
     pub password: Option<String>,
     pub display_name: String,
+    pub identity: String,
     pub bpm: f64,
     pub bars: u32,
     pub quantum: f64,
@@ -118,6 +119,7 @@ async fn session_loop(
         room,
         password,
         display_name,
+        identity,
         bpm,
         bars,
         quantum,
@@ -169,6 +171,13 @@ async fn session_loop(
 
     // Track peers' display names
     let mut peer_names: HashMap<String, Option<String>> = HashMap::new();
+    // Track peers' persistent identities (for slot affinity)
+    let mut peer_identities: HashMap<String, String> = HashMap::new();
+    // Track peer → slot assignments (mirrors recv plugin's ring for UI labeling)
+    let mut peer_slots: HashMap<String, usize> = HashMap::new();
+    // Affinity: identity → slot for peers that left
+    let mut slot_affinity: HashMap<String, usize> = HashMap::new();
+    let mut slot_occupied: [bool; wail_audio::MAX_REMOTE_PEERS] = [false; wail_audio::MAX_REMOTE_PEERS];
     // Track which peers we've sent Hello to (prevents infinite Hello loops)
     let mut hello_sent: HashSet<String> = HashSet::new();
 
@@ -379,7 +388,7 @@ async fn session_loop(
                             display_name: None,
                         });
 
-                        let hello = SyncMessage::Hello { peer_id: peer_id.clone(), display_name: Some(display_name.clone()) };
+                        let hello = SyncMessage::Hello { peer_id: peer_id.clone(), display_name: Some(display_name.clone()), identity: Some(identity.clone()) };
                         mesh.broadcast(&hello).await;
                         // Mark all connected peers as having been sent Hello
                         // (messages are queued if DataChannel isn't open yet)
@@ -401,7 +410,33 @@ async fn session_loop(
                     Ok(Some(wail_net::MeshEvent::PeerLeft(pid))) => {
                         let name = peer_names.get(&pid).and_then(|n| n.as_deref()).unwrap_or(&pid);
                         ui_info!(&app, "Peer {name} left");
+
+                        // Notify recv plugins so they can free the slot and set affinity
+                        if !ipc_recv_writers.is_empty() {
+                            let msg = IpcMessage::encode_peer_left(&pid);
+                            let frame = IpcFramer::encode_frame(&msg);
+                            let mut dead = Vec::new();
+                            for (id, writer) in &mut ipc_recv_writers {
+                                if writer.write_all(&frame).await.is_err() {
+                                    dead.push(*id);
+                                }
+                            }
+                            for id in &dead {
+                                ui_warn!(&app, "Removing failed IPC writer (conn {id})");
+                            }
+                            ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
+                        }
+
+                        // Free slot and create affinity reservation
+                        if let Some(slot) = peer_slots.remove(&pid) {
+                            slot_occupied[slot] = false;
+                            if let Some(ident) = peer_identities.get(&pid) {
+                                slot_affinity.insert(ident.clone(), slot);
+                            }
+                        }
+
                         peer_names.remove(&pid);
+                        peer_identities.remove(&pid);
                         hello_sent.remove(&pid);
                         peer_reconnect_attempts.remove(&pid);
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
@@ -414,8 +449,34 @@ async fn session_loop(
 
                         if attempt > MAX_PEER_RECONNECT_ATTEMPTS {
                             ui_error!(&app, "Peer {name} reconnection failed after {MAX_PEER_RECONNECT_ATTEMPTS} attempts — giving up");
+
+                            // Notify recv plugins so they can free the slot and set affinity
+                            if !ipc_recv_writers.is_empty() {
+                                let msg = IpcMessage::encode_peer_left(&pid);
+                                let frame = IpcFramer::encode_frame(&msg);
+                                let mut dead = Vec::new();
+                                for (id, writer) in &mut ipc_recv_writers {
+                                    if writer.write_all(&frame).await.is_err() {
+                                        dead.push(*id);
+                                    }
+                                }
+                                for id in &dead {
+                                    ui_warn!(&app, "Removing failed IPC writer (conn {id})");
+                                }
+                                ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
+                            }
+
+                            // Free slot and create affinity reservation
+                            if let Some(slot) = peer_slots.remove(&pid) {
+                                slot_occupied[slot] = false;
+                                if let Some(ident) = peer_identities.get(&pid) {
+                                    slot_affinity.insert(ident.clone(), slot);
+                                }
+                            }
+
                             peer_reconnect_attempts.remove(&pid);
                             peer_names.remove(&pid);
+                            peer_identities.remove(&pid);
                             hello_sent.remove(&pid);
                             mesh.remove_peer(&pid).await;
                             let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
@@ -469,6 +530,16 @@ async fn session_loop(
                                     sync_rx = new_sync_rx;
                                     audio_rx = new_audio_rx;
                                     peer_names.clear();
+                                    peer_identities.clear();
+                                    // Don't clear slot_affinity — preserve across signaling reconnect
+                                    // so peers get the same slot when they rejoin
+                                    for (pid, slot) in peer_slots.drain() {
+                                        slot_occupied[slot] = false;
+                                        // Create affinity for all current peers
+                                        if let Some(ident) = peer_identities.get(&pid) {
+                                            slot_affinity.insert(ident.clone(), slot);
+                                        }
+                                    }
                                     hello_sent.clear();
                                     peer_reconnect_attempts.clear();
                                     clock = ClockSync::new();
@@ -505,6 +576,7 @@ async fn session_loop(
                             let hello = SyncMessage::Hello {
                                 peer_id: peer_id.clone(),
                                 display_name: Some(display_name.clone()),
+                                identity: Some(identity.clone()),
                             };
                             mesh.broadcast(&hello).await;
                             for p in mesh.connected_peers() {
@@ -521,10 +593,44 @@ async fn session_loop(
             // --- Incoming sync messages from peers ---
             Some((from, msg)) = sync_rx.recv() => {
                 match msg {
-                    SyncMessage::Hello { peer_id: pid, display_name: name } => {
+                    SyncMessage::Hello { peer_id: pid, display_name: name, identity: remote_identity } => {
                         let name_display = name.as_deref().unwrap_or("(anonymous)");
                         ui_info!(&app, "Hello from {name_display} ({pid})");
                         peer_names.insert(pid.clone(), name.clone());
+                        if let Some(ref rid) = remote_identity {
+                            peer_identities.insert(pid.clone(), rid.clone());
+
+                            // Assign slot (mirror recv plugin's logic for UI labeling)
+                            if !peer_slots.contains_key(&pid) {
+                                // Check affinity first
+                                let affinity_slot = slot_affinity.remove(rid)
+                                    .filter(|&s| s < wail_audio::MAX_REMOTE_PEERS && !slot_occupied[s]);
+                                let slot = affinity_slot.or_else(|| {
+                                    slot_occupied.iter().position(|&occupied| !occupied)
+                                });
+                                if let Some(s) = slot {
+                                    slot_occupied[s] = true;
+                                    peer_slots.insert(pid.clone(), s);
+                                    ui_info!(&app, "Peer {name_display} assigned to slot {} (Peer {})", s, s + 1);
+                                }
+                            }
+
+                            // Notify recv plugins about peer identity for slot affinity
+                            if !ipc_recv_writers.is_empty() {
+                                let msg = IpcMessage::encode_peer_joined(&pid, rid);
+                                let frame = IpcFramer::encode_frame(&msg);
+                                let mut dead = Vec::new();
+                                for (id, writer) in &mut ipc_recv_writers {
+                                    if writer.write_all(&frame).await.is_err() {
+                                        dead.push(*id);
+                                    }
+                                }
+                                for id in &dead {
+                                    ui_warn!(&app, "Removing failed IPC writer (conn {id})");
+                                }
+                                ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
+                            }
+                        }
 
                         // Clear reconnect tracking — peer is alive
                         if peer_reconnect_attempts.remove(&pid).is_some() {
@@ -538,6 +644,7 @@ async fn session_loop(
                             let reply = SyncMessage::Hello {
                                 peer_id: peer_id.clone(),
                                 display_name: Some(display_name.clone()),
+                                identity: Some(identity.clone()),
                             };
                             if let Err(e) = mesh.send_to(&from, &reply).await {
                                 debug!(peer = %from, error = %e, "Failed to send Hello reply");
@@ -766,6 +873,7 @@ async fn session_loop(
                             peer_id: p.clone(),
                             display_name: peer_names.get(p).cloned().flatten(),
                             rtt_ms: clock.rtt_us(p).map(|rtt| rtt as f64 / 1000.0),
+                            slot: peer_slots.get(p).map(|&s| s as u32 + 1),
                         })
                         .collect();
 

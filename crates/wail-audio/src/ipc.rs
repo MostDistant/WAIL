@@ -93,12 +93,15 @@ impl IpcRecvBuffer {
 }
 
 const IPC_TAG_AUDIO: u8 = 0x01;
+const IPC_TAG_PEER_JOINED: u8 = 0x02;
+const IPC_TAG_PEER_LEFT: u8 = 0x03;
 
-/// IPC message encoding for Plugin ↔ App audio transport.
+/// IPC message encoding for Plugin ↔ App communication.
 ///
 /// Each IPC frame payload contains a tagged message:
-/// - Plugin→App (outgoing): peer_id is empty, wire_data is the encoded interval
-/// - App→Plugin (incoming): peer_id identifies the remote peer
+/// - `0x01` AudioInterval: peer_id + AudioWire data
+/// - `0x02` PeerJoined: peer_id + identity (for slot affinity)
+/// - `0x03` PeerLeft: peer_id
 pub struct IpcMessage;
 
 impl IpcMessage {
@@ -130,7 +133,74 @@ impl IpcMessage {
         let wire_data = payload[2 + pid_len..].to_vec();
         Some((peer_id, wire_data))
     }
+
+    /// Encode a PeerJoined message: tag + peer_id_len + peer_id + identity_len + identity.
+    pub fn encode_peer_joined(peer_id: &str, identity: &str) -> Vec<u8> {
+        let pid = peer_id.as_bytes();
+        let pid_len = pid.len().min(255) as u8;
+        let ident = identity.as_bytes();
+        let ident_len = ident.len().min(255) as u8;
+        let mut msg = Vec::with_capacity(3 + pid_len as usize + ident_len as usize);
+        msg.push(IPC_TAG_PEER_JOINED);
+        msg.push(pid_len);
+        msg.extend_from_slice(&pid[..pid_len as usize]);
+        msg.push(ident_len);
+        msg.extend_from_slice(&ident[..ident_len as usize]);
+        msg
+    }
+
+    /// Decode a PeerJoined message. Returns `(peer_id, identity)`.
+    pub fn decode_peer_joined(payload: &[u8]) -> Option<(String, String)> {
+        if payload.len() < 2 || payload[0] != IPC_TAG_PEER_JOINED {
+            return None;
+        }
+        let pid_len = payload[1] as usize;
+        if payload.len() < 2 + pid_len + 1 {
+            return None;
+        }
+        let peer_id = String::from_utf8_lossy(&payload[2..2 + pid_len]).to_string();
+        let ident_start = 2 + pid_len;
+        let ident_len = payload[ident_start] as usize;
+        if payload.len() < ident_start + 1 + ident_len {
+            return None;
+        }
+        let identity = String::from_utf8_lossy(&payload[ident_start + 1..ident_start + 1 + ident_len]).to_string();
+        Some((peer_id, identity))
+    }
+
+    /// Encode a PeerLeft message: tag + peer_id_len + peer_id.
+    pub fn encode_peer_left(peer_id: &str) -> Vec<u8> {
+        let pid = peer_id.as_bytes();
+        let pid_len = pid.len().min(255) as u8;
+        let mut msg = Vec::with_capacity(2 + pid_len as usize);
+        msg.push(IPC_TAG_PEER_LEFT);
+        msg.push(pid_len);
+        msg.extend_from_slice(&pid[..pid_len as usize]);
+        msg
+    }
+
+    /// Decode a PeerLeft message. Returns `peer_id`.
+    pub fn decode_peer_left(payload: &[u8]) -> Option<String> {
+        if payload.len() < 2 || payload[0] != IPC_TAG_PEER_LEFT {
+            return None;
+        }
+        let pid_len = payload[1] as usize;
+        if payload.len() < 2 + pid_len {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&payload[2..2 + pid_len]).to_string())
+    }
+
+    /// Get the tag byte from a payload, if any.
+    pub fn tag(payload: &[u8]) -> Option<u8> {
+        payload.first().copied()
+    }
 }
+
+/// IPC message tag constants for matching in recv plugin.
+pub const IPC_TAG_AUDIO_PUB: u8 = IPC_TAG_AUDIO;
+pub const IPC_TAG_PEER_JOINED_PUB: u8 = IPC_TAG_PEER_JOINED;
+pub const IPC_TAG_PEER_LEFT_PUB: u8 = IPC_TAG_PEER_LEFT;
 
 #[cfg(test)]
 mod tests {
@@ -344,5 +414,50 @@ mod tests {
     fn ipc_role_byte_constants_exist() {
         assert_eq!(IPC_ROLE_SEND, 0x00);
         assert_eq!(IPC_ROLE_RECV, 0x01);
+    }
+
+    // --- Peer lifecycle messages ---
+
+    #[test]
+    fn peer_joined_roundtrip() {
+        let encoded = IpcMessage::encode_peer_joined("peer-abc", "uuid-1234");
+        let (peer_id, identity) = IpcMessage::decode_peer_joined(&encoded).unwrap();
+        assert_eq!(peer_id, "peer-abc");
+        assert_eq!(identity, "uuid-1234");
+    }
+
+    #[test]
+    fn peer_joined_empty_identity() {
+        let encoded = IpcMessage::encode_peer_joined("peer-abc", "");
+        let (peer_id, identity) = IpcMessage::decode_peer_joined(&encoded).unwrap();
+        assert_eq!(peer_id, "peer-abc");
+        assert_eq!(identity, "");
+    }
+
+    #[test]
+    fn peer_joined_rejects_wrong_tag() {
+        let encoded = IpcMessage::encode_audio("peer-1", &[0xAA]);
+        assert!(IpcMessage::decode_peer_joined(&encoded).is_none());
+    }
+
+    #[test]
+    fn peer_left_roundtrip() {
+        let encoded = IpcMessage::encode_peer_left("peer-xyz");
+        let peer_id = IpcMessage::decode_peer_left(&encoded).unwrap();
+        assert_eq!(peer_id, "peer-xyz");
+    }
+
+    #[test]
+    fn peer_left_rejects_wrong_tag() {
+        let encoded = IpcMessage::encode_audio("peer-1", &[0xBB]);
+        assert!(IpcMessage::decode_peer_left(&encoded).is_none());
+    }
+
+    #[test]
+    fn tag_extraction() {
+        assert_eq!(IpcMessage::tag(&[IPC_TAG_AUDIO, 0x00]), Some(IPC_TAG_AUDIO));
+        assert_eq!(IpcMessage::tag(&[IPC_TAG_PEER_JOINED, 0x05]), Some(IPC_TAG_PEER_JOINED));
+        assert_eq!(IpcMessage::tag(&[IPC_TAG_PEER_LEFT, 0x03]), Some(IPC_TAG_PEER_LEFT));
+        assert_eq!(IpcMessage::tag(&[]), None);
     }
 }

@@ -99,13 +99,15 @@ mod tests {
         let msg = SyncMessage::Hello {
             peer_id: "abc123".to_string(),
             display_name: Some("TestUser".to_string()),
+            identity: Some("stable-uuid".to_string()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: SyncMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            SyncMessage::Hello { peer_id, display_name } => {
+            SyncMessage::Hello { peer_id, display_name, identity } => {
                 assert_eq!(peer_id, "abc123");
                 assert_eq!(display_name.as_deref(), Some("TestUser"));
+                assert_eq!(identity.as_deref(), Some("stable-uuid"));
             }
             _ => panic!("Wrong variant"),
         }

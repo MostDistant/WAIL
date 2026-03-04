@@ -40,6 +40,11 @@ pub enum SyncMessage {
         /// Human-readable name (e.g. "Ringo"). Old peers omit this field.
         #[serde(default)]
         display_name: Option<String>,
+        /// Persistent identity that survives reconnects — used for peer affinity
+        /// (slot re-assignment). Generated once per app install, stored locally.
+        /// Old peers omit this field.
+        #[serde(default)]
+        identity: Option<String>,
     },
     /// Announce audio capabilities (sent after Hello)
     AudioCapabilities {
@@ -122,13 +127,15 @@ mod tests {
         let msg = SyncMessage::Hello {
             peer_id: "abc123".into(),
             display_name: Some("Ringo".into()),
+            identity: Some("stable-uuid-1234".into()),
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let decoded: SyncMessage = serde_json::from_str(&json).expect("deserialize");
         match decoded {
-            SyncMessage::Hello { peer_id, display_name } => {
+            SyncMessage::Hello { peer_id, display_name, identity } => {
                 assert_eq!(peer_id, "abc123");
                 assert_eq!(display_name.as_deref(), Some("Ringo"));
+                assert_eq!(identity.as_deref(), Some("stable-uuid-1234"));
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -136,13 +143,14 @@ mod tests {
 
     #[test]
     fn hello_without_display_name_backward_compat() {
-        // Old-format JSON without display_name field
+        // Old-format JSON without display_name or identity fields
         let json = r#"{"type":"Hello","peer_id":"old-peer"}"#;
         let decoded: SyncMessage = serde_json::from_str(json).expect("deserialize");
         match decoded {
-            SyncMessage::Hello { peer_id, display_name } => {
+            SyncMessage::Hello { peer_id, display_name, identity } => {
                 assert_eq!(peer_id, "old-peer");
                 assert_eq!(display_name, None);
+                assert_eq!(identity, None);
             }
             other => panic!("unexpected variant: {other:?}"),
         }

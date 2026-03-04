@@ -81,6 +81,11 @@ pub struct IntervalRing {
     peer_slots: Vec<PeerSlot>,
     /// Maps peer_id → index into peer_slots for stable assignment
     peer_slot_map: Vec<(String, usize)>,
+    /// Maps peer_id → persistent identity (for slot affinity across reconnects)
+    peer_identity_map: Vec<(String, String)>,
+    /// Affinity reservations: identity → slot_index for peers that left.
+    /// When a peer with matching identity rejoins, they reclaim their old slot.
+    affinity_map: Vec<(String, usize)>,
 }
 
 /// A completed local recording ready for encoding.
@@ -134,6 +139,8 @@ impl IntervalRing {
             quantum,
             peer_slots,
             peer_slot_map: Vec::with_capacity(MAX_REMOTE_PEERS),
+            peer_identity_map: Vec::with_capacity(MAX_REMOTE_PEERS),
+            affinity_map: Vec::with_capacity(MAX_REMOTE_PEERS),
         }
     }
 
@@ -235,6 +242,8 @@ impl IntervalRing {
             slot.clear();
         }
         self.peer_slot_map.clear();
+        self.peer_identity_map.clear();
+        self.affinity_map.clear();
     }
 
     /// Current interval index, if any.
@@ -305,12 +314,85 @@ impl IntervalRing {
             .collect()
     }
 
+    /// Register a peer's persistent identity for slot affinity.
+    ///
+    /// Call this when a Hello is received with an identity. If this identity
+    /// has an affinity reservation from a previous session, the peer inherits
+    /// that slot on next `assign_peer_slot`.
+    pub fn notify_peer_joined(&mut self, peer_id: &str, identity: &str) {
+        // Remove any stale mapping for this peer_id
+        self.peer_identity_map.retain(|(pid, _)| pid != peer_id);
+        self.peer_identity_map.push((peer_id.to_string(), identity.to_string()));
+
+        // Check if there's an affinity reservation for this identity
+        if let Some(pos) = self.affinity_map.iter().position(|(ident, _)| ident == identity) {
+            let (_, slot_idx) = self.affinity_map.remove(pos);
+            if slot_idx < self.peer_slots.len() && !self.peer_slots[slot_idx].active {
+                // Reclaim the reserved slot — update peer_slot_map to point to this slot
+                self.peer_slot_map.retain(|(pid, _)| pid != peer_id);
+                self.peer_slot_map.push((peer_id.to_string(), slot_idx));
+                self.peer_slots[slot_idx].peer_id = peer_id.to_string();
+                self.peer_slots[slot_idx].active = true;
+                tracing::info!(
+                    peer_id, identity, slot = slot_idx,
+                    "Peer reclaimed affinity slot"
+                );
+            }
+        }
+    }
+
+    /// Remove a peer and free their slot, creating an affinity reservation
+    /// so the same identity can reclaim the slot on reconnect.
+    pub fn remove_peer(&mut self, peer_id: &str) {
+        // Find and remove the slot assignment
+        if let Some(pos) = self.peer_slot_map.iter().position(|(pid, _)| pid == peer_id) {
+            let (_, slot_idx) = self.peer_slot_map.remove(pos);
+
+            // Free the slot
+            if slot_idx < self.peer_slots.len() {
+                self.peer_slots[slot_idx].active = false;
+                self.peer_slots[slot_idx].samples.clear();
+                self.peer_slots[slot_idx].read_pos = 0;
+            }
+
+            // Create affinity reservation if we know this peer's identity
+            if let Some(ident_pos) = self.peer_identity_map.iter().position(|(pid, _)| pid == peer_id) {
+                let (_, identity) = self.peer_identity_map.remove(ident_pos);
+                // Remove any existing affinity for this identity (shouldn't happen, but be safe)
+                self.affinity_map.retain(|(ident, _)| *ident != identity);
+                self.affinity_map.push((identity.clone(), slot_idx));
+                tracing::info!(
+                    peer_id, identity = %identity, slot = slot_idx,
+                    "Peer left — slot reserved for affinity"
+                );
+            } else {
+                tracing::info!(
+                    peer_id, slot = slot_idx,
+                    "Peer left — slot freed (no identity for affinity)"
+                );
+            }
+        }
+    }
+
     /// Look up or assign a slot index for a peer_id. Returns None if all slots are full.
     fn assign_peer_slot(&mut self, peer_id: &str) -> Option<usize> {
         // Check existing assignment
         for &(ref pid, idx) in &self.peer_slot_map {
             if pid == peer_id {
                 return Some(idx);
+            }
+        }
+        // Check affinity via identity
+        if let Some(ident_pos) = self.peer_identity_map.iter().position(|(pid, _)| pid == peer_id) {
+            let identity = self.peer_identity_map[ident_pos].1.clone();
+            if let Some(aff_pos) = self.affinity_map.iter().position(|(ident, _)| *ident == identity) {
+                let (_, slot_idx) = self.affinity_map.remove(aff_pos);
+                if slot_idx < self.peer_slots.len() && !self.peer_slots[slot_idx].active {
+                    self.peer_slots[slot_idx].peer_id = peer_id.to_string();
+                    self.peer_slots[slot_idx].active = true;
+                    self.peer_slot_map.push((peer_id.to_string(), slot_idx));
+                    return Some(slot_idx);
+                }
             }
         }
         // Find first inactive slot
@@ -869,5 +951,154 @@ mod tests {
             expected_samples,
             rms,
         );
+    }
+
+    // --- Test: Peer affinity slots ---
+
+    #[test]
+    fn remove_peer_frees_slot() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        assert_eq!(ring.active_peer_slots().len(), 1);
+        let (slot_a, _) = ring.active_peer_slots()[0].clone();
+
+        ring.remove_peer("peer-a");
+        assert_eq!(ring.active_peer_slots().len(), 0);
+
+        // The freed slot should be reusable by a new peer
+        ring.feed_remote("peer-b", 1, vec![0.5f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+
+        let active = ring.active_peer_slots();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, slot_a, "New peer should get the freed slot");
+        assert_eq!(active[0].1, "peer-b");
+    }
+
+    #[test]
+    fn affinity_reclaims_same_slot_on_reconnect() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // peer-a gets slot 0, peer-b gets slot 1
+        ring.notify_peer_joined("peer-a", "identity-alice");
+        ring.notify_peer_joined("peer-b", "identity-bob");
+
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-b", 0, vec![0.7f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        let active = ring.active_peer_slots();
+        let slot_a = active.iter().find(|(_, pid)| pid == "peer-a").unwrap().0;
+        let slot_b = active.iter().find(|(_, pid)| pid == "peer-b").unwrap().0;
+        assert_ne!(slot_a, slot_b);
+
+        // peer-a disconnects
+        ring.remove_peer("peer-a");
+        assert_eq!(ring.active_peer_slots().len(), 1);
+
+        // peer-a reconnects with a NEW peer_id but same identity
+        ring.notify_peer_joined("peer-a-new", "identity-alice");
+
+        // Feed audio from the new peer_id
+        ring.feed_remote("peer-a-new", 2, vec![0.9f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+
+        // peer-a-new should have reclaimed peer-a's original slot
+        let active = ring.active_peer_slots();
+        let new_slot = active.iter().find(|(_, pid)| pid == "peer-a-new").unwrap().0;
+        assert_eq!(new_slot, slot_a, "Reconnected peer should reclaim original slot via affinity");
+
+        // peer-b should still have their original slot
+        let bob_slot = active.iter().find(|(_, pid)| pid == "peer-b").unwrap().0;
+        assert_eq!(bob_slot, slot_b);
+    }
+
+    #[test]
+    fn affinity_slot_taken_falls_back_to_first_fit() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // Set up: peer-a at slot 0
+        ring.notify_peer_joined("peer-a", "identity-alice");
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+        let slot_a = ring.active_peer_slots()[0].0;
+
+        // peer-a leaves — affinity reserved
+        ring.remove_peer("peer-a");
+
+        // A different peer takes slot 0
+        ring.feed_remote("peer-c", 1, vec![0.1f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+        let slot_c = ring.active_peer_slots().iter().find(|(_, pid)| pid == "peer-c").unwrap().0;
+        assert_eq!(slot_c, slot_a, "peer-c should take the freed slot");
+
+        // Now peer-a reconnects — their affinity slot is taken
+        ring.notify_peer_joined("peer-a-new", "identity-alice");
+        ring.feed_remote("peer-a-new", 3, vec![0.5f32; 128]);
+        ring.process(&input, &mut output, 48.0);
+
+        // Should get a different slot (first-fit fallback)
+        let active = ring.active_peer_slots();
+        let new_slot = active.iter().find(|(_, pid)| pid == "peer-a-new").unwrap().0;
+        assert_ne!(new_slot, slot_a, "Affinity slot is occupied — should get a different one");
+    }
+
+    #[test]
+    fn remove_peer_without_identity_frees_without_affinity() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        // peer-a joins WITHOUT identity (old client)
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        assert_eq!(ring.active_peer_slots().len(), 1);
+        ring.remove_peer("peer-a");
+        assert_eq!(ring.active_peer_slots().len(), 0);
+
+        // Slot is freed with no affinity reservation (no identity)
+        ring.feed_remote("peer-b", 1, vec![0.5f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+        assert_eq!(ring.active_peer_slots().len(), 1);
+    }
+
+    #[test]
+    fn reset_clears_affinity() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        ring.notify_peer_joined("peer-a", "identity-alice");
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+        ring.remove_peer("peer-a");
+
+        // Reset clears everything including affinity
+        ring.reset();
+
+        // Reconnect — should get first-fit (slot 0), not necessarily from affinity
+        ring.notify_peer_joined("peer-a-new", "identity-alice");
+        ring.process(&input, &mut output, 0.0);
+        ring.feed_remote("peer-a-new", 0, vec![0.5f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        let active = ring.active_peer_slots();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, 0, "After reset, slot 0 should be assigned first-fit");
     }
 }

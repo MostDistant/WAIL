@@ -12,8 +12,14 @@ mod params;
 use params::WailRecvParams;
 use wail_audio::{
     nearest_opus_rate, AudioBridge, AudioDecoder, AudioWire, IpcMessage, IpcRecvBuffer,
-    IPC_ROLE_RECV,
+    IPC_ROLE_RECV, IPC_TAG_AUDIO_PUB, IPC_TAG_PEER_JOINED_PUB, IPC_TAG_PEER_LEFT_PUB,
 };
+
+/// Peer lifecycle events sent from IPC thread to audio thread.
+enum PeerEvent {
+    Joined { peer_id: String, identity: String },
+    Left { peer_id: String },
+}
 
 /// Default IPC address (overridable via WAIL_IPC_ADDR env var).
 const DEFAULT_IPC_ADDR: &str = "127.0.0.1:9191";
@@ -33,6 +39,8 @@ pub struct WailRecvPlugin {
     bridge: Arc<Mutex<Option<AudioBridge>>>,
     sample_rate: f32,
     ipc_incoming_rx: Option<Receiver<(String, i64, Vec<f32>)>>,
+    /// Peer lifecycle events from IPC thread (for slot affinity)
+    peer_event_rx: Option<Receiver<PeerEvent>>,
     /// Pre-allocated playback buffer (reused every process call)
     playback_buf: Vec<f32>,
     /// Pre-allocated per-peer buffers (reused every process call)
@@ -50,6 +58,7 @@ impl Default for WailRecvPlugin {
             bridge: Arc::new(Mutex::new(None)),
             sample_rate: 48000.0,
             ipc_incoming_rx: None,
+            peer_event_rx: None,
             playback_buf: Vec::new(),
             peer_bufs: Default::default(),
             cumulative_samples: 0,
@@ -198,6 +207,9 @@ impl Plugin for WailRecvPlugin {
         let (in_tx, in_rx) = crossbeam_channel::bounded::<(String, i64, Vec<f32>)>(64);
         self.ipc_incoming_rx = Some(in_rx);
 
+        let (peer_tx, peer_rx) = crossbeam_channel::bounded::<PeerEvent>(32);
+        self.peer_event_rx = Some(peer_rx);
+
         let addr = std::env::var("WAIL_IPC_ADDR")
             .unwrap_or_else(|_| DEFAULT_IPC_ADDR.to_string());
 
@@ -207,7 +219,7 @@ impl Plugin for WailRecvPlugin {
         std::thread::Builder::new()
             .name("wail-ipc-recv".into())
             .spawn(move || {
-                ipc_thread_recv(in_tx, addr, ipc_sample_rate, ipc_channels)
+                ipc_thread_recv(in_tx, peer_tx, addr, ipc_sample_rate, ipc_channels)
             })
             .ok();
 
@@ -274,6 +286,20 @@ impl Plugin for WailRecvPlugin {
                 // The Vec<CompletedInterval> must be dropped inside permit_alloc
                 // to avoid triggering assert_no_alloc on deallocation.
                 permit_alloc(|| {
+                    // Process peer lifecycle events (slot affinity)
+                    if let Some(ref rx) = self.peer_event_rx {
+                        while let Ok(event) = rx.try_recv() {
+                            match event {
+                                PeerEvent::Joined { peer_id, identity } => {
+                                    bridge.notify_peer_joined(&peer_id, &identity);
+                                }
+                                PeerEvent::Left { peer_id } => {
+                                    bridge.remove_peer(&peer_id);
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(ref rx) = self.ipc_incoming_rx {
                         while let Ok((peer_id, interval_index, samples)) = rx.try_recv() {
                             bridge.feed_decoded(&peer_id, interval_index, samples);
@@ -309,6 +335,7 @@ impl Plugin for WailRecvPlugin {
 /// Receive-only IPC thread: reads from TCP, Opus-decodes, sends PCM to audio thread.
 fn ipc_thread_recv(
     incoming_tx: crossbeam_channel::Sender<(String, i64, Vec<f32>)>,
+    peer_event_tx: crossbeam_channel::Sender<PeerEvent>,
     addr: String,
     sample_rate: u32,
     channels: u16,
@@ -364,33 +391,50 @@ fn ipc_thread_recv(
                 Ok(n) => {
                     recv_buf.push(&read_buf[..n]);
                     while let Some(payload) = recv_buf.next_frame() {
-                        if let Some((peer_id, wire_data)) = IpcMessage::decode_audio(&payload) {
-                            match AudioWire::decode(&wire_data) {
-                                Ok(interval) => {
-                                    if let Some(ref mut dec) = decoder {
-                                        match dec.decode_interval(&interval.opus_data) {
-                                            Ok(samples) => {
-                                                let _ = incoming_tx.try_send((
-                                                    peer_id,
-                                                    interval.index,
-                                                    samples,
-                                                ));
+                        match IpcMessage::tag(&payload) {
+                            Some(IPC_TAG_AUDIO_PUB) => {
+                                if let Some((peer_id, wire_data)) = IpcMessage::decode_audio(&payload) {
+                                    match AudioWire::decode(&wire_data) {
+                                        Ok(interval) => {
+                                            if let Some(ref mut dec) = decoder {
+                                                match dec.decode_interval(&interval.opus_data) {
+                                                    Ok(samples) => {
+                                                        let _ = incoming_tx.try_send((
+                                                            peer_id,
+                                                            interval.index,
+                                                            samples,
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                            error = %e,
+                                                            "IPC recv: failed to decode Opus audio"
+                                                        );
+                                                    }
+                                                }
                                             }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    error = %e,
-                                                    "IPC recv: failed to decode Opus audio"
-                                                );
-                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                "IPC recv: failed to decode wire data"
+                                            );
                                         }
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "IPC recv: failed to decode wire data"
-                                    );
+                            }
+                            Some(IPC_TAG_PEER_JOINED_PUB) => {
+                                if let Some((peer_id, identity)) = IpcMessage::decode_peer_joined(&payload) {
+                                    let _ = peer_event_tx.try_send(PeerEvent::Joined { peer_id, identity });
                                 }
+                            }
+                            Some(IPC_TAG_PEER_LEFT_PUB) => {
+                                if let Some(peer_id) = IpcMessage::decode_peer_left(&payload) {
+                                    let _ = peer_event_tx.try_send(PeerEvent::Left { peer_id });
+                                }
+                            }
+                            _ => {
+                                tracing::debug!("IPC recv: unknown message tag");
                             }
                         }
                     }

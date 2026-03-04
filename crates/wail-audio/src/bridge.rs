@@ -176,6 +176,16 @@ impl AudioBridge {
         self.ring.active_peer_slots()
     }
 
+    /// Register a peer's persistent identity for slot affinity.
+    pub fn notify_peer_joined(&mut self, peer_id: &str, identity: &str) {
+        self.ring.notify_peer_joined(peer_id, identity);
+    }
+
+    /// Remove a peer and free their slot, reserving it for affinity reconnect.
+    pub fn remove_peer(&mut self, peer_id: &str) {
+        self.ring.remove_peer(peer_id);
+    }
+
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }

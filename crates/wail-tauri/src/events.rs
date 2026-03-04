@@ -38,6 +38,10 @@ pub struct PeerInfo {
     pub peer_id: String,
     pub display_name: Option<String>,
     pub rtt_ms: Option<f64>,
+    /// 1-based slot number corresponding to the DAW aux output ("Peer N").
+    /// Populated when the peer's identity is known for affinity tracking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

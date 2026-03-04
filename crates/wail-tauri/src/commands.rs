@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 use tracing::{info, warn};
 
+use crate::identity::PeerIdentity;
 use crate::loki::TelemetryHandle;
 use crate::recorder::RecordingConfig;
 use crate::session::{SessionCommand, SessionConfig, SessionHandle};
@@ -49,6 +50,7 @@ pub async fn list_public_rooms() -> Result<Vec<PublicRoomInfo>, String> {
 pub fn join_room(
     app: tauri::AppHandle,
     state: State<'_, SessionState>,
+    identity: State<'_, PeerIdentity>,
     room: String,
     password: Option<String>,
     display_name: String,
@@ -73,6 +75,7 @@ pub fn join_room(
         room,
         password,
         display_name,
+        identity: identity.0.clone(),
         bpm,
         bars: bars.unwrap_or(4),
         quantum: quantum.unwrap_or(4.0),
