@@ -24,6 +24,10 @@ class Wail < Formula
   depends_on :macos # requires macOS WebKit (used by Tauri)
 
   def install
+    # CMake 4.x rejects old cmake_minimum_required() values in rusty_link's
+    # vendored Ableton Link SDK. This env var tells CMake to accept them.
+    ENV["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"
+
     # Build the main app binary.
     # Note: this produces the raw wail-tauri binary, not a full .app bundle.
     # For the polished macOS .app, use the DMG from the Releases page instead.
