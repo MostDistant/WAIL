@@ -7,7 +7,6 @@
 # To install:
 #   brew tap quasor/wail
 #   brew install quasor/wail/wail
-#   wail-install-plugins
 
 class Wail < Formula
   desc "Sync Ableton Link sessions across the internet with intervalic audio"
@@ -50,20 +49,42 @@ class Wail < Formula
     (lib/"wail-plugin-send.vst3").install Dir["target/bundled/wail-plugin-send.vst3/"]
     (lib/"wail-plugin-recv.vst3").install Dir["target/bundled/wail-plugin-recv.vst3/"]
 
-    # Install the plugin installation helper script.
+    # Install the plugin installation helper script (useful for manual reinstall).
     bin.install "scripts/wail-install-plugins.sh" => "wail-install-plugins"
+  end
+
+  def post_install
+    clap_dest = Pathname.new(Dir.home)/"Library/Audio/Plug-Ins/CLAP"
+    vst3_dest = Pathname.new(Dir.home)/"Library/Audio/Plug-Ins/VST3"
+    clap_dest.mkpath
+    vst3_dest.mkpath
+
+    %w[wail-plugin-send wail-plugin-recv].each do |name|
+      clap_src = lib/"#{name}.clap"
+      vst3_src = lib/"#{name}.vst3"
+      if clap_src.exist?
+        dest = clap_dest/"#{name}.clap"
+        dest.rmtree if dest.exist?
+        cp_r clap_src, dest
+      end
+      if vst3_src.exist?
+        dest = vst3_dest/"#{name}.vst3"
+        dest.rmtree if dest.exist?
+        cp_r vst3_src, dest
+      end
+    end
   end
 
   def caveats
     <<~EOS
-      To install the DAW plugins into your Audio/Plug-Ins directories, run:
-        wail-install-plugins
-
-      This copies the CLAP and VST3 bundles to:
+      CLAP and VST3 plugins have been installed to:
         ~/Library/Audio/Plug-Ins/CLAP/
         ~/Library/Audio/Plug-Ins/VST3/
 
-      Then rescan plugins in your DAW.
+      Rescan plugins in your DAW to pick them up.
+
+      To reinstall plugins manually at any time, run:
+        wail-install-plugins
 
       Note: `wail` launches the app binary directly. For the polished macOS .app
       bundle (dock icon, native menu bar), download the DMG from:
