@@ -425,12 +425,16 @@ fn ipc_thread_recv(
                             }
                             Some(IPC_TAG_PEER_JOINED_PUB) => {
                                 if let Some((peer_id, identity)) = IpcMessage::decode_peer_joined(&payload) {
-                                    let _ = peer_event_tx.try_send(PeerEvent::Joined { peer_id, identity });
+                                    if let Err(e) = peer_event_tx.try_send(PeerEvent::Joined { peer_id, identity }) {
+                                        tracing::warn!(error = %e, "IPC recv: failed to send PeerJoined event (channel full)");
+                                    }
                                 }
                             }
                             Some(IPC_TAG_PEER_LEFT_PUB) => {
                                 if let Some(peer_id) = IpcMessage::decode_peer_left(&payload) {
-                                    let _ = peer_event_tx.try_send(PeerEvent::Left { peer_id });
+                                    if let Err(e) = peer_event_tx.try_send(PeerEvent::Left { peer_id }) {
+                                        tracing::warn!(error = %e, "IPC recv: failed to send PeerLeft event (channel full)");
+                                    }
                                 }
                             }
                             _ => {
