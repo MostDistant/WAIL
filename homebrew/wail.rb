@@ -19,6 +19,7 @@ class Wail < Formula
   head "https://github.com/quasor/WAIL.git", branch: "main", submodules: true
 
   depends_on "cmake" => :build
+  depends_on "pkg-config" => :build
   depends_on "rust" => :build
   depends_on "opus"
   depends_on :macos # requires macOS WebKit (used by Tauri)
