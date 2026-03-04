@@ -413,8 +413,10 @@ impl PeerMesh {
     }
 
     /// Spawn a task that reads sync messages from a peer and forwards to the unified channel.
+    /// Signals peer failure when the reader exits (channel closed).
     fn spawn_message_reader(&self, remote_id: &str, pc: &mut PeerConnection) {
         let sync_tx = self.sync_tx.clone();
+        let failure_tx = self.failure_tx.clone();
         let rid = remote_id.to_string();
 
         let Some(mut rx) = pc.take_sync_rx() else {
@@ -428,12 +430,16 @@ impl PeerMesh {
                     break;
                 }
             }
+            warn!(peer = %rid, "Sync reader exited — signaling peer failure");
+            let _ = failure_tx.send(rid);
         });
     }
 
     /// Spawn a task that reads audio data from a peer and forwards to the unified audio channel.
+    /// Signals peer failure when the reader exits (channel closed).
     fn spawn_audio_reader(&self, remote_id: &str, pc: &mut PeerConnection) {
         let audio_tx = self.audio_tx.clone();
+        let failure_tx = self.failure_tx.clone();
         let rid = remote_id.to_string();
 
         let Some(mut rx) = pc.take_audio_rx() else {
@@ -452,6 +458,8 @@ impl PeerMesh {
                     Err(mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
+            warn!(peer = %rid, "Audio reader exited — signaling peer failure");
+            let _ = failure_tx.send(rid);
         });
     }
 

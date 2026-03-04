@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tauri::{AppHandle, Emitter, Manager};
@@ -245,6 +245,11 @@ async fn session_loop(
         _ => None,
     };
 
+    // Peer liveness tracking — detect silent disconnections
+    let mut peer_last_seen: HashMap<String, Instant> = HashMap::new();
+    let mut liveness_interval = tokio::time::interval(Duration::from_secs(15));
+    const PEER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(30);
+
     // Reconnection state
     let mut peer_reconnect_attempts: HashMap<String, u32> = HashMap::new();
     let (reconnect_tx, mut reconnect_rx) = mpsc::channel::<String>(16);
@@ -439,6 +444,7 @@ async fn session_loop(
                         peer_identities.remove(&pid);
                         hello_sent.remove(&pid);
                         peer_reconnect_attempts.remove(&pid);
+                        peer_last_seen.remove(&pid);
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                     }
                     Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) => {
@@ -478,6 +484,7 @@ async fn session_loop(
                             peer_names.remove(&pid);
                             peer_identities.remove(&pid);
                             hello_sent.remove(&pid);
+                            peer_last_seen.remove(&pid);
                             mesh.remove_peer(&pid).await;
                             let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                         } else {
@@ -507,6 +514,11 @@ async fn session_loop(
                             let backoff_ms = (1000u64 * 2u64.pow(attempt.min(5) - 1)).min(30000);
                             ui_info!(&app, "Signaling reconnect attempt {attempt} in {backoff_ms}ms...");
                             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+
+                            if attempt == 10 {
+                                ui_warn!(&app, "Signaling reconnection stale after {attempt} attempts — still retrying");
+                                let _ = app.emit("session:stale", SessionStale { attempts: attempt });
+                            }
 
                             // Check for disconnect command during backoff
                             if let Ok(cmd) = cmd_rx.try_recv() {
@@ -542,6 +554,7 @@ async fn session_loop(
                                     peer_identities.clear();
                                     hello_sent.clear();
                                     peer_reconnect_attempts.clear();
+                                    peer_last_seen.clear();
                                     clock = ClockSync::new();
                                     signaling_reconnected = true;
                                     ui_info!(&app, "Signaling reconnected (attempt {attempt})");
@@ -592,6 +605,7 @@ async fn session_loop(
 
             // --- Incoming sync messages from peers ---
             Some((from, msg)) = sync_rx.recv() => {
+                peer_last_seen.insert(from.clone(), Instant::now());
                 match msg {
                     SyncMessage::Hello { peer_id: pid, display_name: name, identity: remote_identity } => {
                         let name_display = name.as_deref().unwrap_or("(anonymous)");
@@ -731,6 +745,7 @@ async fn session_loop(
 
             // --- Incoming audio data from peers → forward to plugin ---
             Some((from, data)) = audio_rx.recv() => {
+                peer_last_seen.insert(from.clone(), Instant::now());
                 audio_intervals_received += 1;
                 audio_bytes_recv += data.len() as u64;
                 let peer_name = peer_names.get(&from).and_then(|n| n.as_deref()).unwrap_or(&from);
@@ -848,6 +863,21 @@ async fn session_loop(
                             }
                         }
                     }
+                }
+            }
+
+            // --- Peer liveness watchdog ---
+            _ = liveness_interval.tick() => {
+                let now = Instant::now();
+                let dead_peers: Vec<String> = peer_last_seen.iter()
+                    .filter(|(_, &last)| now.duration_since(last) > PEER_LIVENESS_TIMEOUT)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for dead_id in dead_peers {
+                    let name = peer_names.get(&dead_id).and_then(|n| n.as_deref()).unwrap_or(&dead_id);
+                    ui_warn!(&app, "Peer {name} timed out (no messages for {PEER_LIVENESS_TIMEOUT:?})");
+                    peer_last_seen.remove(&dead_id);
+                    mesh.close_peer(&dead_id).await;
                 }
             }
 

@@ -59,6 +59,9 @@ struct PollMessage {
 #[derive(serde::Deserialize)]
 struct PollResponse {
     messages: Vec<PollMessage>,
+    /// Set to `true` by the server when this peer has been evicted (stale heartbeat).
+    #[serde(default)]
+    evicted: bool,
 }
 
 impl SignalingClient {
@@ -202,6 +205,10 @@ impl SignalingClient {
                         };
                         match serde_json::from_str::<PollResponse>(&text) {
                             Ok(poll) => {
+                                if poll.evicted {
+                                    warn!("Server indicates peer was evicted (stale heartbeat) — triggering reconnection");
+                                    return; // Drop incoming_tx, closing the channel → session sees Ok(None)
+                                }
                                 for pm in poll.messages {
                                     if pm.seq > last_seq {
                                         last_seq = pm.seq;

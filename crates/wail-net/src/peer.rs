@@ -134,6 +134,8 @@ pub struct PeerConnection {
     /// ICE candidates that arrived before remote description was set
     pending_candidates: Vec<RTCIceCandidateInit>,
     remote_desc_set: bool,
+    /// Failure signal — sends peer ID when connection or DataChannel fails
+    failure_tx: mpsc::UnboundedSender<String>,
 }
 
 impl PeerConnection {
@@ -175,7 +177,7 @@ impl PeerConnection {
 
         // Monitor connection state — notify failure channel on Failed/Disconnected
         let rpid = remote_peer_id.clone();
-        let fail_tx = failure_tx;
+        let fail_tx = failure_tx.clone();
         pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
             match state {
                 RTCPeerConnectionState::Failed => {
@@ -229,6 +231,7 @@ impl PeerConnection {
             pending_sync: Arc::new(Mutex::new(Vec::new())),
             pending_candidates: Vec::new(),
             remote_desc_set: false,
+            failure_tx,
         })
     }
 
@@ -272,6 +275,7 @@ impl PeerConnection {
         let dc_sync_slot = self.dc_sync.clone();
         let dc_audio_slot = self.dc_audio.clone();
         let pending_sync = self.pending_sync.clone();
+        let fail_tx = self.failure_tx.clone();
 
         self.pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let incoming_tx = incoming_tx.clone();
@@ -280,6 +284,7 @@ impl PeerConnection {
             let dc_sync_slot = dc_sync_slot.clone();
             let dc_audio_slot = dc_audio_slot.clone();
             let pending_sync = pending_sync.clone();
+            let fail_tx = fail_tx.clone();
             Box::pin(async move {
                 let label = dc.label().to_string();
                 info!(peer = %rpid, label = %label, "Data channel opened by remote");
@@ -307,6 +312,20 @@ impl PeerConnection {
                             })
                         }));
 
+                        let rpid_close = rpid.clone();
+                        let fail_tx_close = fail_tx.clone();
+                        dc.on_close(Box::new(move || {
+                            warn!(peer = %rpid_close, "Sync DataChannel closed (responder)");
+                            let _ = fail_tx_close.send(rpid_close.clone());
+                            Box::pin(async {})
+                        }));
+
+                        let rpid_err = rpid.clone();
+                        dc.on_error(Box::new(move |err| {
+                            warn!(peer = %rpid_err, error = %err, "Sync DataChannel error (responder)");
+                            Box::pin(async {})
+                        }));
+
                         let tx = incoming_tx.clone();
                         dc.on_message(Box::new(move |msg: DataChannelMessage| {
                             let tx = tx.clone();
@@ -327,6 +346,21 @@ impl PeerConnection {
                             info!(peer = %rpid_audio, label = %dc_audio_clone.label(), "Audio channel open (responder)");
                             Box::pin(async {})
                         }));
+
+                        let rpid_close = rpid.clone();
+                        let fail_tx_close = fail_tx.clone();
+                        dc.on_close(Box::new(move || {
+                            warn!(peer = %rpid_close, "Audio DataChannel closed (responder)");
+                            let _ = fail_tx_close.send(rpid_close.clone());
+                            Box::pin(async {})
+                        }));
+
+                        let rpid_err = rpid.clone();
+                        dc.on_error(Box::new(move |err| {
+                            warn!(peer = %rpid_err, error = %err, "Audio DataChannel error (responder)");
+                            Box::pin(async {})
+                        }));
+
                         let (_reassembly, handler) = make_audio_handler(audio_tx.clone());
                         dc.on_message(Box::new(handler));
                     }
@@ -479,6 +513,20 @@ impl PeerConnection {
             })
         }));
 
+        let rpid_close = self.remote_peer_id.clone();
+        let fail_tx = self.failure_tx.clone();
+        dc.on_close(Box::new(move || {
+            warn!(peer = %rpid_close, "Sync DataChannel closed");
+            let _ = fail_tx.send(rpid_close.clone());
+            Box::pin(async {})
+        }));
+
+        let rpid_err = self.remote_peer_id.clone();
+        dc.on_error(Box::new(move |err| {
+            warn!(peer = %rpid_err, error = %err, "Sync DataChannel error");
+            Box::pin(async {})
+        }));
+
         let tx = incoming_tx.clone();
         dc.on_message(Box::new(move |msg: DataChannelMessage| {
             let tx = tx.clone();
@@ -506,6 +554,20 @@ impl PeerConnection {
         let dc_clone = dc.clone();
         dc.on_open(Box::new(move || {
             info!(peer = %rpid, label = %dc_clone.label(), "Audio channel open");
+            Box::pin(async {})
+        }));
+
+        let rpid_close = self.remote_peer_id.clone();
+        let fail_tx = self.failure_tx.clone();
+        dc.on_close(Box::new(move || {
+            warn!(peer = %rpid_close, "Audio DataChannel closed");
+            let _ = fail_tx.send(rpid_close.clone());
+            Box::pin(async {})
+        }));
+
+        let rpid_err = self.remote_peer_id.clone();
+        dc.on_error(Box::new(move |err| {
+            warn!(peer = %rpid_err, error = %err, "Audio DataChannel error");
             Box::pin(async {})
         }));
 

@@ -839,10 +839,15 @@ export default async function(req: Request): Promise<Response> {
         if (!room || !peer_id) return json({ error: "room and peer_id required" }, 400);
 
         // Heartbeat: update last_seen
-        await sqlite.execute({
+        const heartbeat = await sqlite.execute({
           sql: "UPDATE peers SET last_seen = ? WHERE room = ? AND peer_id = ?",
           args: [now(), room, peer_id],
         });
+
+        // If the peer doesn't exist (was evicted or never joined), signal eviction
+        if (heartbeat.rowsAffected === 0) {
+          return json({ messages: [], evicted: true });
+        }
 
         // Clean stale peers
         await cleanStalePeers(room);

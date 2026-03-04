@@ -71,6 +71,11 @@ pub struct PeerReconnectingEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionStale {
+    pub attempts: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub level: String,
     pub message: String,
