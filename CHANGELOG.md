@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.12 (2026-03-04)
+
+### Fixes
+
+- clear session state when session loop ends (#58)
+
 ## 0.4.11 (2026-03-04)
 
 ### Fixes
