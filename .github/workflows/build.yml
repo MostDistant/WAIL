@@ -43,6 +43,7 @@ jobs:
         run: cargo test
 
   build-macos:
+    needs: test
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -108,6 +109,7 @@ jobs:
           path: dist/
 
   build-windows:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,6 +190,7 @@ jobs:
           path: dist\
 
   build-linux:
+    needs: test
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
