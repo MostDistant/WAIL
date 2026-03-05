@@ -508,10 +508,10 @@ async fn session_loop(
                         }
                     }
                     Ok(Some(wail_net::MeshEvent::PeerListReceived(n))) => {
+                        audio_gate.on_peer_list(n);
                         if n == 0 {
                             ui_info!(&app, "First peer in room — audio send ungated");
                         } else {
-                            audio_gate.on_peer_list(n);
                             ui_info!(&app, "Joined room with {n} peer(s) — audio send gated until beat sync");
                         }
                     }
