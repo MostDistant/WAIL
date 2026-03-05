@@ -92,7 +92,7 @@ NINJAM-style double-buffer pattern with two separate plugins:
 1. **WAIL Send** plugin captures DAW audio into record slot for current interval
 2. At interval boundary: record slot → Opus encode → IPC → wail-app → WebRTC DataChannel
 3. **WAIL Recv** plugin receives remote intervals via IPC, decoded and mixed into playback slot
-4. Playback slot feeds audio output to DAW (main bus + up to 15 per-peer aux outputs)
+4. Playback slot feeds audio output to DAW (main bus + up to 31 per-slot aux outputs)
 5. Latency = exactly 1 interval (by design, like NINJAM)
 
 Two WebRTC DataChannels per peer:
@@ -174,6 +174,7 @@ Releases are fully automated — no manual `knope` commands needed:
 - **Never manually create git tags** for releases — GitHub Actions handles tagging.
 - **Never run `knope release` or `knope prepare-release` locally** — GitHub Actions runs both automatically.
 - Use conventional commit prefixes: `feat:`, `fix:`, `chore:`, `feat!:` (breaking).
+- **Keep docs in sync.** For each PR, check whether `README.md` and `docs/architecture.md` need updates to reflect the changes. User-facing features should update README; architectural changes (wire format, IPC protocol, crate structure, new design decisions) should update `docs/architecture.md`.
 
 ## Common Tasks
 

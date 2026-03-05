@@ -31,9 +31,9 @@ This builds the WAIL binary and DAW plugins from source. The CLAP and VST3 plugi
    - *REAPER:* Install [ReaBlink](https://github.com/ak5k/reablink), which adds Ableton Link support via a REAPER extension.
    - Other DAWs — check your DAW's documentation for Link support.
 
-3. **Load WAIL Send** on the track or bus you want to share. This plugin captures audio and sends it to your peers at each interval boundary.
+3. **Load WAIL Send** on each track or bus you want to share. Each instance captures audio and sends it to your peers at each interval boundary. Use the **Stream Index** parameter (0–30) to assign each instance a unique stream — e.g., drums on stream 0, synth on stream 1.
 
-4. **Load WAIL Recv** on a separate track to hear remote peers. It decodes incoming audio and provides a main mix output plus per-peer auxiliary outputs.
+4. **Load WAIL Recv** on a separate track to hear remote peers. It decodes incoming audio and provides a main mix output plus up to 31 per-slot auxiliary outputs (one per unique peer/stream combination).
 
 5. **Join a room** in the WAIL app. Enter a room name and your display name. Set a password to create a private room, or leave it blank for a public room. You can also browse existing public rooms from the "Public Rooms" tab.
 
@@ -45,9 +45,9 @@ WAIL has three components that work together:
 
 - **WAIL app** — The desktop app that handles networking. It connects to the signaling server, establishes WebRTC peer connections, and bridges audio and sync data between the DAW plugins and remote peers.
 
-- **WAIL Send** (CLAP/VST3 plugin) — Place this on a track or bus in your DAW to capture audio. At each interval boundary, the recorded audio is Opus-encoded and sent to all connected peers via the WAIL app.
+- **WAIL Send** (CLAP/VST3 plugin) — Place this on a track or bus in your DAW to capture audio. At each interval boundary, the recorded audio is Opus-encoded and sent to all connected peers via the WAIL app. You can load multiple instances with different Stream Index values to send separate audio streams (e.g., drums and synth independently).
 
-- **WAIL Recv** (CLAP/VST3 plugin) — Place this on a track in your DAW to hear remote peers. It receives and decodes incoming audio intervals, mixing them into the main output with additional per-peer auxiliary outputs.
+- **WAIL Recv** (CLAP/VST3 plugin) — Place this on a track in your DAW to hear remote peers. It receives and decodes incoming audio intervals, mixing them into the main output with up to 31 auxiliary outputs (one per unique peer/stream slot).
 
 ## Troubleshooting
 
