@@ -6,8 +6,48 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-test-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: linux-test-cargo-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            libopus-dev \
+            cmake \
+            g++
+
+      - name: Run tests
+        run: cargo test --workspace --exclude wail-plugin-test
+
   build-macos:
+    needs: test
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +113,7 @@ jobs:
           path: dist/
 
   build-windows:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -153,6 +194,7 @@ jobs:
           path: dist\
 
   build-linux:
+    needs: test
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -205,6 +247,9 @@ jobs:
 
       - name: Build plugin
         run: cargo xtask build-plugin
+
+      - name: Run plugin integration tests
+        run: cargo test -p wail-plugin-test
 
       - name: Build Tauri app
         run: cargo tauri build

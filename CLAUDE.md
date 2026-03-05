@@ -182,7 +182,7 @@ Releases are fully automated — no manual `knope` commands needed:
 - **Never manually edit version numbers** in `Cargo.toml` or `tauri.conf.json` — knope handles this.
 - **Never manually create git tags** for releases — GitHub Actions handles tagging.
 - **Never run `knope release` or `knope prepare-release` locally** — GitHub Actions runs both automatically.
-- Use conventional commit prefixes: `feat:`, `fix:`, `chore:`, `feat!:` (breaking).
+- **Use the correct conventional commit prefix.** New features MUST use `feat:`, bug fixes MUST use `fix:`, breaking changes MUST use `feat!:` or `fix!:`. Never use `fix:` for a new feature — this causes knope to bump only the patch version instead of minor. Similarly, never use unprefixed or `chore:` commits for user-facing changes — knope ignores them entirely. Get the prefix right; it directly controls the version bump.
 - **Keep docs in sync.** For each PR, check whether `README.md` and `docs/architecture.md` need updates to reflect the changes. User-facing features should update README; architectural changes (wire format, IPC protocol, crate structure, new design decisions) should update `docs/architecture.md`.
 
 ## Common Tasks

@@ -144,6 +144,7 @@ fn bundle_plugin(args: &[String]) -> Result<()> {
     let profile = if release { "release" } else { "debug" };
 
     let root = workspace_dir();
+    #[cfg(target_os = "macos")]
     let version = cargo_version(&root)?;
 
     // (cargo-package-name, lib-stem, display-name, bundle-id-prefix)
@@ -162,6 +163,7 @@ fn bundle_plugin(args: &[String]) -> Result<()> {
         ),
     ];
 
+    #[allow(unused_variables)]
     for &(pkg, lib, display_name, bundle_id) in plugins {
         println!("Building {pkg} ({profile})...");
         let mut cmd = Command::new(env!("CARGO"));
