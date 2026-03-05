@@ -173,10 +173,10 @@ async fn session_loop(
     let mut peer_names: HashMap<String, Option<String>> = HashMap::new();
     // Track peers' persistent identities (for slot affinity)
     let mut peer_identities: HashMap<String, String> = HashMap::new();
-    // Track peer → slot assignments (mirrors recv plugin's ring for UI labeling)
-    let mut peer_slots: HashMap<String, usize> = HashMap::new();
-    // Affinity: identity → slot for peers that left
-    let mut slot_affinity: HashMap<String, usize> = HashMap::new();
+    // Track (peer_id, stream_id) → slot assignments (mirrors recv plugin's ring for UI labeling)
+    let mut peer_slots: HashMap<(String, u16), usize> = HashMap::new();
+    // Affinity: (identity, stream_id) → slot for peers that left
+    let mut slot_affinity: HashMap<(String, u16), usize> = HashMap::new();
     let mut slot_occupied: [bool; wail_audio::MAX_REMOTE_PEERS] = [false; wail_audio::MAX_REMOTE_PEERS];
     // Track which peers we've sent Hello to (prevents infinite Hello loops)
     let mut hello_sent: HashSet<String> = HashSet::new();
@@ -309,8 +309,32 @@ async fn session_loop(
                         }
                         let role = role_buf[0];
 
+                        // Send plugins send 2 additional bytes: stream_index as u16 LE
+                        let mut stream_index: u16 = 0;
+                        if role != IPC_ROLE_RECV {
+                            let mut si_buf = [0u8; 2];
+                            match tokio::time::timeout(
+                                Duration::from_millis(200),
+                                read_half.read_exact(&mut si_buf),
+                            ).await {
+                                Ok(Ok(_)) => {
+                                    stream_index = u16::from_le_bytes(si_buf);
+                                }
+                                Ok(Err(e)) => {
+                                    tracing::warn!("Plugin (conn {conn_id}): IO error reading stream_index: {e}");
+                                }
+                                Err(_) => {
+                                    // Legacy send plugin — no stream_index, default to 0
+                                }
+                            }
+                        }
+
                         let role_name = if role == IPC_ROLE_RECV { "recv" } else { "send" };
-                        ui_info!(&app, "Plugin (conn {conn_id}) identified as {role_name}");
+                        if role != IPC_ROLE_RECV {
+                            ui_info!(&app, "Plugin (conn {conn_id}) identified as {role_name}, stream_index={stream_index}");
+                        } else {
+                            ui_info!(&app, "Plugin (conn {conn_id}) identified as {role_name}");
+                        }
 
                         // Only recv plugins get forwarded audio from remote peers
                         if role == IPC_ROLE_RECV {
@@ -412,6 +436,7 @@ async fn session_loop(
                             channel_counts: vec![1, 2],
                             can_send: true,
                             can_receive: true,
+                            max_streams: None,
                         };
                         mesh.broadcast(&caps).await;
                     }
@@ -435,11 +460,17 @@ async fn session_loop(
                             ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
                         }
 
-                        // Free slot and create affinity reservation
-                        if let Some(slot) = peer_slots.remove(&pid) {
-                            slot_occupied[slot] = false;
-                            if let Some(ident) = peer_identities.get(&pid) {
-                                slot_affinity.insert(ident.clone(), slot);
+                        // Free all slots for this peer and create affinity reservations
+                        let peer_keys: Vec<(String, u16)> = peer_slots.keys()
+                            .filter(|(p, _)| p == &pid)
+                            .cloned()
+                            .collect();
+                        for key in peer_keys {
+                            if let Some(slot) = peer_slots.remove(&key) {
+                                slot_occupied[slot] = false;
+                                if let Some(ident) = peer_identities.get(&pid) {
+                                    slot_affinity.insert((ident.clone(), key.1), slot);
+                                }
                             }
                         }
 
@@ -475,11 +506,17 @@ async fn session_loop(
                                 ipc_recv_writers.retain(|(id, _)| !dead.contains(id));
                             }
 
-                            // Free slot and create affinity reservation
-                            if let Some(slot) = peer_slots.remove(&pid) {
-                                slot_occupied[slot] = false;
-                                if let Some(ident) = peer_identities.get(&pid) {
-                                    slot_affinity.insert(ident.clone(), slot);
+                            // Free all slots and create affinity reservations
+                            let peer_keys: Vec<(String, u16)> = peer_slots.keys()
+                                .filter(|(p, _)| p == &pid)
+                                .cloned()
+                                .collect();
+                            for key in peer_keys {
+                                if let Some(slot) = peer_slots.remove(&key) {
+                                    slot_occupied[slot] = false;
+                                    if let Some(ident) = peer_identities.get(&pid) {
+                                        slot_affinity.insert((ident.clone(), key.1), slot);
+                                    }
                                 }
                             }
 
@@ -554,11 +591,11 @@ async fn session_loop(
                                     audio_rx = new_audio_rx;
                                     // Don't clear slot_affinity — preserve across signaling reconnect
                                     // so peers get the same slot when they rejoin
-                                    for (pid, slot) in peer_slots.drain() {
+                                    for ((pid, stream_id), slot) in peer_slots.drain() {
                                         slot_occupied[slot] = false;
                                         // Create affinity for all current peers
                                         if let Some(ident) = peer_identities.get(&pid) {
-                                            slot_affinity.insert(ident.clone(), slot);
+                                            slot_affinity.insert((ident.clone(), stream_id), slot);
                                         }
                                     }
                                     peer_names.clear();
@@ -627,17 +664,19 @@ async fn session_loop(
                         if let Some(ref rid) = remote_identity {
                             peer_identities.insert(pid.clone(), rid.clone());
 
-                            // Assign slot (mirror recv plugin's logic for UI labeling)
-                            if !peer_slots.contains_key(&pid) {
+                            // Assign slot for stream 0 (mirror recv plugin's logic for UI labeling)
+                            let key = (pid.clone(), 0u16);
+                            if !peer_slots.contains_key(&key) {
                                 // Check affinity first
-                                let affinity_slot = slot_affinity.remove(rid)
+                                let affinity_key = (rid.clone(), 0u16);
+                                let affinity_slot = slot_affinity.remove(&affinity_key)
                                     .filter(|&s| s < wail_audio::MAX_REMOTE_PEERS && !slot_occupied[s]);
                                 let slot = affinity_slot.or_else(|| {
                                     slot_occupied.iter().position(|&occupied| !occupied)
                                 });
                                 if let Some(s) = slot {
                                     slot_occupied[s] = true;
-                                    peer_slots.insert(pid.clone(), s);
+                                    peer_slots.insert(key, s);
                                     ui_info!(&app, "Peer {name_display} assigned to slot {} (Peer {})", s, s + 1);
                                 }
                             }
@@ -732,8 +771,8 @@ async fn session_loop(
                         interval.set_config(remote_bars, remote_q);
                     }
 
-                    SyncMessage::AudioCapabilities { sample_rates, channel_counts, can_send, can_receive } => {
-                        ui_info!(&app, "Peer {from} audio: rates={sample_rates:?} ch={channel_counts:?} send={can_send} recv={can_receive}");
+                    SyncMessage::AudioCapabilities { sample_rates, channel_counts, can_send, can_receive, max_streams } => {
+                        ui_info!(&app, "Peer {from} audio: rates={sample_rates:?} ch={channel_counts:?} send={can_send} recv={can_receive} max_streams={max_streams:?}");
                     }
 
                     SyncMessage::AudioIntervalReady { interval_index, wire_size } => {
@@ -766,6 +805,24 @@ async fn session_loop(
 
                 match AudioWire::decode(&data) {
                     Ok(audio_interval) => {
+                        // Assign slot for new (peer, stream_id) pairs
+                        let slot_key = (from.clone(), audio_interval.stream_id);
+                        if !peer_slots.contains_key(&slot_key) {
+                            let ident = peer_identities.get(&from);
+                            let affinity_key = ident.map(|id| (id.clone(), audio_interval.stream_id));
+                            let affinity_slot = affinity_key.as_ref()
+                                .and_then(|k| slot_affinity.remove(k))
+                                .filter(|&s| s < wail_audio::MAX_REMOTE_PEERS && !slot_occupied[s]);
+                            let slot = affinity_slot.or_else(|| {
+                                slot_occupied.iter().position(|&occupied| !occupied)
+                            });
+                            if let Some(s) = slot {
+                                slot_occupied[s] = true;
+                                peer_slots.insert(slot_key.clone(), s);
+                                ui_info!(&app, "Peer {peer_name} stream {} assigned to slot {} (Peer {})", audio_interval.stream_id, s, s + 1);
+                            }
+                        }
+
                         let mut rms_info = String::new();
                         if let Some(ref mut decoder) = audio_decoder {
                             match decoder.decode_interval(&audio_interval.opus_data) {
@@ -917,7 +974,7 @@ async fn session_loop(
                             peer_id: p.clone(),
                             display_name: peer_names.get(p).cloned().flatten(),
                             rtt_ms: clock.rtt_us(p).map(|rtt| rtt as f64 / 1000.0),
-                            slot: peer_slots.get(p).map(|&s| s as u32 + 1),
+                            slot: peer_slots.get(&(p.clone(), 0u16)).map(|&s| s as u32 + 1),
                         })
                         .collect();
 
@@ -1000,6 +1057,7 @@ async fn send_test_tone(
         Ok(opus_data) => {
             let audio_interval = AudioInterval {
                 index: idx,
+                stream_id: 0,
                 opus_data: opus_data.clone(),
                 sample_rate,
                 channels: 1,

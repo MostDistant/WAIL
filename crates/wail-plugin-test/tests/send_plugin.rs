@@ -166,11 +166,12 @@ fn send_plugin_e2e() {
             .expect("Failed to start processing");
 
         // Accept the IPC connection from the plugin's background thread
-        let (mut stream, role) = accept_ipc_connection(&listener, Duration::from_secs(5));
+        let (mut stream, role, stream_index) = accept_ipc_connection(&listener, Duration::from_secs(5));
         assert_eq!(
             role, IPC_ROLE_SEND,
             "Expected SEND role byte (0x00), got 0x{role:02x}"
         );
+        assert_eq!(stream_index, 0, "Default stream_index should be 0");
 
         // Drive enough process() calls to complete one interval.
         // At 120 BPM, 4 bars × quantum 4 = 16 beats = 384,000 samples at 48kHz.

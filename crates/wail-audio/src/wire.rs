@@ -5,9 +5,9 @@ use anyhow::Result;
 /// Format (all integers are little-endian):
 /// ```text
 /// [4 bytes] magic: "WAIL"
-/// [1 byte]  version: 1
+/// [1 byte]  version: 2 (v1 accepted for backward compat)
 /// [1 byte]  flags: bit 0 = stereo (0=mono, 1=stereo)
-/// [2 bytes] reserved: 0
+/// [2 bytes] stream_id: u16 LE (v1: was reserved/zero)
 /// [8 bytes] interval_index: i64
 /// [4 bytes] sample_rate: u32
 /// [4 bytes] num_frames: u32 (source samples per channel)
@@ -22,7 +22,7 @@ use anyhow::Result;
 pub struct AudioWire;
 
 const MAGIC: &[u8; 4] = b"WAIL";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const HEADER_SIZE: usize = 48;
 
 impl AudioWire {
@@ -36,8 +36,8 @@ impl AudioWire {
         buf.push(VERSION);
         // Flags: bit 0 = stereo
         buf.push(if interval.channels == 2 { 1 } else { 0 });
-        // Reserved
-        buf.extend_from_slice(&[0u8; 2]);
+        // Stream ID
+        buf.extend_from_slice(&interval.stream_id.to_le_bytes());
         // Interval index
         buf.extend_from_slice(&interval.index.to_le_bytes());
         // Sample rate
@@ -72,15 +72,22 @@ impl AudioWire {
             anyhow::bail!("Invalid audio wire magic: {:?}", &data[0..4]);
         }
 
-        // Version
+        // Version (accept v1 and v2)
         let version = data[4];
-        if version != VERSION {
+        if version != 1 && version != 2 {
             anyhow::bail!("Unsupported audio wire version: {version}");
         }
 
         // Flags
         let flags = data[5];
         let channels = if flags & 1 != 0 { 2 } else { 1 };
+
+        // Stream ID (v1: reserved/zero, v2: explicit)
+        let stream_id = if version >= 2 {
+            u16::from_le_bytes(data[6..8].try_into()?)
+        } else {
+            0
+        };
 
         // Interval index
         let index = i64::from_le_bytes(data[8..16].try_into()?);
@@ -115,6 +122,7 @@ impl AudioWire {
 
         Ok(super::AudioInterval {
             index,
+            stream_id,
             opus_data,
             sample_rate,
             channels,
@@ -135,6 +143,7 @@ mod tests {
     fn wire_roundtrip() {
         let interval = AudioInterval {
             index: 42,
+            stream_id: 0,
             opus_data: vec![1, 2, 3, 4, 5],
             sample_rate: 48000,
             channels: 2,
@@ -146,7 +155,7 @@ mod tests {
 
         let encoded = AudioWire::encode(&interval);
         assert_eq!(&encoded[0..4], b"WAIL");
-        assert_eq!(encoded[4], 1); // version
+        assert_eq!(encoded[4], 2); // version
         assert_eq!(encoded[5], 1); // stereo flag
 
         let decoded = AudioWire::decode(&encoded).unwrap();
@@ -164,6 +173,7 @@ mod tests {
     fn wire_mono() {
         let interval = AudioInterval {
             index: 0,
+            stream_id: 0,
             opus_data: vec![],
             sample_rate: 48000,
             channels: 1,
@@ -178,6 +188,52 @@ mod tests {
 
         let decoded = AudioWire::decode(&encoded).unwrap();
         assert_eq!(decoded.channels, 1);
+    }
+
+    #[test]
+    fn wire_v2_stream_id_roundtrip() {
+        let interval = AudioInterval {
+            index: 10,
+            stream_id: 5,
+            opus_data: vec![0xAB],
+            sample_rate: 48000,
+            channels: 2,
+            num_frames: 960,
+            bpm: 120.0,
+            quantum: 4.0,
+            bars: 4,
+        };
+
+        let encoded = AudioWire::encode(&interval);
+        // stream_id at bytes 6-7
+        assert_eq!(u16::from_le_bytes([encoded[6], encoded[7]]), 5);
+
+        let decoded = AudioWire::decode(&encoded).unwrap();
+        assert_eq!(decoded.stream_id, 5);
+    }
+
+    #[test]
+    fn wire_v1_backward_compat() {
+        // Manually construct v1 wire data (version=1, reserved=0)
+        let mut data = vec![0u8; 48 + 2];
+        data[0..4].copy_from_slice(b"WAIL");
+        data[4] = 1; // version 1
+        data[5] = 1; // stereo
+        data[6..8].copy_from_slice(&[0, 0]); // reserved
+        data[8..16].copy_from_slice(&42i64.to_le_bytes());
+        data[16..20].copy_from_slice(&48000u32.to_le_bytes());
+        data[20..24].copy_from_slice(&960u32.to_le_bytes());
+        data[24..32].copy_from_slice(&120.0f64.to_le_bytes());
+        data[32..40].copy_from_slice(&4.0f64.to_le_bytes());
+        data[40..44].copy_from_slice(&4u32.to_le_bytes());
+        data[44..48].copy_from_slice(&2u32.to_le_bytes()); // opus_len = 2
+        data[48..50].copy_from_slice(&[0xDE, 0xAD]);
+
+        let decoded = AudioWire::decode(&data).unwrap();
+        assert_eq!(decoded.index, 42);
+        assert_eq!(decoded.stream_id, 0); // v1 defaults to stream 0
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.opus_data, vec![0xDE, 0xAD]);
     }
 
     #[test]

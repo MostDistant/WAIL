@@ -337,6 +337,7 @@ mod tests {
 
         let interval = AudioInterval {
             index: 7,
+            stream_id: 0,
             opus_data: vec![0xDE, 0xAD, 0xBE, 0xEF],
             sample_rate: 48000,
             channels: 2,

@@ -56,6 +56,9 @@ pub enum SyncMessage {
         can_send: bool,
         /// Whether this peer wants to receive audio
         can_receive: bool,
+        /// Maximum number of streams this peer will send (None = legacy single-stream)
+        #[serde(default)]
+        max_streams: Option<u16>,
     },
     /// Audio interval metadata (sent on the sync channel right before binary audio)
     AudioIntervalReady {

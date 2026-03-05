@@ -84,6 +84,18 @@ impl SignalingClient {
         password: Option<&str>,
         poll_interval_ms: u64,
     ) -> Result<Self> {
+        Self::connect_with_options(base_url, room, peer_id, password, poll_interval_ms, 1).await
+    }
+
+    /// Connect with full options including stream count.
+    pub async fn connect_with_options(
+        base_url: &str,
+        room: &str,
+        peer_id: &str,
+        password: Option<&str>,
+        poll_interval_ms: u64,
+        stream_count: u16,
+    ) -> Result<Self> {
         let client = Client::new();
         let base = base_url.trim_end_matches('/').to_string();
 
@@ -91,6 +103,7 @@ impl SignalingClient {
         let mut body = serde_json::json!({
             "room": room,
             "peer_id": peer_id,
+            "stream_count": stream_count,
         });
         if let Some(pw) = password {
             body["password"] = serde_json::Value::String(pw.to_string());
@@ -103,6 +116,12 @@ impl SignalingClient {
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             anyhow::bail!("Invalid room password — the room exists and the password doesn't match");
+        }
+
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            let error_body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let slots = error_body["slots_available"].as_u64().unwrap_or(0);
+            anyhow::bail!("Room full — only {slots} stream slots available");
         }
 
         let join_resp: JoinResponse = resp.error_for_status()?.json().await?;

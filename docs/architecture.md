@@ -2,7 +2,7 @@
 
 ## Overview
 
-WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer DataChannels. Musicians on different networks sync tempo, phase, and interval boundaries as if they were on the same LAN. Audio is captured per interval (NINJAM-style), Opus-encoded, and transmitted over binary DataChannels. A CLAP/VST3 plugin provides DAW integration.
+WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer DataChannels. Musicians on different networks sync tempo, phase, and interval boundaries as if they were on the same LAN. Audio is captured per interval (NINJAM-style), Opus-encoded, and transmitted over binary DataChannels. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture, multiple instances supported) and WAIL Recv (playback, up to 31 per-slot auxiliary outputs).
 
 ## System Diagram
 
@@ -13,7 +13,8 @@ WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer D
 │  ┌──────────────────────────────┐    │                    │    ┌──────────────────────────────┐  │
 │  │  DAW (Ableton, Bitwig, etc.) │    │                    │    │  DAW (Ableton, Bitwig, etc.) │  │
 │  │                              │    │                    │    │                              │  │
-│  │  Track: [WAIL CLAP Plugin]   │    │                    │    │  Track: [WAIL CLAP Plugin]   │  │
+│  │  Tracks: [WAIL Send ×N]      │    │                    │    │  Tracks: [WAIL Send ×N]      │  │
+│  │          [WAIL Recv]         │    │                    │    │          [WAIL Recv]         │  │
 │  └──────────┬───────────────────┘    │                    │    └──────────┬───────────────────┘  │
 │             │ IPC (TCP :9191)        │                    │               │ IPC (TCP :9191)      │
 │  ┌──────────┴───────────────────┐    │  WebRTC P2P        │    ┌──────────┴───────────────────┐  │
@@ -37,7 +38,7 @@ WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer D
 ## Crate Dependency Graph
 
 ```
-wail-app (binary)
+wail-tauri (Tauri desktop app — session orchestration, IPC, recording)
 ├── wail-core (library — no networking deps)
 │   └── rusty_link (Ableton Link C FFI)
 ├── wail-audio (library — no networking deps)
@@ -46,11 +47,19 @@ wail-app (binary)
     ├── wail-core
     └── webrtc (pure Rust WebRTC)
 
-wail-plugin (CLAP/VST3, built separately via nih-plug)
+wail-plugin-send (CLAP/VST3, captures DAW audio, stream_index param 0-30)
 ├── wail-core
 └── wail-audio
 
-val-town/signaling.ts (HTTP signaling server, deployed to Val Town)
+wail-plugin-recv (CLAP/VST3, plays remote audio, 31 aux outputs)
+├── wail-core
+└── wail-audio
+
+wail-plugin-test (integration test harness for Send/Recv plugins)
+├── wail-audio
+└── wail-core
+
+val-town/main.ts (HTTP signaling server, deployed to Val Town)
 ```
 
 ## The NINJAM Model
@@ -74,7 +83,7 @@ Traditional real-time audio requires <20ms round-trip latency. That's impossible
 
 ### The Double-Buffer
 
-`IntervalRing` implements the NINJAM double-buffer:
+`IntervalRing` implements the NINJAM double-buffer with up to 31 remote slots, keyed by `(peer_id, stream_id)` tuples:
 
 ```
 Interval N:   [RECORD local audio] ──→ on boundary ──→ encode + transmit
@@ -88,6 +97,10 @@ At each interval boundary:
 - The record slot moves to the completed queue (for Opus encoding + transmission)
 - Pending remote intervals are mixed (summed) into the playback slot
 - Record and playback positions reset to zero
+
+Each unique `(peer_id, stream_id)` pair is assigned its own playback slot and Recv plugin auxiliary output. If all 31 slots are exhausted, overflow audio is merged into the peer's stream 0 slot.
+
+Slot assignment uses **peer affinity**: when a peer disconnects, their slot indices are reserved (not recycled). If the same peer reconnects, they reclaim their original slots, keeping DAW aux routing stable across reconnects.
 
 ## Audio Flow
 
@@ -117,7 +130,7 @@ DAW Track B hears Peer A's previous interval
 `AudioBridge` wraps the full encode/decode pipeline in a single struct:
 
 - `process(input, output, beat_position)` → drives IntervalRing, returns wire bytes for completed intervals
-- `receive_wire(peer_id, wire_data)` → decodes Opus, feeds to ring for playback
+- `receive_wire(peer_id, wire_data)` → decodes Opus, feeds to ring for playback (slot keyed by `(peer_id, stream_id)`)
 - `update_config(bars, quantum, bpm)` → updates interval parameters from DAW transport
 
 ### Wire Format (AudioWire)
@@ -126,9 +139,9 @@ Binary header (48 bytes) + Opus payload:
 
 ```
 [4 bytes]  magic: "WAIL"
-[1 byte]   version: 1
+[1 byte]   version: 2  (v1 also accepted for backward compat, stream_id defaults to 0)
 [1 byte]   flags: bit 0 = stereo
-[2 bytes]  reserved
+[2 bytes]  stream_id: u16 LE  (was reserved in v1)
 [8 bytes]  interval_index: i64 LE
 [4 bytes]  sample_rate: u32 LE
 [4 bytes]  num_frames: u32 LE (source samples per channel)
@@ -141,7 +154,16 @@ Binary header (48 bytes) + Opus payload:
 
 ### IPC Protocol (Plugin ↔ App)
 
-TCP connection to `127.0.0.1:9191`. Length-prefixed binary framing:
+TCP connection to `127.0.0.1:9191`. On connect, the plugin sends a handshake:
+
+```
+[1 byte]   role: 0x01 = Send, 0x02 = Recv
+[2 bytes]  stream_index: u16 LE  (Send plugins only; identifies which stream this instance captures)
+```
+
+Legacy send plugins that omit `stream_index` default to stream 0 (the app uses a 200ms read timeout for backward compatibility).
+
+After the handshake, length-prefixed binary framing:
 
 ```
 [4 bytes]  payload_length: u32 LE
@@ -149,7 +171,7 @@ TCP connection to `127.0.0.1:9191`. Length-prefixed binary framing:
   [1 byte]   tag (0x01 = AudioInterval)
   [1 byte]   peer_id_len
   [M bytes]  peer_id (UTF-8, empty for plugin→app outgoing)
-  [K bytes]  AudioWire data
+  [K bytes]  AudioWire data (includes stream_id in wire header)
 ```
 
 Plugin→App: local interval encoded as AudioWire, peer_id empty.
@@ -172,12 +194,13 @@ App→Plugin: remote peer's interval, peer_id identifies the sender.
 ## WebRTC Connection Establishment
 
 ```
-1. Peer A POSTs join to HTTP signaling server (with room password)
-2. Server replies with list of existing peers
-3. For each peer: lower peer_id creates SDP Offer (deterministic initiator)
-4. Offer relayed through signaling server (HTTP polling)
-5. Peer B creates Answer, relayed back
-6. ICE candidates exchanged via signaling server
+1. Peer A fetches ICE servers (Metered TURN credentials via API)
+2. Peer A POSTs join to HTTP signaling server (with room password + stream_count)
+3. Server replies with list of existing peers
+4. For each peer: lower peer_id creates SDP Offer (deterministic initiator)
+5. Offer relayed through signaling server (HTTP polling)
+6. Peer B creates Answer, relayed back
+7. ICE candidates exchanged via signaling server
 8. Two DataChannels established per peer:
    - "sync": ordered, text mode (JSON SyncMessages)
    - "audio": unordered, binary mode (AudioWire frames)
@@ -224,7 +247,7 @@ These clocks are **not interchangeable**. ClockSync offsets cannot adjust Link t
 
 | Message | Direction | Purpose |
 |---------|-----------|---------|
-| `Join` | Client → Server | Join a named room |
+| `Join` | Client → Server | Join a named room (includes `stream_count`) |
 | `PeerList` | Server → Client | Current room members |
 | `PeerJoined` | Server → Client | New peer notification |
 | `PeerLeft` | Server → Client | Peer disconnect notification |
@@ -249,3 +272,7 @@ These clocks are **not interchangeable**. ClockSync offsets cannot adjust Link t
 8. **IPC over TCP** (not shared memory): Simpler, cross-platform, reliable. Latency is negligible compared to the 1-interval NINJAM delay.
 
 9. **JSON sync protocol**: Readable for debugging. Bandwidth is negligible for small sync messages.
+
+10. **Peer affinity slots**: When a peer disconnects, their slot indices are reserved so reconnecting peers get the same aux outputs. This prevents DAW routing from breaking during brief network interruptions.
+
+11. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.rs` in wail-tauri.

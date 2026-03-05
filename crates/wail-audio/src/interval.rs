@@ -5,6 +5,8 @@ use std::collections::VecDeque;
 pub struct AudioInterval {
     /// Interval index (monotonically increasing per the Link beat grid)
     pub index: i64,
+    /// Stream index within a peer (0 = default, supports multi-stream send)
+    pub stream_id: u16,
     /// Opus-encoded audio data (length-prefixed frames)
     pub opus_data: Vec<u8>,
     /// Sample rate of the source audio

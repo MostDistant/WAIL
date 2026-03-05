@@ -73,8 +73,8 @@ impl AudioBridge {
     ///
     /// Use this from the real-time audio callback after decoding Opus on a
     /// background thread.
-    pub fn feed_decoded(&mut self, peer_id: &str, interval_index: i64, samples: Vec<f32>) {
-        self.ring.feed_remote(peer_id, interval_index, samples);
+    pub fn feed_decoded(&mut self, peer_id: &str, stream_id: u16, interval_index: i64, samples: Vec<f32>) {
+        self.ring.feed_remote(peer_id, stream_id, interval_index, samples);
     }
 
     /// Process one audio buffer from the DAW. Records input, outputs playback.
@@ -103,6 +103,7 @@ impl AudioBridge {
                             (interval.samples.len() / self.channels as usize) as u32;
                         let audio_interval = AudioInterval {
                             index: interval.index,
+                            stream_id: 0,
                             opus_data,
                             sample_rate: self.sample_rate,
                             channels: self.channels,
@@ -137,7 +138,7 @@ impl AudioBridge {
         if let Some(ref mut decoder) = self.decoder {
             match decoder.decode_interval(&interval.opus_data) {
                 Ok(samples) => {
-                    self.ring.feed_remote(peer_id, interval.index, samples);
+                    self.ring.feed_remote(peer_id, interval.stream_id, interval.index, samples);
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to decode Opus audio");
@@ -171,8 +172,8 @@ impl AudioBridge {
         self.ring.read_peer_playback(slot, output)
     }
 
-    /// Return (slot_index, peer_id) for all active remote peers.
-    pub fn peer_info(&self) -> Vec<(usize, String)> {
+    /// Return (slot_index, peer_id, stream_id) for all active remote peer-streams.
+    pub fn peer_info(&self) -> Vec<(usize, String, u16)> {
         self.ring.active_peer_slots()
     }
 
@@ -306,6 +307,7 @@ mod tests {
         let opus_data = encoder.encode_interval(&remote_samples).unwrap();
         let wire = AudioWire::encode(&AudioInterval {
             index: 0,
+            stream_id: 0,
             opus_data,
             sample_rate: 48000,
             channels: 2,

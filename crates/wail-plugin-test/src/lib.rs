@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use clack_host::prelude::*;
 use wail_audio::{
-    AudioEncoder, AudioInterval, AudioWire, IpcFramer, IpcMessage, IpcRecvBuffer,
+    AudioEncoder, AudioInterval, AudioWire, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_SEND,
 };
 
 // ---------------------------------------------------------------------------
@@ -183,11 +183,12 @@ pub fn random_listener() -> (TcpListener, SocketAddr) {
     (listener, addr)
 }
 
-/// Accept one IPC connection with a timeout. Returns the stream and the role byte.
+/// Accept one IPC connection with a timeout. Returns the stream, role byte, and stream_index.
 ///
-/// WAIL plugins write a single role byte immediately after connecting
-/// (`IPC_ROLE_SEND` = 0x00, `IPC_ROLE_RECV` = 0x01).
-pub fn accept_ipc_connection(listener: &TcpListener, timeout: Duration) -> (TcpStream, u8) {
+/// WAIL send plugins write 3 bytes on connect: role byte + stream_index (u16 LE).
+/// WAIL recv plugins write 1 byte: role byte only.
+/// stream_index is 0 for recv plugins.
+pub fn accept_ipc_connection(listener: &TcpListener, timeout: Duration) -> (TcpStream, u8, u16) {
     listener
         .set_nonblocking(false)
         .expect("Failed to set blocking mode");
@@ -214,14 +215,28 @@ pub fn accept_ipc_connection(listener: &TcpListener, timeout: Duration) -> (TcpS
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
 
-    let mut role = [0u8; 1];
+    let mut role_buf = [0u8; 1];
     stream
         .try_clone()
         .unwrap()
-        .read_exact(&mut role)
+        .read_exact(&mut role_buf)
         .expect("Failed to read role byte from plugin");
+    let role = role_buf[0];
 
-    (stream, role[0])
+    // Send plugins send 2 additional bytes: stream_index as u16 LE
+    let stream_index = if role == IPC_ROLE_SEND {
+        let mut si_buf = [0u8; 2];
+        stream
+            .try_clone()
+            .unwrap()
+            .read_exact(&mut si_buf)
+            .expect("Failed to read stream_index from send plugin");
+        u16::from_le_bytes(si_buf)
+    } else {
+        0
+    };
+
+    (stream, role, stream_index)
 }
 
 /// Read one complete IPC frame from a stream with a timeout.
@@ -275,6 +290,7 @@ pub fn make_test_interval_frame(peer_id: &str, interval_index: i64) -> Vec<u8> {
 
     let interval = AudioInterval {
         index: interval_index,
+        stream_id: 0,
         opus_data,
         sample_rate: sr,
         channels,

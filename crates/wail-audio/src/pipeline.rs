@@ -582,7 +582,7 @@ mod tests {
         let peers = peer_a.peer_info();
         assert_eq!(peers.len(), 2, "Peer A should see 2 remote peers");
 
-        for (slot_idx, pid) in &peers {
+        for (slot_idx, pid, _) in &peers {
             let mut slot_out = vec![0.0f32; buf_size];
             peer_a.read_peer_playback(*slot_idx, &mut slot_out);
             let energy = rms(&slot_out);
@@ -600,8 +600,8 @@ mod tests {
         );
 
         // Verify the two peer slots have different audio (different frequencies)
-        let (idx_b, _) = peers.iter().find(|(_, pid)| pid == "peer-b").unwrap();
-        let (idx_c, _) = peers.iter().find(|(_, pid)| pid == "peer-c").unwrap();
+        let (idx_b, _, _) = peers.iter().find(|(_, pid, _)| pid == "peer-b").unwrap();
+        let (idx_c, _, _) = peers.iter().find(|(_, pid, _)| pid == "peer-c").unwrap();
         let mut buf_b = vec![0.0f32; buf_size];
         let mut buf_c = vec![0.0f32; buf_size];
         peer_a.read_peer_playback(*idx_b, &mut buf_b);

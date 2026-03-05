@@ -35,8 +35,8 @@ fn load_recv_plugin() -> ClapTestHost {
 }
 
 /// Number of output ports matching the recv plugin's default layout:
-/// 1 main stereo + 15 aux stereo (per-peer) = 16 total.
-const NUM_OUTPUT_PORTS: usize = 16;
+/// 1 main stereo + 31 aux stereo (per-peer/stream) = 32 total.
+const NUM_OUTPUT_PORTS: usize = 32;
 
 fn process_one_buffer(
     processor: &mut StartedPluginAudioProcessor<TestHost>,
@@ -120,7 +120,7 @@ fn recv_plugin_e2e() {
             .expect("Failed to start processing");
 
         // Accept the IPC connection from the plugin's background thread
-        let (mut stream, role) = accept_ipc_connection(&listener, Duration::from_secs(5));
+        let (mut stream, role, _stream_index) = accept_ipc_connection(&listener, Duration::from_secs(5));
         assert_eq!(
             role, IPC_ROLE_RECV,
             "Expected RECV role byte (0x01), got 0x{role:02x}"

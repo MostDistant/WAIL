@@ -38,7 +38,7 @@ pub struct WailRecvPlugin {
     params: Arc<WailRecvParams>,
     bridge: Arc<Mutex<Option<AudioBridge>>>,
     sample_rate: f32,
-    ipc_incoming_rx: Option<Receiver<(String, i64, Vec<f32>)>>,
+    ipc_incoming_rx: Option<Receiver<(String, u16, i64, Vec<f32>)>>,
     /// Peer lifecycle events from IPC thread (for slot affinity)
     peer_event_rx: Option<Receiver<PeerEvent>>,
     /// Pre-allocated playback buffer (reused every process call)
@@ -127,17 +127,21 @@ impl Plugin for WailRecvPlugin {
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
-        // Stereo in/out with 15 per-peer aux stereo outputs
+        // Stereo in/out with 31 per-peer/stream aux stereo outputs
         AudioIOLayout {
             main_input_channels: NonZeroU32::new(2),
             main_output_channels: NonZeroU32::new(2),
-            aux_output_ports: &[new_nonzero_u32(2); 15],
+            aux_output_ports: &[new_nonzero_u32(2); 31],
             names: PortNames {
                 aux_outputs: &[
-                    "Peer 1", "Peer 2", "Peer 3", "Peer 4",
-                    "Peer 5", "Peer 6", "Peer 7", "Peer 8",
-                    "Peer 9", "Peer 10", "Peer 11", "Peer 12",
-                    "Peer 13", "Peer 14", "Peer 15",
+                    "Slot 1", "Slot 2", "Slot 3", "Slot 4",
+                    "Slot 5", "Slot 6", "Slot 7", "Slot 8",
+                    "Slot 9", "Slot 10", "Slot 11", "Slot 12",
+                    "Slot 13", "Slot 14", "Slot 15", "Slot 16",
+                    "Slot 17", "Slot 18", "Slot 19", "Slot 20",
+                    "Slot 21", "Slot 22", "Slot 23", "Slot 24",
+                    "Slot 25", "Slot 26", "Slot 27", "Slot 28",
+                    "Slot 29", "Slot 30", "Slot 31",
                 ],
                 ..PortNames::const_default()
             },
@@ -204,7 +208,7 @@ impl Plugin for WailRecvPlugin {
             }
         }
 
-        let (in_tx, in_rx) = crossbeam_channel::bounded::<(String, i64, Vec<f32>)>(64);
+        let (in_tx, in_rx) = crossbeam_channel::bounded::<(String, u16, i64, Vec<f32>)>(64);
         self.ipc_incoming_rx = Some(in_rx);
 
         let (peer_tx, peer_rx) = crossbeam_channel::bounded::<PeerEvent>(32);
@@ -301,8 +305,8 @@ impl Plugin for WailRecvPlugin {
                     }
 
                     if let Some(ref rx) = self.ipc_incoming_rx {
-                        while let Ok((peer_id, interval_index, samples)) = rx.try_recv() {
-                            bridge.feed_decoded(&peer_id, interval_index, samples);
+                        while let Ok((peer_id, stream_id, interval_index, samples)) = rx.try_recv() {
+                            bridge.feed_decoded(&peer_id, stream_id, interval_index, samples);
                         }
                     }
                     // Use a zero-length slice as silent input — IntervalRing
@@ -334,7 +338,7 @@ impl Plugin for WailRecvPlugin {
 
 /// Receive-only IPC thread: reads from TCP, Opus-decodes, sends PCM to audio thread.
 fn ipc_thread_recv(
-    incoming_tx: crossbeam_channel::Sender<(String, i64, Vec<f32>)>,
+    incoming_tx: crossbeam_channel::Sender<(String, u16, i64, Vec<f32>)>,
     peer_event_tx: crossbeam_channel::Sender<PeerEvent>,
     addr: String,
     sample_rate: u32,
@@ -401,6 +405,7 @@ fn ipc_thread_recv(
                                                     Ok(samples) => {
                                                         let _ = incoming_tx.try_send((
                                                             peer_id,
+                                                            interval.stream_id,
                                                             interval.index,
                                                             samples,
                                                         ));

@@ -39,6 +39,8 @@ try { await sqlite.execute("ALTER TABLE peers ADD COLUMN display_name TEXT"); } 
 try { await sqlite.execute("ALTER TABLE peers ADD COLUMN bpm REAL"); } catch (_) {}
 // Migrate rooms table — add created_at if missing (from older schema)
 try { await sqlite.execute("ALTER TABLE rooms ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"); } catch (_) {}
+// Migrate peers table — add stream_count for multi-stream support
+try { await sqlite.execute("ALTER TABLE peers ADD COLUMN stream_count INTEGER NOT NULL DEFAULT 1"); } catch (_) {}
 // Migrate rooms table — remove NOT NULL from password_hash (for public rooms)
 try {
   await sqlite.execute("INSERT INTO rooms (room, password_hash, created_at) VALUES ('__migration_test__', NULL, 0)");
@@ -723,8 +725,10 @@ export default async function(req: Request): Promise<Response> {
       // POST ?action=join  body: { room, peer_id, password }
       // -------------------------------------------------------------------
       case "join": {
-        const { room, peer_id, password, display_name, bpm } = await req.json();
+        const { room, peer_id, password, display_name, bpm, stream_count: reqStreamCount } = await req.json();
         if (!room || !peer_id) return json({ error: "room and peer_id required" }, 400);
+
+        const streamCount = Math.max(1, Math.min(31, reqStreamCount || 1));
 
         // Check or create room
         const roomRow = await sqlite.execute({
@@ -751,18 +755,29 @@ export default async function(req: Request): Promise<Response> {
           // Public room (storedHash === null) — no password check
         }
 
+        // Check room stream capacity (31 total slots)
+        const capacityRow = await sqlite.execute({
+          sql: "SELECT COALESCE(SUM(stream_count), 0) FROM peers WHERE room = ? AND peer_id != ?",
+          args: [room, peer_id],
+        });
+        const currentStreams = capacityRow.rows[0][0] as number;
+        if (currentStreams + streamCount > 31) {
+          const available = Math.max(0, 31 - currentStreams);
+          return json({ error: "room full", slots_available: available }, 409);
+        }
+
         const ts = now();
 
         // Upsert peer with metadata
         await sqlite.execute({
-          sql: `INSERT INTO peers (room, peer_id, last_seen, display_name, bpm) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (room, peer_id) DO UPDATE SET last_seen = ?, display_name = ?, bpm = ?`,
-          args: [room, peer_id, ts, display_name || null, bpm || null, ts, display_name || null, bpm || null],
+          sql: `INSERT INTO peers (room, peer_id, last_seen, display_name, bpm, stream_count) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (room, peer_id) DO UPDATE SET last_seen = ?, display_name = ?, bpm = ?, stream_count = ?`,
+          args: [room, peer_id, ts, display_name || null, bpm || null, streamCount, ts, display_name || null, bpm || null, streamCount],
         });
 
         // Get current peers (excluding self)
         const rows = await sqlite.execute({
-          sql: "SELECT peer_id FROM peers WHERE room = ? AND peer_id != ?",
+          sql: "SELECT peer_id, stream_count FROM peers WHERE room = ? AND peer_id != ?",
           args: [room, peer_id],
         });
         const peers = rows.rows.map((r) => r[0] as string);
@@ -773,7 +788,7 @@ export default async function(req: Request): Promise<Response> {
           peer_id,
         });
 
-        return json({ peers });
+        return json({ peers, slots_used: currentStreams + streamCount, slots_total: 31 });
       }
 
       // -------------------------------------------------------------------
@@ -936,6 +951,35 @@ export default async function(req: Request): Promise<Response> {
         });
 
         return json({ ok: true });
+      }
+
+      // -------------------------------------------------------------------
+      // POST ?action=update_streams  body: { room, peer_id, stream_count }
+      // -------------------------------------------------------------------
+      case "update_streams": {
+        const body = await req.json();
+        if (!body.room || !body.peer_id || body.stream_count == null) {
+          return json({ error: "room, peer_id, and stream_count required" }, 400);
+        }
+        const newCount = Math.max(1, Math.min(31, body.stream_count));
+
+        // Check capacity (exclude self from sum)
+        const capRow = await sqlite.execute({
+          sql: "SELECT COALESCE(SUM(stream_count), 0) FROM peers WHERE room = ? AND peer_id != ?",
+          args: [body.room, body.peer_id],
+        });
+        const othersStreams = capRow.rows[0][0] as number;
+        if (othersStreams + newCount > 31) {
+          const available = Math.max(0, 31 - othersStreams);
+          return json({ error: "room full", slots_available: available }, 409);
+        }
+
+        await sqlite.execute({
+          sql: "UPDATE peers SET stream_count = ? WHERE room = ? AND peer_id = ?",
+          args: [newCount, body.room, body.peer_id],
+        });
+
+        return json({ ok: true, slots_used: othersStreams + newCount, slots_total: 31 });
       }
 
       case null:

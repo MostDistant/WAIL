@@ -1,9 +1,10 @@
-/// Maximum number of remote peers with independent audio channels.
-pub const MAX_REMOTE_PEERS: usize = 15;
+/// Maximum number of remote peer-stream slots with independent audio channels.
+pub const MAX_REMOTE_PEERS: usize = 31;
 
-/// Per-peer isolated playback slot.
+/// Per-peer-stream isolated playback slot.
 pub struct PeerSlot {
     pub peer_id: String,
+    pub stream_id: u16,
     pub samples: Vec<f32>,
     pub active: bool,
     read_pos: usize,
@@ -13,6 +14,7 @@ impl PeerSlot {
     fn new() -> Self {
         Self {
             peer_id: String::new(),
+            stream_id: 0,
             samples: Vec::new(),
             active: false,
             read_pos: 0,
@@ -39,8 +41,9 @@ impl PeerSlot {
 /// - It writes input to the record slot and reads from the playback slot
 /// - At interval boundaries (driven by beat position), it swaps slots
 ///
-/// In addition to the summed playback slot, per-peer isolated audio is kept
-/// in up to [`MAX_REMOTE_PEERS`] slots for independent DAW routing.
+/// In addition to the summed playback slot, per-peer-stream isolated audio is
+/// kept in up to [`MAX_REMOTE_PEERS`] slots for independent DAW routing.
+/// Each unique `(peer_id, stream_id)` pair gets its own slot.
 ///
 /// # Interval Timing
 ///
@@ -77,15 +80,15 @@ pub struct IntervalRing {
     /// Interval parameters
     bars: u32,
     quantum: f64,
-    /// Per-peer isolated playback slots (up to MAX_REMOTE_PEERS)
+    /// Per-peer-stream isolated playback slots (up to MAX_REMOTE_PEERS)
     peer_slots: Vec<PeerSlot>,
-    /// Maps peer_id → index into peer_slots for stable assignment
-    peer_slot_map: Vec<(String, usize)>,
+    /// Maps (peer_id, stream_id) → index into peer_slots for stable assignment
+    peer_slot_map: Vec<((String, u16), usize)>,
     /// Maps peer_id → persistent identity (for slot affinity across reconnects)
     peer_identity_map: Vec<(String, String)>,
-    /// Affinity reservations: identity → slot_index for peers that left.
+    /// Affinity reservations: (identity, stream_id) → slot_index for peers that left.
     /// When a peer with matching identity rejoins, they reclaim their old slot.
-    affinity_map: Vec<(String, usize)>,
+    affinity_map: Vec<((String, u16), usize)>,
 }
 
 /// A completed local recording ready for encoding.
@@ -95,10 +98,11 @@ pub struct CompletedInterval {
 }
 
 /// A received remote interval to mix into playback.
-#[allow(dead_code)] // index/peer_id retained for future per-peer mixing control
 struct RemoteInterval {
+    #[allow(dead_code)]
     index: i64,
     peer_id: String,
+    stream_id: u16,
     pub samples: Vec<f32>,
 }
 
@@ -209,11 +213,13 @@ impl IntervalRing {
     /// Feed a remote peer's decoded interval audio for playback.
     ///
     /// This will be mixed into the playback slot at the next interval boundary.
-    /// Multiple peers' audio is summed together.
-    pub fn feed_remote(&mut self, peer_id: &str, interval_index: i64, samples: Vec<f32>) {
+    /// Multiple peers' audio is summed together. Each unique `(peer_id, stream_id)`
+    /// pair gets its own isolated slot for per-stream DAW routing.
+    pub fn feed_remote(&mut self, peer_id: &str, stream_id: u16, interval_index: i64, samples: Vec<f32>) {
         self.pending_remote.push(RemoteInterval {
             index: interval_index,
             peer_id: peer_id.to_string(),
+            stream_id,
             samples,
         });
     }
@@ -272,7 +278,7 @@ impl IntervalRing {
         (beat / beats_per_interval).floor() as i64
     }
 
-    /// Get the per-peer playback slots (up to MAX_REMOTE_PEERS).
+    /// Get the per-peer-stream playback slots (up to MAX_REMOTE_PEERS).
     pub fn peer_playback_slots(&self) -> &[PeerSlot] {
         &self.peer_slots
     }
@@ -304,32 +310,37 @@ impl IntervalRing {
         to_read
     }
 
-    /// Return (slot_index, peer_id) for all active peer slots.
-    pub fn active_peer_slots(&self) -> Vec<(usize, String)> {
+    /// Return (slot_index, peer_id, stream_id) for all active peer slots.
+    pub fn active_peer_slots(&self) -> Vec<(usize, String, u16)> {
         self.peer_slots
             .iter()
             .enumerate()
             .filter(|(_, s)| s.active)
-            .map(|(i, s)| (i, s.peer_id.clone()))
+            .map(|(i, s)| (i, s.peer_id.clone(), s.stream_id))
             .collect()
     }
 
     /// Register a peer's persistent identity for slot affinity.
     ///
     /// Call this when a Hello is received with an identity. If this identity
-    /// has an affinity reservation from a previous session, the peer inherits
-    /// that slot on next `assign_peer_slot`.
+    /// has affinity reservations from a previous session, the peer inherits
+    /// those slots on next `assign_peer_slot`.
     pub fn notify_peer_joined(&mut self, peer_id: &str, identity: &str) {
         // Remove any stale mapping for this peer_id
         self.peer_identity_map.retain(|(pid, _)| pid != peer_id);
         self.peer_identity_map.push((peer_id.to_string(), identity.to_string()));
 
-        // Check if there's an affinity reservation for this identity
-        if let Some(pos) = self.affinity_map.iter().position(|(ident, _)| ident == identity) {
-            let (_, slot_idx) = self.affinity_map.remove(pos);
+        // Check if there are affinity reservations for this identity (any stream)
+        let reservations: Vec<(u16, usize)> = self.affinity_map.iter()
+            .filter(|((ident, _), _)| ident == identity)
+            .map(|((_, sid), slot)| (*sid, *slot))
+            .collect();
+
+        for (stream_id, slot_idx) in reservations {
             if slot_idx < self.peer_slots.len() && !self.peer_slots[slot_idx].active {
-                // Free any existing slot before reclaiming the affinity slot
-                if let Some(old_pos) = self.peer_slot_map.iter().position(|(pid, _)| pid == peer_id) {
+                let key = (peer_id.to_string(), stream_id);
+                // Free any existing slot for this (peer, stream) before reclaiming
+                if let Some(old_pos) = self.peer_slot_map.iter().position(|(k, _)| *k == key) {
                     let (_, old_idx) = self.peer_slot_map.remove(old_pos);
                     if old_idx != slot_idx && old_idx < self.peer_slots.len() {
                         self.peer_slots[old_idx].active = false;
@@ -338,77 +349,100 @@ impl IntervalRing {
                     }
                 }
                 // Reclaim the reserved slot
-                self.peer_slot_map.push((peer_id.to_string(), slot_idx));
+                self.peer_slot_map.push((key, slot_idx));
                 self.peer_slots[slot_idx].peer_id = peer_id.to_string();
+                self.peer_slots[slot_idx].stream_id = stream_id;
                 self.peer_slots[slot_idx].active = true;
                 tracing::info!(
-                    peer_id, identity, slot = slot_idx,
+                    peer_id, identity, stream_id, slot = slot_idx,
                     "Peer reclaimed affinity slot"
                 );
             }
+            // Remove this reservation regardless (claimed or slot was taken)
+            self.affinity_map.retain(|((ident, sid), _)| !(ident == identity && *sid == stream_id));
         }
     }
 
-    /// Remove a peer and free their slot, creating an affinity reservation
-    /// so the same identity can reclaim the slot on reconnect.
+    /// Remove a peer and free ALL their stream slots, creating affinity
+    /// reservations so the same identity can reclaim slots on reconnect.
     pub fn remove_peer(&mut self, peer_id: &str) {
-        // Find and remove the slot assignment
-        if let Some(pos) = self.peer_slot_map.iter().position(|(pid, _)| pid == peer_id) {
-            let (_, slot_idx) = self.peer_slot_map.remove(pos);
+        // Find ALL slot assignments for this peer (any stream)
+        let to_remove: Vec<((String, u16), usize)> = self.peer_slot_map
+            .iter()
+            .filter(|((pid, _), _)| pid == peer_id)
+            .cloned()
+            .collect();
 
+        // Look up identity for affinity
+        let identity = self.peer_identity_map.iter()
+            .find(|(pid, _)| pid == peer_id)
+            .map(|(_, ident)| ident.clone());
+
+        for ((_, stream_id), slot_idx) in &to_remove {
             // Free the slot
-            if slot_idx < self.peer_slots.len() {
-                self.peer_slots[slot_idx].active = false;
-                self.peer_slots[slot_idx].samples.clear();
-                self.peer_slots[slot_idx].read_pos = 0;
+            if *slot_idx < self.peer_slots.len() {
+                self.peer_slots[*slot_idx].active = false;
+                self.peer_slots[*slot_idx].samples.clear();
+                self.peer_slots[*slot_idx].read_pos = 0;
             }
 
             // Create affinity reservation if we know this peer's identity
-            if let Some(ident_pos) = self.peer_identity_map.iter().position(|(pid, _)| pid == peer_id) {
-                let (_, identity) = self.peer_identity_map.remove(ident_pos);
-                // Remove any existing affinity for this identity (shouldn't happen, but be safe)
-                self.affinity_map.retain(|(ident, _)| *ident != identity);
-                self.affinity_map.push((identity.clone(), slot_idx));
+            if let Some(ref ident) = identity {
+                let aff_key = (ident.clone(), *stream_id);
+                self.affinity_map.retain(|(k, _)| *k != aff_key);
+                self.affinity_map.push((aff_key, *slot_idx));
                 tracing::info!(
-                    peer_id, identity = %identity, slot = slot_idx,
+                    peer_id, identity = %ident, stream_id, slot = slot_idx,
                     "Peer left — slot reserved for affinity"
                 );
             } else {
                 tracing::info!(
-                    peer_id, slot = slot_idx,
+                    peer_id, stream_id, slot = slot_idx,
                     "Peer left — slot freed (no identity for affinity)"
                 );
             }
         }
+
+        // Clean up maps
+        self.peer_slot_map.retain(|((pid, _), _)| pid != peer_id);
+        self.peer_identity_map.retain(|(pid, _)| pid != peer_id);
     }
 
-    /// Look up or assign a slot index for a peer_id. Returns None if all slots are full.
-    fn assign_peer_slot(&mut self, peer_id: &str) -> Option<usize> {
+    /// Look up or assign a slot index for a (peer_id, stream_id) pair.
+    /// Returns None if all slots are full.
+    fn assign_peer_slot(&mut self, peer_id: &str, stream_id: u16) -> Option<usize> {
+        let key = (peer_id.to_string(), stream_id);
+
         // Check existing assignment
-        for &(ref pid, idx) in &self.peer_slot_map {
-            if pid == peer_id {
-                return Some(idx);
+        for (k, idx) in &self.peer_slot_map {
+            if *k == key {
+                return Some(*idx);
             }
         }
+
         // Check affinity via identity
         if let Some(ident_pos) = self.peer_identity_map.iter().position(|(pid, _)| pid == peer_id) {
             let identity = self.peer_identity_map[ident_pos].1.clone();
-            if let Some(aff_pos) = self.affinity_map.iter().position(|(ident, _)| *ident == identity) {
+            let aff_key = (identity, stream_id);
+            if let Some(aff_pos) = self.affinity_map.iter().position(|(k, _)| *k == aff_key) {
                 let (_, slot_idx) = self.affinity_map.remove(aff_pos);
                 if slot_idx < self.peer_slots.len() && !self.peer_slots[slot_idx].active {
                     self.peer_slots[slot_idx].peer_id = peer_id.to_string();
+                    self.peer_slots[slot_idx].stream_id = stream_id;
                     self.peer_slots[slot_idx].active = true;
-                    self.peer_slot_map.push((peer_id.to_string(), slot_idx));
+                    self.peer_slot_map.push((key, slot_idx));
                     return Some(slot_idx);
                 }
             }
         }
+
         // Find first inactive slot
         for (i, slot) in self.peer_slots.iter_mut().enumerate() {
             if !slot.active {
                 slot.peer_id = peer_id.to_string();
+                slot.stream_id = stream_id;
                 slot.active = true;
-                self.peer_slot_map.push((peer_id.to_string(), i));
+                self.peer_slot_map.push((key, i));
                 return Some(i);
             }
         }
@@ -461,10 +495,40 @@ impl IntervalRing {
                 self.playback_slot[i] += sample;
             }
 
-            // Move samples to per-peer slot
-            if let Some(slot_idx) = self.assign_peer_slot(&remote.peer_id) {
-                self.peer_slots[slot_idx].samples = remote.samples;
-                self.peer_slots[slot_idx].read_pos = 0;
+            // Move samples to per-peer-stream slot
+            match self.assign_peer_slot(&remote.peer_id, remote.stream_id) {
+                Some(slot_idx) => {
+                    self.peer_slots[slot_idx].samples = remote.samples;
+                    self.peer_slots[slot_idx].read_pos = 0;
+                }
+                None => {
+                    // All slots full — merge into this peer's stream 0 slot
+                    let fallback_key = (remote.peer_id.clone(), 0u16);
+                    if let Some(&(_, slot_idx)) = self.peer_slot_map.iter()
+                        .find(|(k, _)| *k == fallback_key)
+                    {
+                        let slot = &mut self.peer_slots[slot_idx];
+                        let merge_len = slot.samples.len().max(remote.samples.len());
+                        slot.samples.resize(merge_len, 0.0);
+                        for (i, &s) in remote.samples.iter().enumerate() {
+                            if i < slot.samples.len() {
+                                slot.samples[i] += s;
+                            }
+                        }
+                        slot.read_pos = 0;
+                        tracing::warn!(
+                            peer = %remote.peer_id,
+                            stream = remote.stream_id,
+                            "All slots full — merged into stream 0"
+                        );
+                    } else {
+                        tracing::warn!(
+                            peer = %remote.peer_id,
+                            stream = remote.stream_id,
+                            "All slots full and no stream 0 slot — audio dropped"
+                        );
+                    }
+                }
             }
         }
     }
@@ -573,7 +637,7 @@ mod tests {
 
         // Feed remote audio for next playback
         let remote_audio = vec![0.7f32; 128];
-        ring.feed_remote("peer-a", 0, remote_audio);
+        ring.feed_remote("peer-a", 0, 0, remote_audio);
 
         // Cross into interval 1 — remote audio should become playback
         ring.process(&input, &mut output, 16.0);
@@ -593,8 +657,8 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Feed from two peers
-        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
-        ring.feed_remote("peer-b", 0, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-b", 0, 0, vec![0.5f32; 128]);
 
         // Cross boundary — both should be mixed (summed)
         ring.process(&input, &mut output, 16.0);
@@ -613,7 +677,7 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Feed 256 samples of remote audio
-        ring.feed_remote("peer-a", 0, vec![0.4f32; 256]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.4f32; 256]);
 
         // Cross into interval 1
         ring.process(&input, &mut output, 16.0);
@@ -633,7 +697,7 @@ mod tests {
         let mut output = vec![0.0f32; 64];
 
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, vec![0.5f32; 32]); // only 32 samples
+        ring.feed_remote("peer-a", 0, 0, vec![0.5f32; 32]); // only 32 samples
 
         // Cross boundary
         ring.process(&input, &mut output, 16.0);
@@ -659,7 +723,7 @@ mod tests {
         ring.process(&ones, &mut output, 8.0);
 
         // Feed remote for playback in interval 1
-        ring.feed_remote("peer-a", 0, vec![0.9f32; 100]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.9f32; 100]);
 
         // Interval 1: record twos, play remote
         ring.process(&twos, &mut output, 16.0);
@@ -669,7 +733,7 @@ mod tests {
         assert!((output[0] - 0.9).abs() < f32::EPSILON);
 
         // Feed new remote for interval 2
-        ring.feed_remote("peer-a", 1, vec![0.6f32; 100]);
+        ring.feed_remote("peer-a", 0, 1, vec![0.6f32; 100]);
 
         // Interval 2: record ones, play new remote
         ring.process(&ones, &mut output, 32.0);
@@ -713,7 +777,7 @@ mod tests {
         let mut output = vec![0.0f32; 128];
 
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, vec![0.3f32; 64]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 64]);
 
         ring.reset();
 
@@ -797,8 +861,8 @@ mod tests {
         ring.process(&input, &mut output, 0.0);
 
         // Feed from two distinct peers
-        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
-        ring.feed_remote("peer-b", 0, vec![0.7f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-b", 0, 0, vec![0.7f32; 128]);
 
         // Cross boundary to activate playback
         ring.process(&input, &mut output, 16.0);
@@ -811,8 +875,8 @@ mod tests {
         assert_eq!(active.len(), 2);
 
         // Find which slot is which
-        let (a_idx, _) = active.iter().find(|(_, pid)| pid == "peer-a").unwrap();
-        let (b_idx, _) = active.iter().find(|(_, pid)| pid == "peer-b").unwrap();
+        let (a_idx, _, _) = active.iter().find(|(_, pid, _)| pid == "peer-a").unwrap();
+        let (b_idx, _, _) = active.iter().find(|(_, pid, _)| pid == "peer-b").unwrap();
 
         ring.read_peer_playback(*a_idx, &mut slot_a_out);
         ring.read_peer_playback(*b_idx, &mut slot_b_out);
@@ -837,8 +901,8 @@ mod tests {
 
         ring.process(&input, &mut output, 0.0);
 
-        ring.feed_remote("peer-x", 0, vec![0.2f32; 64]);
-        ring.feed_remote("peer-y", 0, vec![0.5f32; 64]);
+        ring.feed_remote("peer-x", 0, 0, vec![0.2f32; 64]);
+        ring.feed_remote("peer-y", 0, 0, vec![0.5f32; 64]);
 
         // Cross boundary
         ring.process(&input, &mut output, 16.0);
@@ -852,7 +916,7 @@ mod tests {
         // Per-peer should sum to the same thing
         let active = ring.active_peer_slots();
         let mut sum = vec![0.0f32; 64];
-        for (idx, _) in &active {
+        for (idx, _, _) in &active {
             let mut buf = vec![0.0f32; 64];
             ring.read_peer_playback(*idx, &mut buf);
             for (i, s) in buf.iter().enumerate() {
@@ -882,16 +946,11 @@ mod tests {
 
     #[test]
     fn interval_fill_ratio_realistic_daw() {
-        // Simulate a real DAW at 120 BPM, 48kHz stereo, buffer size 512 samples.
-        // One interval = 4 bars * 4 beats = 16 beats.
-        // At 120 BPM: 16 beats / (120/60) = 8 seconds.
-        // Expected samples: 48000 * 2 * 8 = 768,000 interleaved samples.
         let mut ring = make_ring();
         let bpm = 120.0_f64;
-        let buf_frames: usize = 256; // frames per callback (mono frame count)
-        let buf_size = buf_frames * CH as usize; // interleaved sample count
+        let buf_frames: usize = 256;
+        let buf_size = buf_frames * CH as usize;
 
-        // Generate non-zero audio input (440 Hz sine)
         let input: Vec<f32> = (0..buf_size)
             .map(|i| {
                 let t = (i / CH as usize) as f32 / SR as f32;
@@ -900,21 +959,16 @@ mod tests {
             .collect();
         let mut output = vec![0.0f32; buf_size];
 
-        // Advance beat position per callback: each callback processes
-        // buf_frames samples at sample_rate, and at bpm BPM there are
-        // bpm/60 beats per second.
         let beats_per_callback = buf_frames as f64 / SR as f64 * bpm / 60.0;
         let mut beat = 0.0_f64;
         let mut callbacks = 0_u32;
 
-        // Fill interval 0 (beats 0..16)
         while beat < 16.0 {
             ring.process(&input, &mut output, beat);
             beat += beats_per_callback;
             callbacks += 1;
         }
 
-        // Cross boundary into interval 1
         ring.process(&input, &mut output, beat);
         callbacks += 1;
 
@@ -924,40 +978,28 @@ mod tests {
         let interval = &completed[0];
         assert_eq!(interval.index, 0);
 
-        // Expected: ~768,000 interleaved samples (8 seconds of stereo 48kHz)
-        // Actual count depends on exact beat rounding, allow ±1 buffer of tolerance.
         let expected_samples = (SR as f64 * 8.0 * CH as f64) as usize;
-        let tolerance = buf_size * 2; // ±2 callbacks of tolerance
+        let tolerance = buf_size * 2;
 
         assert!(
             interval.samples.len() > expected_samples - tolerance,
             "Interval should contain near-full recording. Got {} samples, expected ~{} (callbacks={})",
-            interval.samples.len(),
-            expected_samples,
-            callbacks,
+            interval.samples.len(), expected_samples, callbacks,
         );
         assert!(
             interval.samples.len() <= expected_samples + tolerance,
             "Interval should not exceed expected size. Got {} samples, expected ~{}",
-            interval.samples.len(),
-            expected_samples,
+            interval.samples.len(), expected_samples,
         );
 
-        // Verify the audio is non-silent (RMS > 0)
         let rms: f32 = (interval.samples.iter().map(|s| s * s).sum::<f32>()
             / interval.samples.len() as f32)
             .sqrt();
-        assert!(
-            rms > 0.1,
-            "Completed interval should contain real audio, RMS={rms}"
-        );
+        assert!(rms > 0.1, "Completed interval should contain real audio, RMS={rms}");
 
         eprintln!(
             "[test] interval_fill_ratio: callbacks={}, samples={}, expected≈{}, RMS={:.4}",
-            callbacks,
-            interval.samples.len(),
-            expected_samples,
-            rms,
+            callbacks, interval.samples.len(), expected_samples, rms,
         );
     }
 
@@ -970,17 +1012,17 @@ mod tests {
         let mut output = vec![0.0f32; 128];
 
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         assert_eq!(ring.active_peer_slots().len(), 1);
-        let (slot_a, _) = ring.active_peer_slots()[0].clone();
+        let (slot_a, _, _) = ring.active_peer_slots()[0].clone();
 
         ring.remove_peer("peer-a");
         assert_eq!(ring.active_peer_slots().len(), 0);
 
         // The freed slot should be reusable by a new peer
-        ring.feed_remote("peer-b", 1, vec![0.5f32; 128]);
+        ring.feed_remote("peer-b", 0, 1, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 32.0);
 
         let active = ring.active_peer_slots();
@@ -1000,13 +1042,13 @@ mod tests {
         ring.notify_peer_joined("peer-b", "identity-bob");
 
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
-        ring.feed_remote("peer-b", 0, vec![0.7f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-b", 0, 0, vec![0.7f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         let active = ring.active_peer_slots();
-        let slot_a = active.iter().find(|(_, pid)| pid == "peer-a").unwrap().0;
-        let slot_b = active.iter().find(|(_, pid)| pid == "peer-b").unwrap().0;
+        let slot_a = active.iter().find(|(_, pid, _)| pid == "peer-a").unwrap().0;
+        let slot_b = active.iter().find(|(_, pid, _)| pid == "peer-b").unwrap().0;
         assert_ne!(slot_a, slot_b);
 
         // peer-a disconnects
@@ -1017,16 +1059,16 @@ mod tests {
         ring.notify_peer_joined("peer-a-new", "identity-alice");
 
         // Feed audio from the new peer_id
-        ring.feed_remote("peer-a-new", 2, vec![0.9f32; 128]);
+        ring.feed_remote("peer-a-new", 0, 2, vec![0.9f32; 128]);
         ring.process(&input, &mut output, 32.0);
 
         // peer-a-new should have reclaimed peer-a's original slot
         let active = ring.active_peer_slots();
-        let new_slot = active.iter().find(|(_, pid)| pid == "peer-a-new").unwrap().0;
+        let new_slot = active.iter().find(|(_, pid, _)| pid == "peer-a-new").unwrap().0;
         assert_eq!(new_slot, slot_a, "Reconnected peer should reclaim original slot via affinity");
 
         // peer-b should still have their original slot
-        let bob_slot = active.iter().find(|(_, pid)| pid == "peer-b").unwrap().0;
+        let bob_slot = active.iter().find(|(_, pid, _)| pid == "peer-b").unwrap().0;
         assert_eq!(bob_slot, slot_b);
     }
 
@@ -1039,7 +1081,7 @@ mod tests {
         // Set up: peer-a at slot 0
         ring.notify_peer_joined("peer-a", "identity-alice");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
         let slot_a = ring.active_peer_slots()[0].0;
 
@@ -1047,19 +1089,19 @@ mod tests {
         ring.remove_peer("peer-a");
 
         // A different peer takes slot 0
-        ring.feed_remote("peer-c", 1, vec![0.1f32; 128]);
+        ring.feed_remote("peer-c", 0, 1, vec![0.1f32; 128]);
         ring.process(&input, &mut output, 32.0);
-        let slot_c = ring.active_peer_slots().iter().find(|(_, pid)| pid == "peer-c").unwrap().0;
+        let slot_c = ring.active_peer_slots().iter().find(|(_, pid, _)| pid == "peer-c").unwrap().0;
         assert_eq!(slot_c, slot_a, "peer-c should take the freed slot");
 
         // Now peer-a reconnects — their affinity slot is taken
         ring.notify_peer_joined("peer-a-new", "identity-alice");
-        ring.feed_remote("peer-a-new", 3, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a-new", 0, 3, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 48.0);
 
         // Should get a different slot (first-fit fallback)
         let active = ring.active_peer_slots();
-        let new_slot = active.iter().find(|(_, pid)| pid == "peer-a-new").unwrap().0;
+        let new_slot = active.iter().find(|(_, pid, _)| pid == "peer-a-new").unwrap().0;
         assert_ne!(new_slot, slot_a, "Affinity slot is occupied — should get a different one");
     }
 
@@ -1071,7 +1113,7 @@ mod tests {
 
         // peer-a joins WITHOUT identity (old client)
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         assert_eq!(ring.active_peer_slots().len(), 1);
@@ -1079,7 +1121,7 @@ mod tests {
         assert_eq!(ring.active_peer_slots().len(), 0);
 
         // Slot is freed with no affinity reservation (no identity)
-        ring.feed_remote("peer-b", 1, vec![0.5f32; 128]);
+        ring.feed_remote("peer-b", 0, 1, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 32.0);
         assert_eq!(ring.active_peer_slots().len(), 1);
     }
@@ -1092,7 +1134,7 @@ mod tests {
 
         ring.notify_peer_joined("peer-a", "identity-alice");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a", 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
         ring.process(&input, &mut output, 16.0);
         ring.remove_peer("peer-a");
 
@@ -1102,11 +1144,139 @@ mod tests {
         // Reconnect — should get first-fit (slot 0), not necessarily from affinity
         ring.notify_peer_joined("peer-a-new", "identity-alice");
         ring.process(&input, &mut output, 0.0);
-        ring.feed_remote("peer-a-new", 0, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a-new", 0, 0, vec![0.5f32; 128]);
         ring.process(&input, &mut output, 16.0);
 
         let active = ring.active_peer_slots();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].0, 0, "After reset, slot 0 should be assigned first-fit");
+    }
+
+    // --- Test: Multi-stream support ---
+
+    #[test]
+    fn multi_stream_same_peer_separate_slots() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Same peer, two different streams
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a", 1, 0, vec![0.7f32; 128]);
+
+        ring.process(&input, &mut output, 16.0);
+
+        let active = ring.active_peer_slots();
+        assert_eq!(active.len(), 2, "Two streams from same peer should get separate slots");
+
+        // Find slots by stream_id
+        let (s0_idx, _, _) = active.iter().find(|(_, pid, sid)| pid == "peer-a" && *sid == 0).unwrap();
+        let (s1_idx, _, _) = active.iter().find(|(_, pid, sid)| pid == "peer-a" && *sid == 1).unwrap();
+        assert_ne!(s0_idx, s1_idx);
+
+        let mut s0_out = vec![0.0f32; 128];
+        let mut s1_out = vec![0.0f32; 128];
+        ring.read_peer_playback(*s0_idx, &mut s0_out);
+        ring.read_peer_playback(*s1_idx, &mut s1_out);
+
+        assert!(s0_out.iter().all(|&s| (s - 0.3).abs() < f32::EPSILON));
+        assert!(s1_out.iter().all(|&s| (s - 0.7).abs() < f32::EPSILON));
+
+        // Summed playback should be 0.3 + 0.7 = 1.0
+        assert!(output.iter().all(|&s| (s - 1.0).abs() < 0.001),
+            "Summed mix should be 1.0, got: {:?}", &output[..4]);
+    }
+
+    #[test]
+    fn slot_exhaustion_merges_to_stream_0() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 64];
+        let mut output = vec![0.0f32; 64];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Fill all 31 slots with distinct peer-streams
+        // Peer-a stream 0 is at slot 0 (this is the merge target)
+        ring.feed_remote("peer-a", 0, 0, vec![0.1f32; 64]);
+        for i in 1..MAX_REMOTE_PEERS {
+            let peer = format!("peer-fill-{i}");
+            ring.feed_remote(&peer, 0, 0, vec![0.01f32; 64]);
+        }
+
+        // 32nd stream should overflow — merge into peer-a's stream 0
+        ring.feed_remote("peer-a", 5, 0, vec![0.5f32; 64]);
+
+        ring.process(&input, &mut output, 16.0);
+
+        // Should still have exactly 31 active slots (no new slot for overflow)
+        let active = ring.active_peer_slots();
+        assert_eq!(active.len(), MAX_REMOTE_PEERS);
+
+        // peer-a stream 0 should contain merged audio (0.1 + 0.5 = 0.6)
+        let (s0_idx, _, _) = active.iter().find(|(_, pid, sid)| pid == "peer-a" && *sid == 0).unwrap();
+        let mut s0_out = vec![0.0f32; 64];
+        ring.read_peer_playback(*s0_idx, &mut s0_out);
+        assert!(
+            s0_out.iter().all(|&s| (s - 0.6).abs() < 0.01),
+            "Overflowed stream should merge into stream 0, got: {:?}", &s0_out[..4]
+        );
+    }
+
+    #[test]
+    fn remove_peer_frees_all_streams() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Peer-a sends 3 streams
+        ring.feed_remote("peer-a", 0, 0, vec![0.1f32; 128]);
+        ring.feed_remote("peer-a", 1, 0, vec![0.2f32; 128]);
+        ring.feed_remote("peer-a", 2, 0, vec![0.3f32; 128]);
+
+        ring.process(&input, &mut output, 16.0);
+        assert_eq!(ring.active_peer_slots().len(), 3);
+
+        // Remove peer-a — all 3 streams should be freed
+        ring.remove_peer("peer-a");
+        assert_eq!(ring.active_peer_slots().len(), 0);
+    }
+
+    #[test]
+    fn affinity_multi_stream_reclaims_all_slots() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 128];
+        let mut output = vec![0.0f32; 128];
+
+        ring.notify_peer_joined("peer-a", "identity-alice");
+        ring.process(&input, &mut output, 0.0);
+
+        // Peer-a sends 2 streams
+        ring.feed_remote("peer-a", 0, 0, vec![0.1f32; 128]);
+        ring.feed_remote("peer-a", 1, 0, vec![0.2f32; 128]);
+        ring.process(&input, &mut output, 16.0);
+
+        let active = ring.active_peer_slots();
+        let slot_s0 = active.iter().find(|(_, _, sid)| *sid == 0).unwrap().0;
+        let slot_s1 = active.iter().find(|(_, _, sid)| *sid == 1).unwrap().0;
+
+        // Disconnect
+        ring.remove_peer("peer-a");
+
+        // Reconnect with new peer_id, same identity
+        ring.notify_peer_joined("peer-a-new", "identity-alice");
+        ring.feed_remote("peer-a-new", 0, 1, vec![0.3f32; 128]);
+        ring.feed_remote("peer-a-new", 1, 1, vec![0.4f32; 128]);
+        ring.process(&input, &mut output, 32.0);
+
+        let active = ring.active_peer_slots();
+        let new_s0 = active.iter().find(|(_, _, sid)| *sid == 0).unwrap().0;
+        let new_s1 = active.iter().find(|(_, _, sid)| *sid == 1).unwrap().0;
+
+        assert_eq!(new_s0, slot_s0, "Stream 0 should reclaim original slot");
+        assert_eq!(new_s1, slot_s1, "Stream 1 should reclaim original slot");
     }
 }

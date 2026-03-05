@@ -26,6 +26,7 @@ const DEFAULT_BITRATE_KBPS: u32 = 128;
 /// thread for Opus encoding (keeps Opus off the real-time audio callback).
 struct RawInterval {
     completed: CompletedInterval,
+    stream_id: u16,
     sample_rate: u32,
     channels: u16,
     bpm: f64,
@@ -185,11 +186,12 @@ impl Plugin for WailSendPlugin {
         let ipc_sample_rate = buffer_config.sample_rate as u32;
         let ipc_channels = channels;
         let ipc_bitrate = DEFAULT_BITRATE_KBPS;
+        let ipc_params = self.params.clone();
 
         std::thread::Builder::new()
             .name("wail-ipc-send".into())
             .spawn(move || {
-                ipc_thread_send(out_rx, addr, ipc_sample_rate, ipc_channels, ipc_bitrate)
+                ipc_thread_send(out_rx, addr, ipc_sample_rate, ipc_channels, ipc_bitrate, ipc_params)
             })
             .ok();
 
@@ -268,9 +270,11 @@ impl Plugin for WailSendPlugin {
                         let bpm_snap = bridge.bpm();
                         let q = bridge.quantum();
                         let b = bridge.bars();
+                        let stream_id = self.params.stream_index.value() as u16;
                         for c in completed {
                             let _ = tx.try_send(RawInterval {
                                 completed: c,
+                                stream_id,
                                 sample_rate: sr,
                                 channels: ch,
                                 bpm: bpm_snap,
@@ -301,6 +305,7 @@ fn ipc_thread_send(
     sample_rate: u32,
     channels: u16,
     bitrate_kbps: u32,
+    params: Arc<WailSendParams>,
 ) {
     let opus_rate = nearest_opus_rate(sample_rate);
     if opus_rate != sample_rate {
@@ -331,9 +336,13 @@ fn ipc_thread_send(
             }
         };
 
-        // Identify as a send plugin
-        if stream.write_all(&[IPC_ROLE_SEND]).is_err() {
-            tracing::warn!("WAIL Send: failed to write role byte — reconnecting");
+        // Identify as a send plugin + stream index
+        let stream_index = params.stream_index.value() as u16;
+        let mut handshake = [0u8; 3];
+        handshake[0] = IPC_ROLE_SEND;
+        handshake[1..3].copy_from_slice(&stream_index.to_le_bytes());
+        if stream.write_all(&handshake).is_err() {
+            tracing::warn!("WAIL Send: failed to write handshake — reconnecting");
             std::thread::sleep(Duration::from_secs(1));
             continue;
         }
@@ -350,6 +359,7 @@ fn ipc_thread_send(
                                     as u32;
                                 let interval = AudioInterval {
                                     index: raw.completed.index,
+                                    stream_id: raw.stream_id,
                                     opus_data,
                                     sample_rate: raw.sample_rate,
                                     channels: raw.channels,
