@@ -218,7 +218,6 @@ pub async fn establish_connection(mesh_a: &mut PeerMesh, mesh_b: &mut PeerMesh) 
 
 pub async fn establish_connection_timeout(mesh_a: &mut PeerMesh, mesh_b: &mut PeerMesh, timeout_secs: u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
-    let min_settle = tokio::time::Instant::now() + Duration::from_secs(2);
 
     loop {
         tokio::select! {
@@ -233,18 +232,24 @@ pub async fn establish_connection_timeout(mesh_a: &mut PeerMesh, mesh_b: &mut Pe
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                let both_connected = !mesh_a.connected_peers().is_empty()
-                    && !mesh_b.connected_peers().is_empty();
-                if both_connected && tokio::time::Instant::now() > min_settle {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                // Check actual DataChannel state, not just peer map membership.
+                // connected_peers() only checks HashMap entries which can be stale
+                // in reconnection scenarios; any_audio_dc_open() verifies the
+                // WebRTC connection is fully established with open DataChannels.
+                let both_open = mesh_a.any_audio_dc_open()
+                    && mesh_b.any_audio_dc_open();
+                if both_open {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     return;
                 }
             }
             _ = tokio::time::sleep_until(deadline) => {
                 panic!(
-                    "WebRTC connection timed out. Peers: A={:?}, B={:?}",
+                    "WebRTC connection timed out. Peers: A={:?}, B={:?}, DCs: A={}, B={}",
                     mesh_a.connected_peers(),
-                    mesh_b.connected_peers()
+                    mesh_b.connected_peers(),
+                    mesh_a.any_audio_dc_open(),
+                    mesh_b.any_audio_dc_open(),
                 );
             }
         }
