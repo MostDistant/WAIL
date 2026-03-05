@@ -272,12 +272,13 @@ impl PeerMesh {
         match msg {
             SignalMessage::PeerList { peers } => {
                 info!(peers = ?peers, "Received peer list");
+                let peer_count = peers.len();
                 for remote_id in peers {
                     if remote_id != self.peer_id && self.peer_id < remote_id {
                         self.initiate_connection(&remote_id).await?;
                     }
                 }
-                Ok(Some(MeshEvent::PeerListReceived))
+                Ok(Some(MeshEvent::PeerListReceived(peer_count)))
             }
 
             SignalMessage::PeerJoined { peer_id: remote_id } => {
@@ -507,7 +508,7 @@ impl PeerMesh {
 /// Events from the peer mesh.
 #[derive(Debug)]
 pub enum MeshEvent {
-    PeerListReceived,
+    PeerListReceived(usize),
     PeerJoined(String),
     PeerLeft(String),
     /// A peer's WebRTC connection failed or disconnected.

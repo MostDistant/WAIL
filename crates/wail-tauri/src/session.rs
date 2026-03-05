@@ -184,6 +184,7 @@ async fn session_loop(
     // Track last broadcast tempo to avoid echo loops
     let mut last_broadcast_bpm: f64 = bpm;
     let mut beat_synced = false;
+    let mut audio_gate = AudioSendGate::new();
 
     // Audio interval stats
     let mut audio_intervals_sent: u64 = 0;
@@ -370,15 +371,17 @@ async fn session_loop(
             // --- Audio from plugin IPC → broadcast to WebRTC peers ---
             Some(frame) = ipc_from_plugin_rx.recv() => {
                 if let Some((_peer_id, wire_data)) = IpcMessage::decode_audio(&frame) {
+                    if let Some(ref rec) = recorder {
+                        rec.record_own(wire_data.clone());
+                    }
+                    if audio_gate.is_gated() {
+                        continue;
+                    }
                     mesh.broadcast_audio(&wire_data).await;
                     audio_intervals_sent += 1;
                     audio_bytes_sent += wire_data.len() as u64;
                     let peers = mesh.connected_peers();
                     ui_info!(&app, "[AUDIO SEND] wire={} bytes, peers=[{}], total_sent={}", wire_data.len(), peers.join(", "), audio_intervals_sent);
-
-                    if let Some(ref rec) = recorder {
-                        rec.record_own(wire_data);
-                    }
                 }
             }
 
@@ -504,6 +507,14 @@ async fn session_loop(
                             });
                         }
                     }
+                    Ok(Some(wail_net::MeshEvent::PeerListReceived(n))) => {
+                        if n == 0 {
+                            ui_info!(&app, "First peer in room — audio send ungated");
+                        } else {
+                            audio_gate.on_peer_list(n);
+                            ui_info!(&app, "Joined room with {n} peer(s) — audio send gated until beat sync");
+                        }
+                    }
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         ui_warn!(&app, "Signaling connection closed — attempting reconnection");
@@ -556,6 +567,8 @@ async fn session_loop(
                                     peer_reconnect_attempts.clear();
                                     peer_last_seen.clear();
                                     clock = ClockSync::new();
+                                    beat_synced = false;
+                                    audio_gate.on_reconnect();
                                     signaling_reconnected = true;
                                     ui_info!(&app, "Signaling reconnected (attempt {attempt})");
                                     let _ = app.emit("session:reconnected", ());
@@ -699,7 +712,8 @@ async fn session_loop(
                     SyncMessage::StateSnapshot { bpm: remote_bpm, beat: remote_beat, .. } => {
                         if !beat_synced {
                             beat_synced = true;
-                            ui_info!(&app, "Beat sync — snapped to beat {remote_beat:.2}");
+                            audio_gate.on_beat_synced();
+                            ui_info!(&app, "Beat sync — snapped to beat {remote_beat:.2} — audio send gate lifted");
                             if link_cmd_tx.send(LinkCommand::ForceBeat(remote_beat)).is_err() {
                                 ui_warn!(&app, "Link bridge stopped — cannot force beat");
                             }
@@ -835,7 +849,7 @@ async fn session_loop(
                         if let Some(idx) = interval.update(beat) {
                             info!(interval = idx, beat = format!("{:.1}", beat), ">>> INTERVAL BOUNDARY <<<");
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
-                            if test_tone_enabled {
+                            if test_tone_enabled && !audio_gate.is_gated() {
                                 if let Some(ref mut encoder) = test_tone_encoder {
                                     send_test_tone(&app, &mesh, encoder, &mut rng, idx, last_broadcast_bpm, bars, quantum, &mut audio_intervals_sent, &mut audio_bytes_sent).await;
                                 }
@@ -856,7 +870,7 @@ async fn session_loop(
                         if let Some(idx) = interval.update(beat) {
                             info!(interval = idx, beat = format!("{:.1}", beat), ">>> INTERVAL BOUNDARY <<<");
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
-                            if test_tone_enabled {
+                            if test_tone_enabled && !audio_gate.is_gated() {
                                 if let Some(ref mut encoder) = test_tone_encoder {
                                     send_test_tone(&app, &mesh, encoder, &mut rng, idx, last_broadcast_bpm, bars, quantum, &mut audio_intervals_sent, &mut audio_bytes_sent).await;
                                 }
@@ -921,6 +935,7 @@ async fn session_loop(
                         audio_dc_open: dc_open,
                         plugin_connected: !ipc_recv_writers.is_empty(),
                         test_tone_enabled,
+                        audio_send_gated: audio_gate.is_gated(),
                         recording: recorder.is_some(),
                         recording_size_bytes: recorder.as_ref().map_or(0, |r| r.bytes_written()),
                     });
@@ -1018,5 +1033,82 @@ async fn send_test_tone(
         Err(e) => {
             ui_warn!(app, "[TEST TONE] Encode failed: {e}");
         }
+    }
+}
+
+struct AudioSendGate {
+    gated: bool,
+}
+
+impl AudioSendGate {
+    fn new() -> Self {
+        Self { gated: false }
+    }
+
+    /// Gates if joining a room that already has peers.
+    fn on_peer_list(&mut self, peer_count: usize) {
+        if peer_count > 0 {
+            self.gated = true;
+        } else {
+            self.gated = false;
+        }
+    }
+
+    /// Lifts gate once beat sync is achieved.
+    fn on_beat_synced(&mut self) {
+        self.gated = false;
+    }
+
+    /// Re-gates on signaling reconnection; beat sync must re-establish.
+    fn on_reconnect(&mut self) {
+        self.gated = true;
+    }
+
+    fn is_gated(&self) -> bool {
+        self.gated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioSendGate;
+
+    #[test]
+    fn first_peer_not_gated() {
+        let mut gate = AudioSendGate::new();
+        gate.on_peer_list(0);
+        assert!(!gate.is_gated());
+    }
+
+    #[test]
+    fn second_peer_gated_then_unlocked() {
+        let mut gate = AudioSendGate::new();
+        gate.on_peer_list(1);
+        assert!(gate.is_gated());
+        gate.on_beat_synced();
+        assert!(!gate.is_gated());
+    }
+
+    #[test]
+    fn reconnect_regates_until_beat_sync() {
+        let mut gate = AudioSendGate::new();
+        gate.on_peer_list(1);
+        gate.on_beat_synced();
+        assert!(!gate.is_gated());
+        gate.on_reconnect();
+        assert!(gate.is_gated());
+        gate.on_peer_list(1);
+        assert!(gate.is_gated());
+        gate.on_beat_synced();
+        assert!(!gate.is_gated());
+    }
+
+    #[test]
+    fn first_peer_reconnects_to_empty_room() {
+        let mut gate = AudioSendGate::new();
+        gate.on_reconnect();
+        assert!(gate.is_gated());
+        gate.on_peer_list(0);
+        assert!(!gate.is_gated());
     }
 }
