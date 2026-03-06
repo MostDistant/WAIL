@@ -4,6 +4,7 @@ mod filelog;
 mod hb;
 mod identity;
 mod peers;
+mod plugin_install;
 mod recorder;
 mod session;
 
@@ -47,6 +48,9 @@ pub fn run() {
             }
             let peer_identity = identity::get_or_create(&data_dir);
             app.manage(identity::PeerIdentity(peer_identity));
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                plugin_install::install_if_missing(&resource_dir);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
