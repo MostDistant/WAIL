@@ -90,8 +90,8 @@ jobs:
       - name: Build plugin
         run: cargo xtask build-plugin
 
-      - name: Clean stale Tauri build artifacts
-        run: rm -rf target/release/bundle/ target/release/build/wail-tauri-*/
+      - name: Clean stale Tauri bundles
+        run: rm -rf target/release/bundle/
 
       - name: Build Tauri app
         run: cargo tauri build
@@ -174,10 +174,8 @@ jobs:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
         run: cargo xtask build-plugin
 
-      - name: Clean stale Tauri build artifacts
-        run: |
-          Remove-Item -Recurse -Force target\release\bundle -ErrorAction SilentlyContinue
-          Get-ChildItem target\release\build -Filter 'wail-tauri-*' -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+      - name: Clean stale Tauri bundles
+        run: Remove-Item -Recurse -Force target\release\bundle -ErrorAction SilentlyContinue
         shell: pwsh
 
       - name: Build Tauri app
@@ -257,8 +255,8 @@ jobs:
       - name: Build plugin
         run: cargo xtask build-plugin
 
-      - name: Clean stale Tauri build artifacts
-        run: rm -rf target/release/bundle/ target/release/build/wail-tauri-*/
+      - name: Clean stale Tauri bundles
+        run: rm -rf target/release/bundle/
 
       - name: Build Tauri app
         run: cargo tauri build

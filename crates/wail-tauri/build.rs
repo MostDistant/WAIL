@@ -15,13 +15,5 @@ fn main() {
         }
     }
 
-    // When CI caches the target/ directory, stale tauri_build output in OUT_DIR
-    // can conflict with fresh resource processing (file/directory mismatches).
-    // Clean it before each build to ensure a fresh start.
-    if let Ok(out_dir) = std::env::var("OUT_DIR") {
-        let _ = std::fs::remove_dir_all(&out_dir);
-        let _ = std::fs::create_dir_all(&out_dir);
-    }
-
     tauri_build::build();
 }
