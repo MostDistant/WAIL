@@ -15,7 +15,13 @@ brew tap MostDistant/wail
 brew install MostDistant/wail/wail
 ```
 
-This builds the WAIL binary and DAW plugins from source. The CLAP and VST3 plugins are automatically installed to `~/Library/Audio/Plug-Ins/` — just rescan plugins in your DAW. Note: the Homebrew install provides the `wail` command-line binary. For the full macOS `.app` bundle (dock icon, menu bar), use the DMG installer above.
+This builds the WAIL binary and DAW plugins from source. After installation, run the plugin installer to copy the CLAP and VST3 bundles into your DAW's plugin directories:
+
+```sh
+wail-install-plugins
+```
+
+Then rescan plugins in your DAW. Note: the Homebrew install provides the `wail` command-line binary. For the full macOS `.app` bundle (dock icon, menu bar), use the DMG installer above.
 
 **Windows** — Run the `.exe` installer. Copy the bundled `.clap` and `.vst3` plugin files to your DAW's plugin directory.
 
