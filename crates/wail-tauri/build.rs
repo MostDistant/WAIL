@@ -15,5 +15,13 @@ fn main() {
         }
     }
 
+    // Clean stale tauri_build resource output. CI caches the target/ directory
+    // which includes OUT_DIR; if the resource mapping in tauri.conf.json changed,
+    // stale file/directory entries cause conflicts (EEXIST, EISDIR).
+    if let Ok(out_dir) = std::env::var("OUT_DIR") {
+        let _ = std::fs::remove_dir_all(&out_dir);
+        let _ = std::fs::create_dir_all(&out_dir);
+    }
+
     tauri_build::build();
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.0 (2026-03-05)
+
+### Features
+
+- Promote to stable 1.0.0 release. Normal semver now applies — `feat:` commits produce minor bumps, `fix:` commits produce patch bumps.
+- Enforce strict conventional commit prefix rules in CLAUDE.md.
+- Add CI test job gating builds, bundle CLAP/VST3 plugins into installers, and remove manual plugin install button from UI.
+
 ## 0.4.17 (2026-03-05)
 
 ### Features
