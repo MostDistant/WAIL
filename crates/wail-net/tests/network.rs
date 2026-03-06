@@ -1085,3 +1085,77 @@ async fn higher_id_re_initiate_does_not_create_offer() {
     assert_eq!(from_a, "peer-b");
     eprintln!("[test] Higher-ID re_initiate tie-breaking test passed");
 }
+
+// ---------------------------------------------------------------
+// Test: A single peer failure produces a bounded number of
+// PeerFailed events (no cascade from Disconnected / reader exits)
+// ---------------------------------------------------------------
+
+/// A single connection failure should produce at most 3 PeerFailed events
+/// (PeerConnectionState::Failed + 2× DataChannel on_close). Previously,
+/// Disconnected state and reader exit handlers also sent failure signals,
+/// producing 5-6 events — enough to exhaust MAX_PEER_RECONNECT_ATTEMPTS
+/// from a single failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_failure_produces_bounded_peer_failed_events() {
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+
+    let server_url = start_test_signaling_server().await;
+    let ice = wail_net::default_ice_servers();
+
+    let (mut mesh_a, _sync_a, _audio_a) = PeerMesh::connect_with_options(
+        &server_url, "bounded-fail-room", "peer-a", None, ice.clone(), 200,
+    )
+    .await
+    .expect("peer-a connect failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_b, _audio_b) = PeerMesh::connect_with_options(
+        &server_url, "bounded-fail-room", "peer-b", None, ice, 200,
+    )
+    .await
+    .expect("peer-b connect failed");
+
+    establish_connection(&mut mesh_a, &mut mesh_b).await;
+    eprintln!("[test] Connection established");
+
+    // Close peer-a's side — triggers failure detection on mesh_b.
+    mesh_a.close_peer("peer-b").await;
+
+    // Drain events until no new PeerFailed arrives for 8 seconds (catches late reader exits).
+    let mut failure_count = 0u32;
+    let mut last_event = tokio::time::Instant::now();
+    let quiet_period = Duration::from_secs(8);
+    let hard_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        tokio::select! {
+            event = mesh_b.poll_signaling() => {
+                if let Ok(Some(wail_net::MeshEvent::PeerFailed(ref pid))) = event {
+                    if pid == "peer-a" {
+                        failure_count += 1;
+                        last_event = tokio::time::Instant::now();
+                        eprintln!("[test] PeerFailed #{failure_count} for peer-a");
+                    }
+                }
+            }
+            _ = mesh_a.poll_signaling() => {}
+            _ = tokio::time::sleep_until(last_event + quiet_period) => break,
+            _ = tokio::time::sleep_until(hard_deadline) => break,
+        }
+    }
+
+    eprintln!("[test] Total PeerFailed events: {failure_count}");
+
+    // After removing reader exit fail_tx sources, only DC on_close remains (2 max).
+    // Previously, reader exit handlers also sent failure signals, inflating the count.
+    assert!(
+        failure_count <= 2,
+        "Expected at most 2 PeerFailed events (DC on_close only), got {failure_count}"
+    );
+    assert!(
+        failure_count >= 1,
+        "Expected at least 1 PeerFailed event"
+    );
+    eprintln!("[test] Bounded PeerFailed events test passed");
+}

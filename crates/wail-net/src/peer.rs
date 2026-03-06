@@ -186,7 +186,9 @@ impl PeerConnection {
                 }
                 RTCPeerConnectionState::Disconnected => {
                     warn!(peer = %rpid, "WebRTC connection disconnected");
-                    let _ = fail_tx.send(rpid.clone());
+                    // Don't signal failure — Disconnected is transient per the WebRTC spec
+                    // and the connection may recover on its own. If it doesn't, the Failed
+                    // state will fire. The liveness watchdog (30s) catches lingering cases.
                 }
                 _ => {
                     info!(peer = %rpid, %state, "Peer connection state changed");

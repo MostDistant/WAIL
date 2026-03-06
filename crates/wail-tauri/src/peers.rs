@@ -14,6 +14,9 @@ pub struct PeerState {
     pub hello_sent: bool,
     pub last_seen: Instant,
     pub reconnect_attempts: u32,
+    /// True while a reconnect timer is scheduled — prevents duplicate PeerFailed events
+    /// from spawning multiple concurrent timers and inflating the attempt counter.
+    pub reconnect_pending: bool,
     pub audio_recv_count: u64,
     pub audio_recv_prev: u64,
     pub prev_status: String,
@@ -28,6 +31,7 @@ impl PeerState {
             hello_sent: false,
             last_seen: Instant::now(),
             reconnect_attempts: 0,
+            reconnect_pending: false,
             audio_recv_count: 0,
             audio_recv_prev: 0,
             prev_status: String::new(),
@@ -421,5 +425,45 @@ mod tests {
 
         reg.clear_hello_sent("peer1");
         assert!(reg.mark_hello_sent("peer1")); // after clear → true again
+    }
+
+    #[test]
+    fn reconnect_pending_prevents_counter_inflation() {
+        let mut reg = PeerRegistry::new();
+        reg.add("peer-x".to_string(), Some("Alice".to_string()));
+
+        // Initial state: not pending, zero attempts
+        let peer = reg.get("peer-x").unwrap();
+        assert!(!peer.reconnect_pending);
+        assert_eq!(peer.reconnect_attempts, 0);
+
+        // First failure: increment + set pending (simulates session PeerFailed handler)
+        let peer = reg.get_mut("peer-x").unwrap();
+        peer.reconnect_attempts += 1;
+        peer.reconnect_pending = true;
+
+        // While pending: session should skip duplicate events — counter stays at 1
+        let peer = reg.get("peer-x").unwrap();
+        assert!(peer.reconnect_pending);
+        assert_eq!(peer.reconnect_attempts, 1);
+
+        // Timer fires: clear pending
+        let peer = reg.get_mut("peer-x").unwrap();
+        peer.reconnect_pending = false;
+
+        // Next real failure (from new connection): processed normally
+        let peer = reg.get("peer-x").unwrap();
+        assert!(!peer.reconnect_pending);
+        let peer = reg.get_mut("peer-x").unwrap();
+        peer.reconnect_attempts += 1;
+        peer.reconnect_pending = true;
+        assert_eq!(peer.reconnect_attempts, 2);
+
+        // Successful reconnection: both cleared
+        let peer = reg.get_mut("peer-x").unwrap();
+        peer.reconnect_attempts = 0;
+        peer.reconnect_pending = false;
+        assert_eq!(peer.reconnect_attempts, 0);
+        assert!(!peer.reconnect_pending);
     }
 }

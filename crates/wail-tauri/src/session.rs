@@ -467,6 +467,14 @@ async fn session_loop(
                         let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                     }
                     Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) => {
+                        // Skip duplicate failure events while a reconnect timer is pending.
+                        // A single connection failure fires multiple fail_tx sends (DC on_close
+                        // for each channel + PeerConnectionState::Failed). Without this guard,
+                        // each event would spawn its own timer and inflate reconnect_attempts.
+                        if peers.get(&pid).is_some_and(|p| p.reconnect_pending) {
+                            continue;
+                        }
+
                         let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
                         let attempt = if let Some(peer) = peers.get_mut(&pid) {
                             peer.reconnect_attempts += 1;
@@ -481,6 +489,9 @@ async fn session_loop(
                             mesh.remove_peer(&pid).await;
                             let _ = app.emit("peer:left", PeerLeftEvent { peer_id: pid });
                         } else {
+                            if let Some(peer) = peers.get_mut(&pid) {
+                                peer.reconnect_pending = true;
+                            }
                             let backoff_ms = (PEER_RECONNECT_BASE_MS * 2u64.pow(attempt - 1)).min(PEER_RECONNECT_MAX_MS);
                             ui_warn!(&app, "Peer {name} connection failed — reconnecting in {backoff_ms}ms (attempt {attempt}/{MAX_PEER_RECONNECT_ATTEMPTS})");
                             let _ = app.emit("peer:reconnecting", PeerReconnectingEvent {
@@ -526,6 +537,10 @@ async fn session_loop(
 
             // --- Pending peer reconnection ---
             Some(pid) = reconnect_rx.recv() => {
+                // Clear the pending flag so failures from the NEW connection are detected.
+                if let Some(peer) = peers.get_mut(&pid) {
+                    peer.reconnect_pending = false;
+                }
                 if peers.get(&pid).is_some_and(|p| p.reconnect_attempts > 0) {
                     let name = peers.get(&pid).and_then(|p| p.display_name.as_deref()).unwrap_or(&pid).to_string();
                     ui_info!(&app, "Attempting reconnection to {name}...");
@@ -666,6 +681,7 @@ async fn session_loop(
                         if let Some(peer) = peers.get_mut(&pid) {
                             if peer.reconnect_attempts > 0 {
                                 peer.reconnect_attempts = 0;
+                                peer.reconnect_pending = false;
                                 ui_info!(&app, "Peer {name_display} reconnected successfully");
                             }
                         }
