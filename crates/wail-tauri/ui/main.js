@@ -2,6 +2,9 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 // DOM elements
+const firstLaunchScreen = document.getElementById('first-launch-screen');
+const firstLaunchForm = document.getElementById('first-launch-form');
+const firstLaunchNameInput = document.getElementById('first-launch-name');
 const joinScreen = document.getElementById('join-screen');
 const sessionScreen = document.getElementById('session-screen');
 const joinForm = document.getElementById('join-form');
@@ -11,6 +14,13 @@ const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
 const setBpmBtn = document.getElementById('set-bpm-btn');
 const toggleTestToneBtn = document.getElementById('toggle-test-tone-btn');
+const settingsBtn = document.getElementById('settings-btn');
+const settingsPanel = document.getElementById('settings-panel');
+const settingsCloseBtn = document.getElementById('settings-close-btn');
+const settingsForm = document.getElementById('settings-form');
+const settingsDisplayNameInput = document.getElementById('settings-display-name');
+const settingsTelemetryCheckbox = document.getElementById('settings-telemetry');
+const settingsRememberCheckbox = document.getElementById('settings-remember');
 
 // Version label
 window.__TAURI__.app.getVersion().then(v => {
@@ -22,9 +32,40 @@ let unlisten = [];
 let testToneEnabled = false;
 let roomRefreshTimer = null;
 
+// --- Display Name Storage ---
+const DISPLAY_NAME_KEY = 'wail-display-name';
+const TELEMETRY_KEY = 'wail-telemetry';
+const REMEMBER_KEY = 'wail-remember';
+
+function getDisplayName() {
+  return localStorage.getItem(DISPLAY_NAME_KEY) || '';
+}
+
+function saveDisplayName(name) {
+  localStorage.setItem(DISPLAY_NAME_KEY, name);
+}
+
+function getTelemetryEnabled() {
+  const val = localStorage.getItem(TELEMETRY_KEY);
+  return val === null ? true : val === 'true';
+}
+
+function saveTelemetryEnabled(enabled) {
+  localStorage.setItem(TELEMETRY_KEY, enabled ? 'true' : 'false');
+}
+
+function getRememberEnabled() {
+  const val = localStorage.getItem(REMEMBER_KEY);
+  return val === null ? true : val === 'true';
+}
+
+function saveRememberEnabled(enabled) {
+  localStorage.setItem(REMEMBER_KEY, enabled ? 'true' : 'false');
+}
+
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['room', 'password', 'display-name', 'bars', 'quantum', 'ipc-port', 'test-tone', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention', 'telemetry'];
+const rememberFields = ['room', 'password', 'bars', 'quantum', 'ipc-port', 'test-tone', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
 
 function loadSettings() {
   try {
@@ -41,7 +82,6 @@ function loadSettings() {
         }
       }
     }
-    document.getElementById('remember').checked = true;
   } catch (_) {}
 }
 
@@ -71,9 +111,32 @@ if (document.getElementById('recording-enabled').checked) {
   document.getElementById('recording-options').style.display = '';
 }
 
-document.getElementById('remember').addEventListener('change', () => {
-  if (!document.getElementById('remember').checked) {
-    localStorage.removeItem(STORAGE_KEY);
+// --- First Launch Detection ---
+function showFirstLaunch() {
+  firstLaunchScreen.style.display = 'flex';
+  joinScreen.style.display = 'none';
+  firstLaunchNameInput.focus();
+}
+
+function showJoinScreen() {
+  firstLaunchScreen.style.display = 'none';
+  joinScreen.style.display = '';
+}
+
+// On page load, check if display name is set
+if (!getDisplayName()) {
+  showFirstLaunch();
+} else {
+  showJoinScreen();
+}
+
+// First launch form submit
+firstLaunchForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const name = firstLaunchNameInput.value.trim();
+  if (name) {
+    saveDisplayName(name);
+    showJoinScreen();
   }
 });
 
@@ -150,7 +213,7 @@ async function joinPublicRoom(room) {
   const params = {
     room: room,
     password: null,
-    displayName: document.getElementById('display-name').value,
+    displayName: getDisplayName(),
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
@@ -161,10 +224,6 @@ async function joinPublicRoom(room) {
     recordingStems: document.getElementById('recording-stems').checked,
     recordingRetentionDays: parseInt(document.getElementById('recording-retention').value) || 30,
   };
-  if (!params.displayName.trim()) {
-    showError(joinError, 'Display name is required');
-    return;
-  }
   try {
     const result = await invoke('join_room', params);
     saveSettings();
@@ -192,12 +251,8 @@ document.getElementById('browse-recording-dir').addEventListener('click', async 
   }
 });
 
-// --- Telemetry toggle ---
-document.getElementById('telemetry').addEventListener('change', (e) => {
-  invoke('set_telemetry', { enabled: e.target.checked }).catch(() => {});
-});
-// Sync telemetry state on load (respects remembered setting)
-invoke('set_telemetry', { enabled: document.getElementById('telemetry').checked }).catch(() => {});
+// Sync telemetry state on load (from settings)
+invoke('set_telemetry', { enabled: getTelemetryEnabled() }).catch(() => {});
 
 // Populate default recording dir on load
 invoke('get_default_recording_dir').then(dir => {
@@ -205,7 +260,48 @@ invoke('get_default_recording_dir').then(dir => {
   if (!el.value) el.value = dir;
 }).catch(() => {});
 
+// --- Settings Panel ---
+settingsBtn.addEventListener('click', () => {
+  // Populate settings panel with current values
+  settingsDisplayNameInput.value = getDisplayName();
+  settingsTelemetryCheckbox.checked = getTelemetryEnabled();
+  settingsRememberCheckbox.checked = getRememberEnabled();
+  settingsPanel.style.display = 'flex';
+});
+
+settingsCloseBtn.addEventListener('click', () => {
+  settingsPanel.style.display = 'none';
+});
+
+settingsPanel.addEventListener('click', (e) => {
+  if (e.target === settingsPanel) {
+    settingsPanel.style.display = 'none';
+  }
+});
+
+settingsForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const name = settingsDisplayNameInput.value.trim();
+  if (name) {
+    saveDisplayName(name);
+  }
+  // Save telemetry setting
+  const telemetryEnabled = settingsTelemetryCheckbox.checked;
+  saveTelemetryEnabled(telemetryEnabled);
+  invoke('set_telemetry', { enabled: telemetryEnabled }).catch(() => {});
+  // Save remember setting
+  const rememberEnabled = settingsRememberCheckbox.checked;
+  saveRememberEnabled(rememberEnabled);
+  if (rememberEnabled) {
+    saveSettings();
+  } else {
+    localStorage.removeItem(STORAGE_KEY);
+  }
+  settingsPanel.style.display = 'none';
+});
+
 function showJoin() {
+  firstLaunchScreen.style.display = 'none';
   joinScreen.style.display = '';
   sessionScreen.style.display = 'none';
   joinError.style.display = 'none';
@@ -259,7 +355,7 @@ joinForm.addEventListener('submit', async (e) => {
   const params = {
     room: document.getElementById('room').value,
     password: document.getElementById('password').value || null,
-    displayName: document.getElementById('display-name').value,
+    displayName: getDisplayName(),
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
