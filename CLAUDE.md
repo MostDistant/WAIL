@@ -201,7 +201,7 @@ Releases are fully automated — no manual `knope` commands needed:
 - **Add STUN/TURN servers**: ICE server config in `crates/wail-net/src/lib.rs` (includes dynamic Metered TURN credentials)
 - **Change Opus bitrate**: `AudioBridge::new()` bitrate_kbps param in `crates/wail-audio/src/bridge.rs`
 - **Modify wire format**: `crates/wail-audio/src/wire.rs` (bump version byte)
-- **Adjust ring buffer crossfade**: `IntervalPlayer::new()` crossfade_ms param
+
 
 ## Trade-off Preferences
 
