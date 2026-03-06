@@ -43,6 +43,9 @@ jobs:
             cmake \
             g++
 
+      - name: Clean stale wail-tauri build artifacts
+        run: rm -rf target/debug/build/wail-tauri-*/
+
       - name: Run tests
         run: cargo test --workspace --exclude wail-plugin-test
 
