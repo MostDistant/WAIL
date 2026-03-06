@@ -7,14 +7,28 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- First Launch Screen -->
+  <div id="first-launch-screen">
+    <h1>WAIL</h1>
+    <p class="subtitle">Wide Area Intervalic Link</p>
+    <p class="first-launch-prompt">What's your name?</p>
+    <form id="first-launch-form">
+      <input type="text" id="first-launch-name" placeholder="Your name" required autocomplete="off">
+      <button type="submit">Get Started</button>
+    </form>
+  </div>
+
   <!-- Join Screen -->
-  <div id="join-screen">
+  <div id="join-screen" style="display:none">
     <div class="header-row">
       <div>
         <h1>WAIL</h1>
-        <p class="subtitle">WebRTC Audio Interchange for Link</p>
+        <p class="subtitle">Wide Area Intervalic Link</p>
       </div>
-      <span class="version" id="version-label"></span>
+      <div class="header-controls">
+        <button type="button" id="settings-btn" class="icon-btn" title="Settings">⚙</button>
+        <span class="version" id="version-label"></span>
+      </div>
     </div>
 
     <div class="tab-bar">
@@ -29,9 +43,6 @@
 
         <label for="password">Password</label>
         <input type="password" id="password" placeholder="Room password (empty = public)">
-
-        <label for="display-name">Display Name</label>
-        <input type="text" id="display-name" placeholder="Your name" required>
 
         <details id="advanced-toggle">
           <summary>Advanced</summary>
@@ -74,16 +85,6 @@
           </div>
         </details>
 
-        <div class="remember-row">
-          <input type="checkbox" id="telemetry" checked>
-          <label for="telemetry" class="remember-label">Save debug log locally</label>
-        </div>
-
-        <div class="remember-row">
-          <input type="checkbox" id="remember" checked>
-          <label for="remember" class="remember-label">Remember settings</label>
-        </div>
-
         <button type="submit" id="join-btn">Join Room</button>
       </form>
 
@@ -95,6 +96,33 @@
         <span class="empty">Loading...</span>
       </div>
       <button type="button" id="refresh-rooms-btn">Refresh</button>
+    </div>
+
+    <!-- Settings Panel Overlay -->
+    <div id="settings-panel" class="settings-overlay" style="display:none">
+      <div class="settings-card">
+        <div class="settings-header">
+          <h2>Settings</h2>
+          <button type="button" id="settings-close-btn" class="icon-btn" title="Close">×</button>
+        </div>
+
+        <form id="settings-form">
+          <label for="settings-display-name">Display Name</label>
+          <input type="text" id="settings-display-name" placeholder="Your name" required autocomplete="off">
+
+          <div class="remember-row">
+            <input type="checkbox" id="settings-telemetry" checked>
+            <label for="settings-telemetry" class="remember-label">Save debug log locally</label>
+          </div>
+
+          <div class="remember-row">
+            <input type="checkbox" id="settings-remember" checked>
+            <label for="settings-remember" class="remember-label">Remember settings</label>
+          </div>
+
+          <button type="submit" id="settings-done-btn">Done</button>
+        </form>
+      </div>
     </div>
   </div>
 

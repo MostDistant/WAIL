@@ -51,10 +51,77 @@ h2 {
   align-items: flex-start;
 }
 
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.icon-btn {
+  width: auto;
+  padding: 4px 8px;
+  margin-top: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+
+.icon-btn:hover {
+  border-color: var(--accent-bright);
+  color: var(--accent-bright);
+  background: rgba(78, 154, 241, 0.1);
+}
+
 .version {
   color: var(--fg-dim);
   font-size: 10px;
   padding-top: 4px;
+}
+
+/* First Launch Screen */
+#first-launch-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+#first-launch-screen h1 {
+  margin-bottom: 4px;
+}
+
+#first-launch-screen .subtitle {
+  margin-bottom: 32px;
+}
+
+.first-launch-prompt {
+  font-size: 16px;
+  color: var(--fg);
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+#first-launch-form {
+  width: 100%;
+  max-width: 320px;
+}
+
+#first-launch-form input {
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+#first-launch-form button {
+  width: 100%;
+  margin-top: 12px;
 }
 
 /* Tab bar */
@@ -496,4 +563,67 @@ summary {
 @keyframes rec-blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
+}
+
+/* Settings Panel Overlay */
+.settings-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px;
+  z-index: 1000;
+  overflow-y: auto;
+}
+
+.settings-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 100%;
+  max-width: 400px;
+  margin-top: 60px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-header h2 {
+  margin: 0;
+}
+
+#settings-form {
+  padding: 16px 20px;
+}
+
+#settings-form label {
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
+
+#settings-form input[type="text"] {
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 0;
+  margin-top: 0;
+}
+
+#settings-form .remember-row {
+  margin-top: 12px;
+}
+
+#settings-done-btn {
+  width: 100%;
+  margin-top: 16px;
 }
