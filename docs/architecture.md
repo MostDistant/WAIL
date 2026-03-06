@@ -277,3 +277,5 @@ These clocks are **not interchangeable**. ClockSync offsets cannot adjust Link t
 10. **Peer affinity slots**: When a peer disconnects, their slot indices are reserved so reconnecting peers get the same aux outputs. This prevents DAW routing from breaking during brief network interruptions.
 
 11. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.rs` in wail-tauri.
+
+12. **Fade-in on peer join**: When a new or reconnecting peer's first audio interval arrives, a 10ms linear ramp-from-silence is applied before mixing into the playback buffer. This prevents audible pops/clicks caused by abrupt sample onset. The fade length is clamped to the interval length for safety. After the first interval, subsequent intervals play at full amplitude with no ramping.

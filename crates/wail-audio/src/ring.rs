@@ -8,6 +8,9 @@ pub struct PeerSlot {
     pub samples: Vec<f32>,
     pub active: bool,
     read_pos: usize,
+    /// When true, the next interval from this peer will be faded in
+    /// from silence to prevent pops/clicks on join or reconnect.
+    needs_fade_in: bool,
 }
 
 impl PeerSlot {
@@ -18,6 +21,7 @@ impl PeerSlot {
             samples: Vec::new(),
             active: false,
             read_pos: 0,
+            needs_fade_in: true,
         }
     }
 
@@ -25,6 +29,7 @@ impl PeerSlot {
         self.samples.clear();
         self.active = false;
         self.read_pos = 0;
+        self.needs_fade_in = true;
     }
 }
 
@@ -77,6 +82,8 @@ pub struct IntervalRing {
     sample_rate: u32,
     #[allow(dead_code)]
     channels: u16,
+    /// Number of interleaved samples to fade in for a new peer's first interval (10ms).
+    fade_in_samples: usize,
     /// Interval parameters
     bars: u32,
     quantum: f64,
@@ -122,6 +129,8 @@ impl IntervalRing {
         let max_seconds = beats_per_interval / min_bps;
         let slot_capacity = (sample_rate as f64 * max_seconds * channels as f64) as usize;
 
+        let fade_in_samples = (sample_rate as usize * 10 / 1000) * channels as usize;
+
         let mut peer_slots = Vec::with_capacity(MAX_REMOTE_PEERS);
         for _ in 0..MAX_REMOTE_PEERS {
             peer_slots.push(PeerSlot::new());
@@ -139,6 +148,7 @@ impl IntervalRing {
             pending_remote: Vec::with_capacity(MAX_REMOTE_PEERS),
             sample_rate,
             channels,
+            fade_in_samples,
             bars,
             quantum,
             peer_slots,
@@ -353,6 +363,7 @@ impl IntervalRing {
                 self.peer_slots[slot_idx].peer_id = peer_id.to_string();
                 self.peer_slots[slot_idx].stream_id = stream_id;
                 self.peer_slots[slot_idx].active = true;
+                self.peer_slots[slot_idx].needs_fade_in = true;
                 tracing::info!(
                     peer_id, identity, stream_id, slot = slot_idx,
                     "Peer reclaimed affinity slot"
@@ -430,6 +441,7 @@ impl IntervalRing {
                     self.peer_slots[slot_idx].peer_id = peer_id.to_string();
                     self.peer_slots[slot_idx].stream_id = stream_id;
                     self.peer_slots[slot_idx].active = true;
+                    self.peer_slots[slot_idx].needs_fade_in = true;
                     self.peer_slot_map.push((key, slot_idx));
                     return Some(slot_idx);
                 }
@@ -442,6 +454,7 @@ impl IntervalRing {
                 slot.peer_id = peer_id.to_string();
                 slot.stream_id = stream_id;
                 slot.active = true;
+                slot.needs_fade_in = true;
                 self.peer_slot_map.push((key, i));
                 return Some(i);
             }
@@ -478,7 +491,21 @@ impl IntervalRing {
         self.playback_len = 0;
 
         let pending = std::mem::take(&mut self.pending_remote);
-        for remote in pending {
+        for mut remote in pending {
+            // Assign slot FIRST so we can check needs_fade_in before summing
+            let slot_assignment = self.assign_peer_slot(&remote.peer_id, remote.stream_id);
+
+            // Apply fade-in for the peer's first interval (prevents pop/click on join)
+            if let Some(slot_idx) = slot_assignment {
+                if self.peer_slots[slot_idx].needs_fade_in {
+                    let fade_len = self.fade_in_samples.min(remote.samples.len());
+                    for i in 0..fade_len {
+                        remote.samples[i] *= i as f32 / fade_len as f32;
+                    }
+                    self.peer_slots[slot_idx].needs_fade_in = false;
+                }
+            }
+
             let mix_len = self.playback_len.max(remote.samples.len());
             // Grow playback within pre-allocated capacity
             let mix_len = mix_len.min(self.playback_slot.len());
@@ -489,14 +516,14 @@ impl IntervalRing {
             }
             self.playback_len = mix_len;
 
-            // Sum remote audio into playback
+            // Sum remote audio into playback (with fade already applied if needed)
             let copy_len = remote.samples.len().min(self.playback_slot.len());
             for (i, sample) in remote.samples[..copy_len].iter().enumerate() {
                 self.playback_slot[i] += sample;
             }
 
             // Move samples to per-peer-stream slot
-            match self.assign_peer_slot(&remote.peer_id, remote.stream_id) {
+            match slot_assignment {
                 Some(slot_idx) => {
                     self.peer_slots[slot_idx].samples = remote.samples;
                     self.peer_slots[slot_idx].read_pos = 0;
@@ -543,6 +570,9 @@ mod tests {
     const BARS: u32 = 4;
     const QUANTUM: f64 = 4.0;
     // 4 bars * 4 beats = 16 beats per interval
+
+    /// Fade-in length in interleaved samples: 10ms at 48kHz stereo = 960
+    const FADE_LEN: usize = (SR as usize * 10 / 1000) * CH as usize;
 
     fn make_ring() -> IntervalRing {
         IntervalRing::new(SR, CH, BARS, QUANTUM)
@@ -629,65 +659,74 @@ mod tests {
     #[test]
     fn plays_remote_audio_after_boundary() {
         let mut ring = make_ring();
-        let input = vec![0.0f32; 128];
-        let mut output = vec![0.0f32; 128];
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
 
         // Start in interval 0
         ring.process(&input, &mut output, 0.0);
 
         // Feed remote audio for next playback
-        let remote_audio = vec![0.7f32; 128];
-        ring.feed_remote("peer-a", 0, 0, remote_audio);
+        ring.feed_remote("peer-a", 0, 0, vec![0.7f32; buf]);
 
         // Cross into interval 1 — remote audio should become playback
         ring.process(&input, &mut output, 16.0);
 
-        // Output should now contain the remote audio
-        assert!(output.iter().all(|&s| (s - 0.7).abs() < f32::EPSILON),
-            "Output should be remote audio, got: {:?}", &output[..8]);
+        // First sample is faded from silence
+        assert!(output[0].abs() < f32::EPSILON);
+        // Post-fade region should contain the remote audio at full amplitude
+        assert!(output[FADE_LEN..].iter().all(|&s| (s - 0.7).abs() < f32::EPSILON),
+            "Output should be remote audio after fade-in, got: {:?}", &output[FADE_LEN..FADE_LEN+4]);
     }
 
     #[test]
     fn mixes_multiple_remote_peers() {
         let mut ring = make_ring();
-        let input = vec![0.0f32; 128];
-        let mut output = vec![0.0f32; 128];
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
 
         // Start in interval 0
         ring.process(&input, &mut output, 0.0);
 
         // Feed from two peers
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
-        ring.feed_remote("peer-b", 0, 0, vec![0.5f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; buf]);
+        ring.feed_remote("peer-b", 0, 0, vec![0.5f32; buf]);
 
         // Cross boundary — both should be mixed (summed)
         ring.process(&input, &mut output, 16.0);
 
-        assert!(output.iter().all(|&s| (s - 0.8).abs() < 0.001),
-            "Expected 0.3 + 0.5 = 0.8, got: {:?}", &output[..8]);
+        // Post-fade region: both peers at full amplitude
+        assert!(output[FADE_LEN..].iter().all(|&s| (s - 0.8).abs() < 0.001),
+            "Expected 0.3 + 0.5 = 0.8 after fade, got: {:?}", &output[FADE_LEN..FADE_LEN+4]);
     }
 
     #[test]
     fn remote_audio_longer_than_buffer_spans_calls() {
         let mut ring = make_ring();
-        let input = vec![0.0f32; 64];
-        let mut output = vec![0.0f32; 64];
+        let buf = FADE_LEN / 2;
+        let remote_len = FADE_LEN + buf * 2;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
 
         // Start interval 0
         ring.process(&input, &mut output, 0.0);
 
-        // Feed 256 samples of remote audio
-        ring.feed_remote("peer-a", 0, 0, vec![0.4f32; 256]);
+        // Feed remote audio spanning multiple buffers
+        ring.feed_remote("peer-a", 0, 0, vec![0.4f32; remote_len]);
 
-        // Cross into interval 1
+        // Cross into interval 1 — first buffer is in the fade region
         ring.process(&input, &mut output, 16.0);
-        assert!(output.iter().all(|&s| (s - 0.4).abs() < f32::EPSILON));
-        assert_eq!(ring.playback_remaining(), 192); // 256 - 64
+        assert_eq!(ring.playback_remaining(), remote_len - buf);
 
-        // Second call still reads from the same playback slot
+        // Keep reading until we're past the fade region
         ring.process(&input, &mut output, 16.5);
-        assert!(output.iter().all(|&s| (s - 0.4).abs() < f32::EPSILON));
-        assert_eq!(ring.playback_remaining(), 128); // 256 - 128
+        assert_eq!(ring.playback_remaining(), remote_len - buf * 2);
+
+        // Third call: now past fade — should be full amplitude
+        ring.process(&input, &mut output, 17.0);
+        assert!(output.iter().all(|&s| (s - 0.4).abs() < f32::EPSILON),
+            "Post-fade samples should be 0.4, got: {:?}", &output[..4]);
     }
 
     #[test]
@@ -702,9 +741,13 @@ mod tests {
         // Cross boundary
         ring.process(&input, &mut output, 16.0);
 
-        // First 32 samples = remote audio, rest = silence
-        assert!((output[0] - 0.5).abs() < f32::EPSILON);
-        assert!((output[31] - 0.5).abs() < f32::EPSILON);
+        // First sample faded from silence
+        assert!(output[0].abs() < f32::EPSILON, "First sample should be ~0 (faded)");
+        // Sample 31 should be faded (32 samples < fade_len, so entire buffer is ramped)
+        let expected_last = 0.5 * 31.0 / 32.0;
+        assert!((output[31] - expected_last).abs() < 0.01,
+            "Last audio sample should be ~{expected_last}, got: {}", output[31]);
+        // Rest = silence
         assert_eq!(output[32], 0.0);
         assert_eq!(output[63], 0.0);
     }
@@ -714,26 +757,28 @@ mod tests {
     #[test]
     fn multiple_interval_cycle() {
         let mut ring = make_ring();
-        let ones = vec![1.0f32; 100];
-        let twos = vec![2.0f32; 100];
-        let mut output = vec![0.0f32; 100];
+        let buf = FADE_LEN + 64;
+        let ones = vec![1.0f32; buf];
+        let twos = vec![2.0f32; buf];
+        let mut output = vec![0.0f32; buf];
 
         // Interval 0: record ones
         ring.process(&ones, &mut output, 0.0);
         ring.process(&ones, &mut output, 8.0);
 
         // Feed remote for playback in interval 1
-        ring.feed_remote("peer-a", 0, 0, vec![0.9f32; 100]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.9f32; buf]);
 
-        // Interval 1: record twos, play remote
+        // Interval 1: record twos, play remote (first interval = faded)
         ring.process(&twos, &mut output, 16.0);
         let completed = ring.take_completed();
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].index, 0);
-        assert!((output[0] - 0.9).abs() < f32::EPSILON);
+        // First interval from peer-a is faded — check post-fade
+        assert!((output[FADE_LEN] - 0.9).abs() < f32::EPSILON);
 
         // Feed new remote for interval 2
-        ring.feed_remote("peer-a", 0, 1, vec![0.6f32; 100]);
+        ring.feed_remote("peer-a", 0, 1, vec![0.6f32; buf]);
 
         // Interval 2: record ones, play new remote
         ring.process(&ones, &mut output, 32.0);
@@ -742,7 +787,7 @@ mod tests {
         assert_eq!(completed[0].index, 1);
         // Completed interval 1 should contain twos
         assert!((completed[0].samples[0] - 2.0).abs() < f32::EPSILON);
-        // Playback should be the new remote
+        // Second interval from same peer should NOT be faded
         assert!((output[0] - 0.6).abs() < f32::EPSILON);
     }
 
@@ -855,21 +900,22 @@ mod tests {
     #[test]
     fn per_peer_playback_slots() {
         let mut ring = make_ring();
-        let input = vec![0.0f32; 128];
-        let mut output = vec![0.0f32; 128];
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
 
         ring.process(&input, &mut output, 0.0);
 
         // Feed from two distinct peers
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
-        ring.feed_remote("peer-b", 0, 0, vec![0.7f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; buf]);
+        ring.feed_remote("peer-b", 0, 0, vec![0.7f32; buf]);
 
         // Cross boundary to activate playback
         ring.process(&input, &mut output, 16.0);
 
         // Read per-peer slots independently
-        let mut slot_a_out = vec![0.0f32; 128];
-        let mut slot_b_out = vec![0.0f32; 128];
+        let mut slot_a_out = vec![0.0f32; buf];
+        let mut slot_b_out = vec![0.0f32; buf];
 
         let active = ring.active_peer_slots();
         assert_eq!(active.len(), 2);
@@ -881,50 +927,51 @@ mod tests {
         ring.read_peer_playback(*a_idx, &mut slot_a_out);
         ring.read_peer_playback(*b_idx, &mut slot_b_out);
 
-        // Peer A's slot should have 0.3
+        // Post-fade: Peer A's slot should have 0.3
         assert!(
-            slot_a_out.iter().all(|&s| (s - 0.3).abs() < f32::EPSILON),
-            "Peer A slot should be 0.3, got: {:?}", &slot_a_out[..4]
+            slot_a_out[FADE_LEN..].iter().all(|&s| (s - 0.3).abs() < f32::EPSILON),
+            "Peer A slot should be 0.3 after fade, got: {:?}", &slot_a_out[FADE_LEN..FADE_LEN+4]
         );
-        // Peer B's slot should have 0.7
+        // Post-fade: Peer B's slot should have 0.7
         assert!(
-            slot_b_out.iter().all(|&s| (s - 0.7).abs() < f32::EPSILON),
-            "Peer B slot should be 0.7, got: {:?}", &slot_b_out[..4]
+            slot_b_out[FADE_LEN..].iter().all(|&s| (s - 0.7).abs() < f32::EPSILON),
+            "Peer B slot should be 0.7 after fade, got: {:?}", &slot_b_out[FADE_LEN..FADE_LEN+4]
         );
     }
 
     #[test]
     fn per_peer_and_summed_mix_consistent() {
         let mut ring = make_ring();
-        let input = vec![0.0f32; 64];
-        let mut output = vec![0.0f32; 64];
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
 
         ring.process(&input, &mut output, 0.0);
 
-        ring.feed_remote("peer-x", 0, 0, vec![0.2f32; 64]);
-        ring.feed_remote("peer-y", 0, 0, vec![0.5f32; 64]);
+        ring.feed_remote("peer-x", 0, 0, vec![0.2f32; buf]);
+        ring.feed_remote("peer-y", 0, 0, vec![0.5f32; buf]);
 
         // Cross boundary
         ring.process(&input, &mut output, 16.0);
 
-        // Summed mix should be 0.2 + 0.5 = 0.7
+        // Post-fade: summed mix should be 0.2 + 0.5 = 0.7
         assert!(
-            output.iter().all(|&s| (s - 0.7).abs() < 0.001),
-            "Summed mix should be 0.7, got: {:?}", &output[..4]
+            output[FADE_LEN..].iter().all(|&s| (s - 0.7).abs() < 0.001),
+            "Summed mix should be 0.7 after fade, got: {:?}", &output[FADE_LEN..FADE_LEN+4]
         );
 
         // Per-peer should sum to the same thing
         let active = ring.active_peer_slots();
-        let mut sum = vec![0.0f32; 64];
+        let mut sum = vec![0.0f32; buf];
         for (idx, _, _) in &active {
-            let mut buf = vec![0.0f32; 64];
-            ring.read_peer_playback(*idx, &mut buf);
-            for (i, s) in buf.iter().enumerate() {
+            let mut peer_buf = vec![0.0f32; buf];
+            ring.read_peer_playback(*idx, &mut peer_buf);
+            for (i, s) in peer_buf.iter().enumerate() {
                 sum[i] += s;
             }
         }
 
-        for (i, &s) in sum.iter().enumerate() {
+        for (i, &s) in sum.iter().enumerate().skip(FADE_LEN) {
             assert!(
                 (s - 0.7).abs() < 0.001,
                 "Sum of per-peer slots at {i} = {s}, expected 0.7"
@@ -1157,14 +1204,15 @@ mod tests {
     #[test]
     fn multi_stream_same_peer_separate_slots() {
         let mut ring = make_ring();
-        let input = vec![0.0f32; 128];
-        let mut output = vec![0.0f32; 128];
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
 
         ring.process(&input, &mut output, 0.0);
 
         // Same peer, two different streams
-        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; 128]);
-        ring.feed_remote("peer-a", 1, 0, vec![0.7f32; 128]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.3f32; buf]);
+        ring.feed_remote("peer-a", 1, 0, vec![0.7f32; buf]);
 
         ring.process(&input, &mut output, 16.0);
 
@@ -1176,37 +1224,39 @@ mod tests {
         let (s1_idx, _, _) = active.iter().find(|(_, pid, sid)| pid == "peer-a" && *sid == 1).unwrap();
         assert_ne!(s0_idx, s1_idx);
 
-        let mut s0_out = vec![0.0f32; 128];
-        let mut s1_out = vec![0.0f32; 128];
+        let mut s0_out = vec![0.0f32; buf];
+        let mut s1_out = vec![0.0f32; buf];
         ring.read_peer_playback(*s0_idx, &mut s0_out);
         ring.read_peer_playback(*s1_idx, &mut s1_out);
 
-        assert!(s0_out.iter().all(|&s| (s - 0.3).abs() < f32::EPSILON));
-        assert!(s1_out.iter().all(|&s| (s - 0.7).abs() < f32::EPSILON));
+        // Post-fade: each stream at full amplitude
+        assert!(s0_out[FADE_LEN..].iter().all(|&s| (s - 0.3).abs() < f32::EPSILON));
+        assert!(s1_out[FADE_LEN..].iter().all(|&s| (s - 0.7).abs() < f32::EPSILON));
 
-        // Summed playback should be 0.3 + 0.7 = 1.0
-        assert!(output.iter().all(|&s| (s - 1.0).abs() < 0.001),
-            "Summed mix should be 1.0, got: {:?}", &output[..4]);
+        // Summed playback should be 0.3 + 0.7 = 1.0 (post-fade)
+        assert!(output[FADE_LEN..].iter().all(|&s| (s - 1.0).abs() < 0.001),
+            "Summed mix should be 1.0 after fade, got: {:?}", &output[FADE_LEN..FADE_LEN+4]);
     }
 
     #[test]
     fn slot_exhaustion_merges_to_stream_0() {
         let mut ring = make_ring();
-        let input = vec![0.0f32; 64];
-        let mut output = vec![0.0f32; 64];
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
 
         ring.process(&input, &mut output, 0.0);
 
         // Fill all 31 slots with distinct peer-streams
         // Peer-a stream 0 is at slot 0 (this is the merge target)
-        ring.feed_remote("peer-a", 0, 0, vec![0.1f32; 64]);
+        ring.feed_remote("peer-a", 0, 0, vec![0.1f32; buf]);
         for i in 1..MAX_REMOTE_PEERS {
             let peer = format!("peer-fill-{i}");
-            ring.feed_remote(&peer, 0, 0, vec![0.01f32; 64]);
+            ring.feed_remote(&peer, 0, 0, vec![0.01f32; buf]);
         }
 
         // 32nd stream should overflow — merge into peer-a's stream 0
-        ring.feed_remote("peer-a", 5, 0, vec![0.5f32; 64]);
+        ring.feed_remote("peer-a", 5, 0, vec![0.5f32; buf]);
 
         ring.process(&input, &mut output, 16.0);
 
@@ -1214,13 +1264,16 @@ mod tests {
         let active = ring.active_peer_slots();
         assert_eq!(active.len(), MAX_REMOTE_PEERS);
 
-        // peer-a stream 0 should contain merged audio (0.1 + 0.5 = 0.6)
+        // peer-a stream 0 should contain merged audio post-fade
+        // stream 0 (0.1) is faded, overflow stream 5 (0.5) is unfaded (no slot assigned)
+        // After fade region: faded(0.1) converges to 0.1, so total = 0.1 + 0.5 = 0.6
         let (s0_idx, _, _) = active.iter().find(|(_, pid, sid)| pid == "peer-a" && *sid == 0).unwrap();
-        let mut s0_out = vec![0.0f32; 64];
+        let mut s0_out = vec![0.0f32; buf];
         ring.read_peer_playback(*s0_idx, &mut s0_out);
         assert!(
-            s0_out.iter().all(|&s| (s - 0.6).abs() < 0.01),
-            "Overflowed stream should merge into stream 0, got: {:?}", &s0_out[..4]
+            s0_out[FADE_LEN..].iter().all(|&s| (s - 0.6).abs() < 0.01),
+            "Overflowed stream should merge into stream 0 (post-fade), got: {:?}",
+            &s0_out[FADE_LEN..FADE_LEN+4]
         );
     }
 
@@ -1278,5 +1331,166 @@ mod tests {
 
         assert_eq!(new_s0, slot_s0, "Stream 0 should reclaim original slot");
         assert_eq!(new_s1, slot_s1, "Stream 1 should reclaim original slot");
+    }
+
+    // --- Test: Fade-in on peer join/reconnect ---
+
+    #[test]
+    fn fade_in_applied_to_first_interval_from_new_peer() {
+        let mut ring = make_ring();
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Feed constant-amplitude audio from a new peer
+        ring.feed_remote("peer-a", 0, 0, vec![1.0f32; buf]);
+        ring.process(&input, &mut output, 16.0);
+
+        // First sample should be 0.0 (faded from silence)
+        assert!(output[0].abs() < f32::EPSILON,
+            "First sample should be ~0.0 (faded), got: {}", output[0]);
+
+        // Mid-fade should be ~0.5
+        let mid = FADE_LEN / 2;
+        let expected_mid = mid as f32 / FADE_LEN as f32;
+        assert!((output[mid] - expected_mid).abs() < 0.01,
+            "Mid-fade sample should be ~{expected_mid}, got: {}", output[mid]);
+
+        // Post-fade should be full amplitude
+        assert!((output[FADE_LEN] - 1.0).abs() < f32::EPSILON,
+            "Post-fade sample should be 1.0, got: {}", output[FADE_LEN]);
+
+        // Per-peer slot should also be faded
+        let active = ring.active_peer_slots();
+        let (slot_idx, _, _) = active.iter().find(|(_, pid, _)| pid == "peer-a").unwrap();
+        let mut peer_out = vec![0.0f32; buf];
+        ring.read_peer_playback(*slot_idx, &mut peer_out);
+
+        assert!(peer_out[0].abs() < f32::EPSILON,
+            "Per-peer first sample should be ~0.0, got: {}", peer_out[0]);
+        assert!((peer_out[FADE_LEN] - 1.0).abs() < f32::EPSILON,
+            "Per-peer post-fade sample should be 1.0, got: {}", peer_out[FADE_LEN]);
+    }
+
+    #[test]
+    fn no_fade_on_second_interval_from_same_peer() {
+        let mut ring = make_ring();
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // First interval from peer — will be faded
+        ring.feed_remote("peer-a", 0, 0, vec![1.0f32; buf]);
+        ring.process(&input, &mut output, 16.0);
+        assert!(output[0].abs() < f32::EPSILON, "First interval should be faded");
+
+        // Feed second interval from same peer
+        ring.feed_remote("peer-a", 0, 1, vec![0.8f32; buf]);
+        ring.process(&input, &mut output, 32.0);
+
+        // Second interval should NOT be faded — first sample at full amplitude
+        assert!((output[0] - 0.8).abs() < f32::EPSILON,
+            "Second interval should NOT be faded, got: {}", output[0]);
+    }
+
+    #[test]
+    fn fade_in_applied_on_reconnect_via_affinity() {
+        let mut ring = make_ring();
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        ring.notify_peer_joined("peer-a", "identity-alice");
+        ring.process(&input, &mut output, 0.0);
+
+        // First interval — faded
+        ring.feed_remote("peer-a", 0, 0, vec![1.0f32; buf]);
+        ring.process(&input, &mut output, 16.0);
+
+        // Second interval — not faded (steady state)
+        ring.feed_remote("peer-a", 0, 1, vec![1.0f32; buf]);
+        ring.process(&input, &mut output, 32.0);
+        assert!((output[0] - 1.0).abs() < f32::EPSILON, "Steady state should not be faded");
+
+        // Disconnect
+        ring.remove_peer("peer-a");
+
+        // Reconnect with new peer_id, same identity
+        ring.notify_peer_joined("peer-a-new", "identity-alice");
+
+        // First interval after reconnect — should be faded again
+        ring.feed_remote("peer-a-new", 0, 2, vec![1.0f32; buf]);
+        ring.process(&input, &mut output, 48.0);
+
+        assert!(output[0].abs() < f32::EPSILON,
+            "First sample after reconnect should be ~0.0 (faded), got: {}", output[0]);
+        assert!((output[FADE_LEN] - 1.0).abs() < f32::EPSILON,
+            "Post-fade should be 1.0, got: {}", output[FADE_LEN]);
+    }
+
+    #[test]
+    fn fade_in_summed_mix_consistency() {
+        let mut ring = make_ring();
+        let buf = FADE_LEN + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Two new peers, both should be faded
+        ring.feed_remote("peer-a", 0, 0, vec![0.5f32; buf]);
+        ring.feed_remote("peer-b", 0, 0, vec![0.5f32; buf]);
+
+        ring.process(&input, &mut output, 16.0);
+
+        // First sample: both peers faded from 0 → sum should be 0
+        assert!(output[0].abs() < f32::EPSILON,
+            "Summed first sample should be ~0.0, got: {}", output[0]);
+
+        // After fade: 0.5 + 0.5 = 1.0
+        assert!((output[FADE_LEN] - 1.0).abs() < f32::EPSILON,
+            "Post-fade summed should be 1.0, got: {}", output[FADE_LEN]);
+
+        // Per-peer slots should sum to the same as the main output
+        let active = ring.active_peer_slots();
+        let mut sum = vec![0.0f32; buf];
+        for (idx, _, _) in &active {
+            let mut peer_buf = vec![0.0f32; buf];
+            ring.read_peer_playback(*idx, &mut peer_buf);
+            for (i, s) in peer_buf.iter().enumerate() {
+                sum[i] += s;
+            }
+        }
+
+        for i in 0..buf {
+            assert!((sum[i] - output[i]).abs() < 0.001,
+                "Per-peer sum at {i} = {}, expected {}", sum[i], output[i]);
+        }
+    }
+
+    #[test]
+    fn fade_in_short_interval_clamped() {
+        let mut ring = make_ring();
+        let input = vec![0.0f32; 64];
+        let mut output = vec![0.0f32; 64];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Feed only 32 samples (much shorter than FADE_LEN=960)
+        ring.feed_remote("peer-a", 0, 0, vec![1.0f32; 32]);
+        ring.process(&input, &mut output, 16.0);
+
+        // Should not panic; first sample should be 0
+        assert!(output[0].abs() < f32::EPSILON);
+        // Last audio sample: fade_len clamped to 32, so sample 31 = 31/32
+        let expected_last = 31.0 / 32.0;
+        assert!((output[31] - expected_last).abs() < 0.01,
+            "Last sample should be ~{expected_last}, got: {}", output[31]);
+        // Silence after audio
+        assert_eq!(output[32], 0.0);
     }
 }

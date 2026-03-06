@@ -122,6 +122,13 @@ cargo test -p wail-core       # core library tests only
 cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
 ```
 
+The `wail-plugin-test` crate has an end-to-end test (`recv_plugin_e2e`) that requires the CLAP plugin bundle to be built first. Build it before running the full test suite:
+
+```sh
+cargo xtask build-plugin                  # build plugin bundles (required for e2e tests)
+cargo test                                # now run all tests
+```
+
 Some integration tests are marked `#[ignore]` because they require external resources. Run these during local development to verify end-to-end behaviour:
 
 ```sh
