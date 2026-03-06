@@ -302,9 +302,9 @@ Hello is sent:
 1. When we receive a `PeerJoined` event from signaling — broadcast to all connected peers.
 2. When we receive a `Hello` from a peer we haven't replied to yet — unicast reply.
 
-The `hello_sent: HashSet<String>` set tracks which peers have received our Hello, preventing infinite Hello loops. `hello_sent.insert(from)` returns `false` if already present, which guards the reply path.
+`PeerRegistry::mark_hello_sent(peer_id)` tracks which peers have received our Hello, preventing infinite Hello loops. It returns `false` if Hello was already sent, which guards the reply path.
 
-When a peer reconnects after `PeerFailed`, `hello_sent.remove(&pid)` is called before `re_initiate()`, so the Hello handshake runs again on the new connection.
+When a peer reconnects after `PeerFailed`, `PeerRegistry::clear_hello_sent(peer_id)` is called before `re_initiate()`, so the Hello handshake runs again on the new connection.
 
 ### Tempo sync
 
@@ -384,7 +384,7 @@ Binary header (48 bytes) followed by Opus data:
 
 ```
 Magic: "WAIL" (4 bytes)
-Version: 1 (1 byte)
+Version: 2 (1 byte)
 Flags: (1 byte)
 Stream ID: u16 LE (2 bytes)
 Interval index: i64 LE (8 bytes)
@@ -403,9 +403,9 @@ Opus data length: u32 LE (4 bytes) [not present in wire — inferred]
 When audio arrives from a peer with a new `(peer_id, stream_id)` pair, the session assigns it a **slot** (0–30, matching `MAX_REMOTE_PEERS`). The recv plugin uses this slot to route audio to the correct output bus.
 
 Slot assignment logic (mirrored in both the session and the recv plugin):
-1. Check `slot_affinity` for `(identity, stream_id)` — if the peer has connected before with the same persistent identity, reuse their old slot.
-2. If no affinity, find the first unoccupied slot in `slot_occupied[0..MAX_REMOTE_PEERS]`.
-3. Record `peer_slots.insert((peer_id, stream_id), slot)`.
+1. Check `SlotAllocator::affinity` for `(identity, stream_id)` — if the peer has connected before with the same persistent identity, reuse their old slot.
+2. If no affinity, find the first unoccupied slot in the `SlotAllocator::occupied` bitmap.
+3. Record the slot in `PeerState::slots` keyed by `stream_id`.
 
 When a peer leaves (`PeerLeft` or `PeerFailed` after max attempts):
 1. All slots for that peer are freed.
@@ -447,7 +447,7 @@ A separate `liveness_interval` fires every 15 seconds. It checks `peer_last_seen
 ```
                         PeerFailed received
                                │
-                    increment peer_reconnect_attempts[pid]
+                    increment PeerState::reconnect_attempts
                                │
               ┌────────────────▼───────────────────┐
               │  attempts > MAX_PEER_RECONNECT (5)?  │
@@ -465,7 +465,7 @@ A separate `liveness_interval` fires every 15 seconds. It checks `peer_last_seen
                               │  reconnect_rx fires (after sleep) │
                               └────────────────────────────────────┘
                                                │
-                                 peer_reconnect_attempts.contains_key(pid)?
+                                 peers.get(pid).reconnect_attempts > 0?
                                     no → skip (PeerLeft arrived in meantime)
                                    yes ↓
                                  mesh.re_initiate(pid)
@@ -506,12 +506,12 @@ emit session:reconnecting
 
 On success:
 - `mesh`, `sync_rx`, `audio_rx` are replaced with the new session's values.
-- All peer tracking state is cleared (`peer_names`, `peer_identities`, `hello_sent`, `peer_reconnect_attempts`, `peer_last_seen`, slot assignments).
+- All peer tracking state is cleared via `PeerRegistry::reset_for_reconnect(new_names)` — frees all slots, clears all peer state, seeds fresh peers with `last_seen = now`.
+- Slot affinity is **preserved** inside `SlotAllocator` — peers can recover their slot assignments after reconnection.
 - `beat_synced` is reset to `false`.
 - `audio_gate.on_reconnect()` re-gates audio until beat sync is re-established.
-- `slot_affinity` is **preserved** — peers can recover their slot assignments after reconnection.
 
-**Known issue:** During the signaling reconnection loop, the `select!` is blocked. No audio can be received, no Link events are processed, and no UI status updates are emitted. If the reconnection loop runs for a long time (e.g., the signaling server is down), the UI freezes on the last status update. Link continues to run its own poller task but the tempo changes are buffered and not forwarded.
+See §13.E for the fixed-non-blocking implementation.
 
 ---
 
