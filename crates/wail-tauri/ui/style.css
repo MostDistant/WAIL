@@ -45,6 +45,18 @@ h2 {
   margin-bottom: 24px;
 }
 
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.version {
+  color: var(--fg-dim);
+  font-size: 10px;
+  padding-top: 4px;
+}
+
 /* Tab bar */
 .tab-bar {
   display: flex;

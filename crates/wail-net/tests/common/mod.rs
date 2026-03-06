@@ -2,13 +2,15 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::IntoFuture;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use tokio::net::TcpListener;
@@ -17,16 +19,34 @@ use wail_audio::AudioBridge;
 use wail_net::PeerMesh;
 
 // ---------------------------------------------------------------------------
-// Minimal in-process HTTP signaling server (mirrors Val Town endpoint)
+// Configurable in-process HTTP signaling server (mirrors Val Town endpoint)
 // ---------------------------------------------------------------------------
+
+/// Server-side configuration injected at startup for §1.x signaling tests.
+#[derive(Default, Clone)]
+pub struct TestServerConfig {
+    /// Minimum acceptable `client_version` (semver string). `None` = no check.
+    pub min_version: Option<String>,
+    /// Required room password. `None` = all rooms are public (no password required).
+    pub password: Option<String>,
+    /// Maximum stream slots per room. `None` = unlimited.
+    pub room_capacity: Option<usize>,
+    /// When `true`, all requests immediately return HTTP 429.
+    pub rate_limit_mode: bool,
+}
 
 #[derive(Default)]
 struct SignalingState {
-    /// room -> set of peer_ids
+    /// room → peer_ids
     rooms: HashMap<String, Vec<String>>,
-    /// (room, to_peer) -> queued messages with seq ids
+    /// "room:peer_id" → stream_count, for capacity accounting
+    peer_slots: HashMap<String, usize>,
+    /// Queued signaling messages
     messages: Vec<StoredMessage>,
     next_seq: i64,
+    /// "room:peer_id" keys scheduled to receive `evicted: true` on next poll
+    evicted_peers: HashSet<String>,
+    config: TestServerConfig,
 }
 
 struct StoredMessage {
@@ -38,26 +58,161 @@ struct StoredMessage {
 
 type SharedState = Arc<Mutex<SignalingState>>;
 
+// ---------------------------------------------------------------------------
+// Public test handle (exposes admin operations)
+// ---------------------------------------------------------------------------
+
+/// A handle to the running test server that allows in-test control.
+#[derive(Clone)]
+pub struct TestServerHandle {
+    /// Base URL of the signaling server (e.g. `"http://127.0.0.1:PORT"`).
+    pub url: String,
+    state: SharedState,
+}
+
+impl TestServerHandle {
+    /// Schedule a peer to receive `evicted: true` on its next poll, causing
+    /// the signaling client to close its channel and trigger session reconnection.
+    pub async fn evict_peer(&self, room: &str, peer_id: &str) {
+        self.state
+            .lock()
+            .await
+            .evicted_peers
+            .insert(format!("{room}:{peer_id}"));
+    }
+
+    /// Return the IDs of all peers currently in a room.
+    pub async fn peers_in_room(&self, room: &str) -> Vec<String> {
+        self.state
+            .lock()
+            .await
+            .rooms
+            .get(room)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Total stream slots used in a room.
+    pub async fn slots_used(&self, room: &str) -> usize {
+        let s = self.state.lock().await;
+        s.rooms
+            .get(room)
+            .map(|peers| {
+                peers
+                    .iter()
+                    .map(|p| {
+                        s.peer_slots
+                            .get(&format!("{room}:{p}"))
+                            .copied()
+                            .unwrap_or(1)
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simple semver comparison for the min_version check
+// ---------------------------------------------------------------------------
+
+/// Returns `true` if `a` is strictly less than `b` under semver ordering.
+fn semver_less_than(a: &str, b: &str) -> bool {
+    fn parse(s: &str) -> (u64, u64, u64) {
+        let mut parts = s.split('.').filter_map(|p| p.parse::<u64>().ok());
+        (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        )
+    }
+    parse(a) < parse(b)
+}
+
+// ---------------------------------------------------------------------------
+// Request handlers
+// ---------------------------------------------------------------------------
+
 async fn handle_join(
     State(state): State<SharedState>,
     Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let room = body["room"].as_str().unwrap().to_string();
-    let peer_id = body["peer_id"].as_str().unwrap().to_string();
+) -> Response {
+    let room = body["room"].as_str().unwrap_or("").to_string();
+    let peer_id = body["peer_id"].as_str().unwrap_or("").to_string();
     let display_name = body["display_name"].as_str().map(|s| s.to_string());
+    let stream_count = body["stream_count"].as_u64().unwrap_or(1) as usize;
+    let client_version = body["client_version"].as_str().unwrap_or("0.0.0").to_string();
+    let password = body["password"].as_str().map(|s| s.to_string());
 
     let mut s = state.lock().await;
-    let peers_in_room = s.rooms.entry(room.clone()).or_default();
 
+    // §1.1 — version check
+    if let Some(min) = &s.config.min_version.clone() {
+        if semver_less_than(&client_version, min) {
+            return (
+                StatusCode::UPGRADE_REQUIRED,
+                Json(serde_json::json!({
+                    "error": "client_version_too_old",
+                    "min_version": min
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // §1.1 — password check
+    if let Some(required) = &s.config.password.clone() {
+        let sent = password.as_deref().unwrap_or("");
+        if sent != required {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "invalid_password" })),
+            )
+                .into_response();
+        }
+    }
+
+    // §1.1 — capacity check
+    if let Some(capacity) = s.config.room_capacity {
+        let used: usize = s
+            .rooms
+            .get(&room)
+            .map(|peers| {
+                peers
+                    .iter()
+                    .map(|p| {
+                        s.peer_slots
+                            .get(&format!("{room}:{p}"))
+                            .copied()
+                            .unwrap_or(1)
+                    })
+                    .sum()
+            })
+            .unwrap_or(0);
+        if used + stream_count > capacity {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "room_full",
+                    "slots_available": capacity.saturating_sub(used)
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Standard join
+    let peers_in_room = s.rooms.entry(room.clone()).or_default();
     let existing: Vec<String> = peers_in_room
         .iter()
         .filter(|p| *p != &peer_id)
         .cloned()
         .collect();
-
     if !peers_in_room.contains(&peer_id) {
         peers_in_room.push(peer_id.clone());
     }
+    s.peer_slots
+        .insert(format!("{room}:{peer_id}"), stream_count);
 
     for p in &existing {
         s.next_seq += 1;
@@ -74,15 +229,24 @@ async fn handle_join(
         });
     }
 
-    Json(serde_json::json!({ "peers": existing, "peer_display_names": {} }))
+    let peer_display_names: HashMap<String, Option<String>> = existing
+        .iter()
+        .map(|id| (id.clone(), None))
+        .collect();
+
+    Json(serde_json::json!({
+        "peers": existing,
+        "peer_display_names": peer_display_names
+    }))
+    .into_response()
 }
 
 async fn handle_signal(
     State(state): State<SharedState>,
     Json(body): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let to = body["to"].as_str().unwrap().to_string();
-    let from = body["from"].as_str().unwrap().to_string();
+) -> Response {
+    let to = body["to"].as_str().unwrap_or("").to_string();
+    let from = body["from"].as_str().unwrap_or("").to_string();
 
     let mut s = state.lock().await;
     let room = s
@@ -101,7 +265,47 @@ async fn handle_signal(
         body,
     });
 
-    Json(serde_json::json!({ "ok": true }))
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+async fn handle_leave(
+    State(state): State<SharedState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let room = body["room"].as_str().unwrap_or("").to_string();
+    let peer_id = body["peer_id"].as_str().unwrap_or("").to_string();
+
+    let mut s = state.lock().await;
+    if let Some(peers) = s.rooms.get_mut(&room) {
+        peers.retain(|p| p != &peer_id);
+        // §1.1 — delete room when empty so it can be recreated with different config
+        if peers.is_empty() {
+            s.rooms.remove(&room);
+        }
+    }
+    s.peer_slots.remove(&format!("{room}:{peer_id}"));
+
+    // Notify remaining peers
+    let remaining: Vec<String> = s
+        .rooms
+        .get(&room)
+        .cloned()
+        .unwrap_or_default();
+    for p in remaining {
+        s.next_seq += 1;
+        let seq = s.next_seq;
+        s.messages.push(StoredMessage {
+            seq,
+            room: room.clone(),
+            to_peer: p,
+            body: serde_json::json!({
+                "type": "PeerLeft",
+                "peer_id": peer_id,
+            }),
+        });
+    }
+
+    Json(serde_json::json!({ "ok": true })).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -114,9 +318,13 @@ struct PollQuery {
 async fn handle_poll(
     State(state): State<SharedState>,
     Query(q): Query<PollQuery>,
-) -> Json<serde_json::Value> {
+) -> Response {
     let after = q.after.unwrap_or(0);
-    let s = state.lock().await;
+    let mut s = state.lock().await;
+
+    // §1.2 — eviction support
+    let evict_key = format!("{}:{}", q.room, q.peer_id);
+    let evicted = s.evicted_peers.remove(&evict_key);
 
     let messages: Vec<serde_json::Value> = s
         .messages
@@ -125,51 +333,95 @@ async fn handle_poll(
         .map(|m| serde_json::json!({ "seq": m.seq, "body": m.body }))
         .collect();
 
-    Json(serde_json::json!({ "messages": messages }))
+    Json(serde_json::json!({
+        "messages": messages,
+        "evicted": evicted,
+    }))
+    .into_response()
 }
 
 async fn handle_post(
     Query(params): Query<HashMap<String, String>>,
-    state: State<SharedState>,
+    State(state): State<SharedState>,
     body: Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    // §1.2 — rate-limit mode
+    if state.lock().await.config.rate_limit_mode {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response();
+    }
+
     match params.get("action").map(|s| s.as_str()) {
-        Some("join") => handle_join(state, body).await,
-        Some("signal") => handle_signal(state, body).await,
-        Some("leave") => Json(serde_json::json!({ "ok": true })),
-        _ => Json(serde_json::json!({ "error": "unknown action" })),
+        Some("join") => handle_join(State(state), body).await,
+        Some("signal") => handle_signal(State(state), body).await,
+        Some("leave") => handle_leave(State(state), body).await,
+        _ => Json(serde_json::json!({ "error": "unknown action" })).into_response(),
     }
 }
 
 async fn handle_get(
     Query(params): Query<HashMap<String, String>>,
-    state: State<SharedState>,
-) -> Json<serde_json::Value> {
+    State(state): State<SharedState>,
+) -> Response {
+    // §1.2 — rate-limit mode
+    if state.lock().await.config.rate_limit_mode {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response();
+    }
+
     if params.get("action").map(|s| s.as_str()) == Some("poll") {
         let q = PollQuery {
             room: params.get("room").cloned().unwrap_or_default(),
             peer_id: params.get("peer_id").cloned().unwrap_or_default(),
             after: params.get("after").and_then(|s| s.parse().ok()),
         };
-        handle_poll(state, Query(q)).await
+        handle_poll(State(state), Query(q)).await
     } else {
-        Json(serde_json::json!({ "error": "unknown action" }))
+        Json(serde_json::json!({ "error": "unknown action" })).into_response()
     }
 }
 
-pub async fn start_test_signaling_server() -> String {
-    let state: SharedState = Arc::new(Mutex::new(SignalingState::default()));
+// ---------------------------------------------------------------------------
+// Server startup
+// ---------------------------------------------------------------------------
 
-    let app = Router::new()
+fn build_app(state: SharedState) -> Router {
+    Router::new()
         .route("/", post(handle_post))
         .route("/", get(handle_get))
-        .with_state(state);
+        .with_state(state)
+}
 
+/// Start a plain test signaling server. Returns the base URL.
+/// All existing tests use this function — signature is unchanged.
+pub async fn start_test_signaling_server() -> String {
+    start_configured_signaling_server(TestServerConfig::default())
+        .await
+        .url
+}
+
+/// Start a configurable test signaling server. Returns a handle with admin methods.
+pub async fn start_configured_signaling_server(config: TestServerConfig) -> TestServerHandle {
+    let state: SharedState = Arc::new(Mutex::new(SignalingState {
+        config,
+        ..Default::default()
+    }));
+
+    let app = build_app(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, app).into_future());
 
-    format!("http://{}", addr)
+    TestServerHandle {
+        url: format!("http://{}", addr),
+        state,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +473,11 @@ pub async fn establish_connection(mesh_a: &mut PeerMesh, mesh_b: &mut PeerMesh) 
     establish_connection_timeout(mesh_a, mesh_b, 15).await;
 }
 
-pub async fn establish_connection_timeout(mesh_a: &mut PeerMesh, mesh_b: &mut PeerMesh, timeout_secs: u64) {
+pub async fn establish_connection_timeout(
+    mesh_a: &mut PeerMesh,
+    mesh_b: &mut PeerMesh,
+    timeout_secs: u64,
+) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
     loop {
@@ -237,12 +493,7 @@ pub async fn establish_connection_timeout(mesh_a: &mut PeerMesh, mesh_b: &mut Pe
                 }
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                // Check actual DataChannel state, not just peer map membership.
-                // connected_peers() only checks HashMap entries which can be stale
-                // in reconnection scenarios; any_audio_dc_open() verifies the
-                // WebRTC connection is fully established with open DataChannels.
-                let both_open = mesh_a.any_audio_dc_open()
-                    && mesh_b.any_audio_dc_open();
+                let both_open = mesh_a.any_audio_dc_open() && mesh_b.any_audio_dc_open();
                 if both_open {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     return;
@@ -255,6 +506,54 @@ pub async fn establish_connection_timeout(mesh_a: &mut PeerMesh, mesh_b: &mut Pe
                     mesh_b.connected_peers(),
                     mesh_a.any_audio_dc_open(),
                     mesh_b.any_audio_dc_open(),
+                );
+            }
+        }
+    }
+}
+
+/// Pump signaling for three meshes until all six directed DataChannel paths are open.
+/// `ids` is `(id_a, id_b, id_c)` matching mesh_a, mesh_b, mesh_c respectively.
+pub async fn establish_three_way_connection(
+    mesh_a: &mut PeerMesh,
+    mesh_b: &mut PeerMesh,
+    mesh_c: &mut PeerMesh,
+    ids: (&str, &str, &str),
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+
+    loop {
+        tokio::select! {
+            result = mesh_a.poll_signaling() => {
+                if let Err(e) = result { eprintln!("[test] mesh_a poll error: {e}"); }
+            }
+            result = mesh_b.poll_signaling() => {
+                if let Err(e) = result { eprintln!("[test] mesh_b poll error: {e}"); }
+            }
+            result = mesh_c.poll_signaling() => {
+                if let Err(e) = result { eprintln!("[test] mesh_c poll error: {e}"); }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                // All six directed paths must have open audio DCs.
+                let all_open =
+                    mesh_a.is_peer_audio_dc_open(ids.1) && mesh_a.is_peer_audio_dc_open(ids.2)
+                    && mesh_b.is_peer_audio_dc_open(ids.0) && mesh_b.is_peer_audio_dc_open(ids.2)
+                    && mesh_c.is_peer_audio_dc_open(ids.0) && mesh_c.is_peer_audio_dc_open(ids.1);
+                if all_open {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    return;
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                panic!(
+                    "3-way WebRTC connection timed out. \
+                     A→B={} A→C={} B→A={} B→C={} C→A={} C→B={}",
+                    mesh_a.is_peer_audio_dc_open(ids.1),
+                    mesh_a.is_peer_audio_dc_open(ids.2),
+                    mesh_b.is_peer_audio_dc_open(ids.0),
+                    mesh_b.is_peer_audio_dc_open(ids.2),
+                    mesh_c.is_peer_audio_dc_open(ids.0),
+                    mesh_c.is_peer_audio_dc_open(ids.1),
                 );
             }
         }
@@ -302,4 +601,21 @@ pub fn produce_full_interval(freq_hz: f32) -> (Vec<u8>, usize) {
 pub fn random_port() -> u16 {
     let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
+}
+
+// ---------------------------------------------------------------------------
+// semver_less_than unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semver_comparison_basic() {
+        assert!(semver_less_than("1.0.0", "2.0.0"));
+        assert!(semver_less_than("1.2.3", "1.10.0")); // would fail lexicographic
+        assert!(!semver_less_than("2.0.0", "1.9.9"));
+        assert!(!semver_less_than("1.2.3", "1.2.3")); // equal is not less than
+    }
 }

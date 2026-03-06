@@ -804,3 +804,284 @@ async fn new_offer_replaces_stale_connection() {
     assert!(!data_a.is_empty());
     eprintln!("[test] Audio verified on replaced connection — test passed");
 }
+
+// ---------------------------------------------------------------
+// Test: Three peers all connect and exchange audio
+// ---------------------------------------------------------------
+
+/// §7 — Three peers form a full mesh; A broadcasts and both B and C receive.
+/// Then B broadcasts and both A and C receive.
+#[tokio::test(flavor = "multi_thread")]
+async fn three_peers_exchange_audio() {
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+
+    let server_url = start_test_signaling_server().await;
+    let ice = wail_net::default_ice_servers();
+
+    // Lexicographic order: peer-a < peer-b < peer-c
+    // peer-a initiates to peer-b and peer-c; peer-b initiates to peer-c.
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) = PeerMesh::connect_with_options(
+        &server_url, "three-room", "peer-a", None, ice.clone(), 200,
+    )
+    .await
+    .expect("peer-a connect failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) = PeerMesh::connect_with_options(
+        &server_url, "three-room", "peer-b", None, ice.clone(), 200,
+    )
+    .await
+    .expect("peer-b connect failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_c, _sync_rx_c, mut audio_rx_c) = PeerMesh::connect_with_options(
+        &server_url, "three-room", "peer-c", None, ice.clone(), 200,
+    )
+    .await
+    .expect("peer-c connect failed");
+
+    establish_three_way_connection(&mut mesh_a, &mut mesh_b, &mut mesh_c, ("peer-a", "peer-b", "peer-c")).await;
+    eprintln!("[test] 3-way connection established");
+
+    assert_eq!(mesh_a.connected_peers().len(), 2, "A should be connected to B and C");
+    assert_eq!(mesh_b.connected_peers().len(), 2, "B should be connected to A and C");
+    assert_eq!(mesh_c.connected_peers().len(), 2, "C should be connected to A and B");
+
+    // A broadcasts — B and C should receive it
+    let wire_a = produce_interval(440.0);
+    mesh_a.broadcast_audio(&wire_a).await;
+
+    let (from_at_b, data_b) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
+        .await.expect("B timed out waiting for A's audio").expect("audio_rx_b closed");
+    let (from_at_c, data_c) = tokio::time::timeout(Duration::from_secs(5), audio_rx_c.recv())
+        .await.expect("C timed out waiting for A's audio").expect("audio_rx_c closed");
+
+    assert_eq!(from_at_b, "peer-a");
+    assert_eq!(from_at_c, "peer-a");
+    assert!(!data_b.is_empty(), "B should receive non-empty audio from A");
+    assert!(!data_c.is_empty(), "C should receive non-empty audio from A");
+
+    // B broadcasts — A and C should receive it
+    let wire_b = produce_interval(880.0);
+    mesh_b.broadcast_audio(&wire_b).await;
+
+    let (from_at_a, data_a) = tokio::time::timeout(Duration::from_secs(5), audio_rx_a.recv())
+        .await.expect("A timed out waiting for B's audio").expect("audio_rx_a closed");
+    let (from_at_c2, data_c2) = tokio::time::timeout(Duration::from_secs(5), audio_rx_c.recv())
+        .await.expect("C timed out waiting for B's audio").expect("audio_rx_c closed");
+
+    assert_eq!(from_at_a, "peer-b");
+    assert_eq!(from_at_c2, "peer-b");
+    assert!(!data_a.is_empty());
+    assert!(!data_c2.is_empty());
+
+    eprintln!("[test] Three-peer exchange test passed");
+}
+
+// ---------------------------------------------------------------
+// Test: One peer leaves a 3-peer room; the remaining two continue
+// ---------------------------------------------------------------
+
+/// §7 — C leaves a 3-peer room; A and B still exchange audio cleanly.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_peer_leaves_three_peer_room_others_continue() {
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+
+    let server_url = start_test_signaling_server().await;
+    let ice = wail_net::default_ice_servers();
+
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) = PeerMesh::connect_with_options(
+        &server_url, "leave-room", "peer-a", None, ice.clone(), 200,
+    ).await.expect("peer-a failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) = PeerMesh::connect_with_options(
+        &server_url, "leave-room", "peer-b", None, ice.clone(), 200,
+    ).await.expect("peer-b failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_c, _sync_rx_c, _audio_rx_c) = PeerMesh::connect_with_options(
+        &server_url, "leave-room", "peer-c", None, ice.clone(), 200,
+    ).await.expect("peer-c failed");
+
+    establish_three_way_connection(&mut mesh_a, &mut mesh_b, &mut mesh_c, ("peer-a", "peer-b", "peer-c")).await;
+    eprintln!("[test] 3-way connected; C is about to leave");
+
+    // C leaves by dropping its mesh (triggers signaling leave)
+    drop(mesh_c);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // A and B should still have open DCs to each other
+    assert!(
+        mesh_a.is_peer_audio_dc_open("peer-b"),
+        "A's DC to B should still be open after C leaves"
+    );
+    assert!(
+        mesh_b.is_peer_audio_dc_open("peer-a"),
+        "B's DC to A should still be open after C leaves"
+    );
+
+    // Audio still flows between A and B
+    let wire_a = produce_interval(440.0);
+    mesh_a.broadcast_audio(&wire_a).await;
+
+    let (from, data) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
+        .await.expect("B timed out after C left").expect("audio_rx_b closed");
+    assert_eq!(from, "peer-a");
+    assert!(!data.is_empty(), "A→B audio should still flow after C left");
+
+    // A's audio_rx should NOT have received anything (no peer sent to A)
+    assert!(
+        audio_rx_a.try_recv().is_err(),
+        "A should not receive A's own broadcast"
+    );
+
+    eprintln!("[test] One-peer-leaves test passed");
+}
+
+// ---------------------------------------------------------------
+// Test: Duplicate PeerFailed signals are deduplicated
+// ---------------------------------------------------------------
+
+/// §6.1 — After peer-a closes its connection, mesh_b may receive multiple
+/// failure signals (on_close fires for each DC + reader task exits).
+/// The first `poll_signaling()` call returns `PeerFailed`; once the caller
+/// removes the peer, subsequent failure signals become `SignalingProcessed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_peer_failed_signals_deduplicated() {
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+
+    let server_url = start_test_signaling_server().await;
+    let ice = wail_net::default_ice_servers();
+
+    let (mut mesh_a, _sync_rx_a, _audio_rx_a) = PeerMesh::connect_with_options(
+        &server_url, "dedup-fail-room", "peer-a", None, ice.clone(), 200,
+    ).await.expect("peer-a failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_rx_b, _audio_rx_b) = PeerMesh::connect_with_options(
+        &server_url, "dedup-fail-room", "peer-b", None, ice, 200,
+    ).await.expect("peer-b failed");
+
+    establish_connection(&mut mesh_a, &mut mesh_b).await;
+
+    // Close peer-a's connection — this fires on_close on both DCs AND the reader
+    // task eventually exits, sending multiple signals to failure_rx in mesh_b.
+    mesh_a.close_peer("peer-b").await;
+
+    // Collect the first PeerFailed event for peer-a from mesh_b.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut first_failure = false;
+    loop {
+        tokio::select! {
+            event = mesh_b.poll_signaling() => {
+                if let Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) = event {
+                    assert_eq!(pid, "peer-a");
+                    first_failure = true;
+                    break;
+                }
+            }
+            _ = mesh_a.poll_signaling() => {}
+            _ = tokio::time::sleep_until(deadline) => {
+                panic!("Timed out waiting for first PeerFailed");
+            }
+        }
+    }
+    assert!(first_failure);
+    eprintln!("[test] First PeerFailed received");
+
+    // Simulate what session.rs does: remove the peer after handling PeerFailed.
+    mesh_b.remove_peer("peer-a").await;
+
+    // Any subsequent failure signals (peer-a no longer in mesh_b's map) must
+    // be returned as SignalingProcessed, not as a second PeerFailed.
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut second_peer_failed = false;
+    loop {
+        tokio::select! {
+            event = mesh_b.poll_signaling() => {
+                match event {
+                    Ok(Some(wail_net::MeshEvent::PeerFailed(pid))) if pid == "peer-a" => {
+                        second_peer_failed = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            _ = tokio::time::sleep_until(drain_deadline) => break,
+        }
+    }
+
+    assert!(
+        !second_peer_failed,
+        "Second PeerFailed should be deduplicated as SignalingProcessed once peer is removed"
+    );
+    eprintln!("[test] Duplicate PeerFailed deduplication test passed");
+}
+
+// ---------------------------------------------------------------
+// Test: Higher-ID peer's re_initiate does not send an offer
+// ---------------------------------------------------------------
+
+/// §6.2 — When the higher-ID peer calls `re_initiate`, it removes the peer
+/// from its map but does NOT send a new offer (tie-breaking: lower ID initiates).
+/// Verified by confirming peer-b's connected_peers is empty after re_initiate,
+/// and that the connection is restored when peer-a (lower ID) re-initiates.
+#[tokio::test(flavor = "multi_thread")]
+async fn higher_id_re_initiate_does_not_create_offer() {
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+
+    let server_url = start_test_signaling_server().await;
+    let ice = wail_net::default_ice_servers();
+
+    // peer-a < peer-b → peer-a is the initiator
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) = PeerMesh::connect_with_options(
+        &server_url, "tie-room", "peer-a", None, ice.clone(), 200,
+    ).await.expect("peer-a failed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) = PeerMesh::connect_with_options(
+        &server_url, "tie-room", "peer-b", None, ice, 200,
+    ).await.expect("peer-b failed");
+
+    establish_connection(&mut mesh_a, &mut mesh_b).await;
+    eprintln!("[test] Initial connection established");
+
+    // peer-b (higher ID) calls re_initiate("peer-a").
+    // Expected: peer-a is removed from mesh_b's peers map, no offer sent.
+    mesh_b.re_initiate("peer-a").await.expect("re_initiate failed");
+
+    assert!(
+        mesh_b.connected_peers().is_empty(),
+        "After re_initiate from higher-ID peer, peers map should be empty (no self-initiated offer)"
+    );
+    eprintln!("[test] peer-b has no peers after re_initiate (correct — waiting for peer-a to offer)");
+
+    // peer-a (lower ID) calls re_initiate("peer-b") to restore the connection.
+    mesh_a.close_peer("peer-b").await;
+    mesh_a.re_initiate("peer-b").await.expect("peer-a re_initiate failed");
+
+    establish_connection_timeout(&mut mesh_a, &mut mesh_b, 15).await;
+    eprintln!("[test] Connection restored by lower-ID peer");
+
+    // Audio should flow again
+    let wire_a = produce_interval(440.0);
+    let wire_b = produce_interval(880.0);
+    mesh_a.broadcast_audio(&wire_a).await;
+    mesh_b.broadcast_audio(&wire_b).await;
+
+    let (from_b, _) = tokio::time::timeout(Duration::from_secs(5), audio_rx_b.recv())
+        .await.expect("B timed out after reconnect").expect("audio_rx_b closed");
+    let (from_a, _) = tokio::time::timeout(Duration::from_secs(5), audio_rx_a.recv())
+        .await.expect("A timed out after reconnect").expect("audio_rx_a closed");
+
+    assert_eq!(from_b, "peer-a");
+    assert_eq!(from_a, "peer-b");
+    eprintln!("[test] Higher-ID re_initiate tie-breaking test passed");
+}

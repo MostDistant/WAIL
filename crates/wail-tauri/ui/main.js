@@ -12,6 +12,11 @@ const sessionError = document.getElementById('session-error');
 const setBpmBtn = document.getElementById('set-bpm-btn');
 const toggleTestToneBtn = document.getElementById('toggle-test-tone-btn');
 
+// Version label
+window.__TAURI__.app.getVersion().then(v => {
+  document.getElementById('version-label').textContent = 'v' + v;
+});
+
 // State
 let unlisten = [];
 let testToneEnabled = false;
