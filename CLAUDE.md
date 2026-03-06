@@ -58,7 +58,7 @@ Requires: Rust 1.75+, CMake 3.14+, C++ compiler (for rusty_link/Ableton Link SDK
 ```sh
 git submodule update --init --recursive   # fetch Link 4 SDK
 cargo build                               # build workspace
-cargo test                                # run all tests
+cargo xtask test                          # run all tests (builds plugins if missing)
 
 # Plugin (install bundler once)
 cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
@@ -117,27 +117,22 @@ Binary header (48 bytes) + Opus data:
 
 ## Testing
 
-```sh
-cargo test                    # run all tests (~114 tests)
-cargo test -p wail-core       # core library tests only
-cargo test -p wail-audio      # audio tests (codec, ring buffer, wire format)
-```
-
-The `wail-plugin-test` crate has an end-to-end test (`recv_plugin_e2e`) that requires the CLAP plugin bundle to be built first. Build it before running the full test suite:
+**Use `cargo xtask test` instead of `cargo test`.** The `wail-plugin-test` crate requires pre-built CLAP plugin bundles. Running `cargo test` directly will deadlock if the bundles are missing, because `build.rs` cannot spawn a nested `cargo` while the outer process holds the workspace lock. `cargo xtask test` handles this automatically — it builds the plugins first if missing, then runs `cargo test`.
 
 ```sh
-cargo xtask build-plugin                  # build plugin bundles (required for e2e tests)
-cargo test                                # now run all tests
+cargo xtask test                          # build plugins if needed, run all tests
+cargo xtask test -- -p wail-core          # core library tests only
+cargo xtask test -- -p wail-audio         # audio tests (codec, ring buffer, wire format)
 ```
 
 Some integration tests are marked `#[ignore]` because they require external resources. Run these during local development to verify end-to-end behaviour:
 
 ```sh
 # Requires internet access — hits the live Metered API and asserts valid TURN credentials are returned
-cargo test -p wail-net -- --ignored fetch_metered_ice_servers_live
+cargo xtask test -- -p wail-net -- --ignored fetch_metered_ice_servers_live
 
 # Requires coturn installed (brew install coturn) — full WebRTC path through a local TURN relay
-cargo test -p wail-net -- --ignored two_peers_exchange_audio_via_turn
+cargo xtask test -- -p wail-net -- --ignored two_peers_exchange_audio_via_turn
 ```
 
 ## Code Conventions

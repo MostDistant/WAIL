@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Command;
 
 /// On macOS, a valid plugin bundle is a directory (e.g. foo.clap/Contents/MacOS/…).
 /// A 0-byte file or missing path is not valid.
@@ -24,14 +23,14 @@ fn main() {
     let send_bundle = workspace_root.join("target/bundled/wail-plugin-send.clap");
 
     if !bundle_is_valid(&recv_bundle) || !bundle_is_valid(&send_bundle) {
-        println!("cargo:warning=Plugin bundles missing — running `cargo xtask bundle-plugin --debug`");
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let status = Command::new(&cargo)
-            .args(["xtask", "bundle-plugin", "--debug"])
-            .current_dir(&workspace_root)
-            .status()
-            .expect("Failed to spawn cargo xtask bundle-plugin");
-        assert!(status.success(), "cargo xtask bundle-plugin --debug failed");
+        // NOTE: We cannot spawn `cargo xtask bundle-plugin` here because the
+        // outer cargo process holds the workspace lock, causing the inner cargo
+        // to block forever (deadlock). Instead, fail fast with a clear message.
+        panic!(
+            "Plugin bundles missing. Build them first:\n\
+             \n  cargo xtask bundle-plugin --debug\n\
+             \nOr use `cargo xtask test` which handles this automatically."
+        );
     }
 
     // Rebuild if the plugin bundles are replaced

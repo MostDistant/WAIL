@@ -20,6 +20,7 @@ TASKS:
   package-plugin  Create a macOS .pkg installer (macOS only)
   run-tauri       Run the Tauri desktop app in dev mode
   build-tauri     Build plugins, then build the Tauri distributable
+  test            Build plugins if missing, then run cargo test
   run-turn        Start a local coturn TURN server
 
 OPTIONS (install):
@@ -55,6 +56,8 @@ EXAMPLES:
   cargo xtask package-plugin --no-build
   cargo xtask run-tauri
   cargo xtask build-tauri
+  cargo xtask test
+  cargo xtask test -- -p wail-net --ignored
   cargo xtask run-turn
 ";
 
@@ -93,6 +96,10 @@ fn main() -> Result<()> {
         Some("build-tauri") => {
             args.remove(0);
             build_tauri()
+        }
+        Some("test") => {
+            args.remove(0);
+            run_test(&args)
         }
         Some("run-turn") => {
             args.remove(0);
@@ -449,6 +456,36 @@ fn build_tauri() -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.args(["tauri", "build", "-c", "crates/wail-tauri/tauri.conf.json"])
         .current_dir(workspace_dir());
+    run_cmd(cmd)
+}
+
+/// Two-phase test runner: builds plugin bundles if missing, then runs `cargo test`.
+/// This avoids the deadlock that occurs when `wail-plugin-test/build.rs` tries to
+/// spawn a nested cargo process while the outer cargo holds the workspace lock.
+///
+/// All arguments after `--` are forwarded to `cargo test`.
+fn run_test(args: &[String]) -> Result<()> {
+    let root = workspace_dir();
+    let recv_bundle = root.join("target/bundled/wail-plugin-recv.clap");
+    let send_bundle = root.join("target/bundled/wail-plugin-send.clap");
+
+    let bundle_valid = |p: &Path| {
+        #[cfg(target_os = "macos")]
+        return p.is_dir();
+        #[cfg(not(target_os = "macos"))]
+        return p.is_file() && p.metadata().map(|m| m.len() > 0).unwrap_or(false);
+    };
+
+    if !bundle_valid(&recv_bundle) || !bundle_valid(&send_bundle) {
+        println!("Plugin bundles missing — building them first...");
+        bundle_plugin(&["--debug".to_string()])?;
+    }
+
+    println!("\nRunning cargo test...");
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.arg("test");
+    cmd.args(args);
+    cmd.current_dir(&root);
     run_cmd(cmd)
 }
 
