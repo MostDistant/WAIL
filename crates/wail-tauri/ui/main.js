@@ -430,6 +430,8 @@ async function setupListeners() {
       bpmInput.value = s.bpm.toFixed(1);
     }
     document.getElementById('session-link-peers').textContent = s.link_peers;
+    document.getElementById('link-no-peers-warning').style.display =
+      (s.link_peers === 0 && s.plugin_connected) ? '' : 'none';
     document.getElementById('session-audio').textContent =
       `${s.audio_sent} sent / ${s.audio_recv} recv`;
     document.getElementById('session-audio-bytes').textContent =

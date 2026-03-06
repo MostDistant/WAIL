@@ -6,6 +6,7 @@
   --accent: #0f3460;
   --accent-bright: #4e9af1;
   --error: #e74c3c;
+  --warn: #f39c12;
   --success: #2ecc71;
   --border: #2a2a4a;
   --radius: 6px;
@@ -300,6 +301,17 @@ summary {
   border: 1px solid var(--error);
   border-radius: var(--radius);
   color: var(--error);
+  font-size: 12px;
+}
+
+/* Warning */
+.warning {
+  margin-top: 12px;
+  padding: 8px 10px;
+  background: rgba(243, 156, 18, 0.15);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  color: var(--warn);
   font-size: 12px;
 }
 

@@ -197,6 +197,9 @@ async fn session_loop(
     let mut beat_synced = false;
     let mut audio_gate = AudioSendGate::new();
 
+    // Link peer count — updated every status tick; used to gate audio when Link is not running
+    let mut link_peers: u64 = 0;
+
     // Audio interval stats
     let mut audio_intervals_sent: u64 = 0;
     let mut audio_intervals_received: u64 = 0;
@@ -414,7 +417,7 @@ async fn session_loop(
                     if let Some(ref rec) = recorder {
                         rec.record_own(wire_data.clone());
                     }
-                    if audio_gate.is_gated() {
+                    if audio_gate.is_gated() || link_peers == 0 {
                         continue;
                     }
                     mesh.broadcast_audio(&wire_data).await;
@@ -959,6 +962,7 @@ async fn session_loop(
                     // Update snapshots for next tick
                     peers.flush_audio_recv_prev();
                     audio_intervals_sent_prev = audio_intervals_sent;
+                    link_peers = state.num_peers;
 
                     let _ = app.emit("status:update", StatusUpdate {
                         bpm: state.bpm,
