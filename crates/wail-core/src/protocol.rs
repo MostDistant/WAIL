@@ -99,6 +99,8 @@ pub enum SignalMessage {
     /// Server -> Client: a new peer joined
     PeerJoined {
         peer_id: String,
+        #[serde(default)]
+        display_name: Option<String>,
     },
     /// Server -> Client: a peer left
     PeerLeft {

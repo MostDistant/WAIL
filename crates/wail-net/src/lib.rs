@@ -124,6 +124,8 @@ pub struct PeerMesh {
     failure_tx: mpsc::UnboundedSender<String>,
     /// Receiver for peer failure notifications (polled in poll_signaling).
     failure_rx: mpsc::UnboundedReceiver<String>,
+    /// Display names for peers already in the room at join time (from signaling server).
+    initial_peer_names: HashMap<String, Option<String>>,
 }
 
 impl PeerMesh {
@@ -171,10 +173,10 @@ impl PeerMesh {
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
-        Self::connect_full(server_url, room, peer_id, password, ice_servers, poll_interval_ms, false, 1).await
+        Self::connect_full(server_url, room, peer_id, password, ice_servers, poll_interval_ms, false, 1, None).await
     }
 
-    /// Connect with custom ICE servers, poll interval, relay-only mode, and stream count.
+    /// Connect with custom ICE servers, poll interval, relay-only mode, stream count, and display name.
     /// When `relay_only` is true, only TURN relay candidates are used (no host/srflx).
     pub async fn connect_full(
         server_url: &str,
@@ -185,13 +187,14 @@ impl PeerMesh {
         poll_interval_ms: u64,
         relay_only: bool,
         stream_count: u16,
+        display_name: Option<&str>,
     ) -> Result<(
         Self,
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
-        let signaling = SignalingClient::connect_with_options(
-            server_url, room, peer_id, password, poll_interval_ms, stream_count,
+        let (signaling, initial_peer_names) = SignalingClient::connect_with_options(
+            server_url, room, peer_id, password, poll_interval_ms, stream_count, display_name,
         ).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(64);
@@ -207,6 +210,7 @@ impl PeerMesh {
             relay_only,
             failure_tx,
             failure_rx,
+            initial_peer_names,
         };
 
         Ok((mesh, sync_rx, audio_rx))
@@ -282,12 +286,12 @@ impl PeerMesh {
                 Ok(Some(MeshEvent::PeerListReceived(peer_count)))
             }
 
-            SignalMessage::PeerJoined { peer_id: remote_id } => {
-                info!(peer = %remote_id, "New peer joined room");
+            SignalMessage::PeerJoined { peer_id: remote_id, display_name } => {
+                info!(peer = %remote_id, name = ?display_name, "New peer joined room");
                 if self.peer_id < remote_id {
                     self.initiate_connection(&remote_id).await?;
                 }
-                Ok(Some(MeshEvent::PeerJoined(remote_id)))
+                Ok(Some(MeshEvent::PeerJoined { peer_id: remote_id, display_name }))
             }
 
             SignalMessage::PeerLeft { peer_id: remote_id } => {
@@ -469,6 +473,12 @@ impl PeerMesh {
         self.peers.keys().cloned().collect()
     }
 
+    /// Take the initial peer display names (from the signaling join response).
+    /// Returns the map and leaves an empty map in its place.
+    pub fn take_initial_peer_names(&mut self) -> HashMap<String, Option<String>> {
+        std::mem::take(&mut self.initial_peer_names)
+    }
+
     /// Check whether any connected peer has an open audio DataChannel.
     pub fn any_audio_dc_open(&self) -> bool {
         self.peers.values().any(|pc| pc.is_audio_dc_open())
@@ -510,7 +520,10 @@ impl PeerMesh {
 #[derive(Debug)]
 pub enum MeshEvent {
     PeerListReceived(usize),
-    PeerJoined(String),
+    PeerJoined {
+        peer_id: String,
+        display_name: Option<String>,
+    },
     PeerLeft(String),
     /// A peer's WebRTC connection failed or disconnected.
     PeerFailed(String),

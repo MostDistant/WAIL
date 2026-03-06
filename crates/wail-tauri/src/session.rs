@@ -152,7 +152,7 @@ async fn session_loop(
 
     // Connect to signaling server
     let (mut mesh, mut sync_rx, mut audio_rx) =
-        PeerMesh::connect_full(&server, &room, &peer_id, password.as_deref(), ice_servers, 5_000, false, stream_count).await?;
+        PeerMesh::connect_full(&server, &room, &peer_id, password.as_deref(), ice_servers, 5_000, false, stream_count, Some(&display_name)).await?;
     ui_info!(&app, "Connected to signaling server at {server}");
 
     app.emit(
@@ -171,8 +171,8 @@ async fn session_loop(
         tokio::time::interval(Duration::from_millis(ClockSync::ping_interval_ms()));
     let mut status_interval = tokio::time::interval(Duration::from_secs(2));
 
-    // Track peers' display names
-    let mut peer_names: HashMap<String, Option<String>> = HashMap::new();
+    // Track peers' display names (seeded from signaling join response)
+    let mut peer_names: HashMap<String, Option<String>> = mesh.take_initial_peer_names();
     // Track peers' persistent identities (for slot affinity)
     let mut peer_identities: HashMap<String, String> = HashMap::new();
     // Track (peer_id, stream_id) → slot assignments (mirrors recv plugin's ring for UI labeling)
@@ -414,12 +414,13 @@ async fn session_loop(
             // --- Signaling messages ---
             event = mesh.poll_signaling() => {
                 match event {
-                    Ok(Some(wail_net::MeshEvent::PeerJoined(pid))) => {
-                        ui_info!(&app, "Peer {pid} joined room");
-                        peer_names.insert(pid.clone(), None);
+                    Ok(Some(wail_net::MeshEvent::PeerJoined { peer_id: pid, display_name: sig_name })) => {
+                        let display = sig_name.as_deref().unwrap_or(&pid);
+                        ui_info!(&app, "Peer {display} joined room");
+                        peer_names.insert(pid.clone(), sig_name.clone());
                         let _ = app.emit("peer:joined", PeerJoinedEvent {
                             peer_id: pid.clone(),
-                            display_name: None,
+                            display_name: sig_name,
                         });
 
                         let hello = SyncMessage::Hello { peer_id: peer_id.clone(), display_name: Some(display_name.clone()), identity: Some(identity.clone()) };
@@ -584,8 +585,9 @@ async fn session_loop(
                                 Err(_) => wail_net::metered_stun_fallback(),
                             };
 
-                            match wail_net::PeerMesh::connect_with_ice(
+                            match wail_net::PeerMesh::connect_full(
                                 &server, &room, &peer_id, password.as_deref(), ice,
+                                5_000, false, stream_count, Some(&display_name),
                             ).await {
                                 Ok((new_mesh, new_sync_rx, new_audio_rx)) => {
                                     mesh = new_mesh;
@@ -600,7 +602,8 @@ async fn session_loop(
                                             slot_affinity.insert((ident.clone(), stream_id), slot);
                                         }
                                     }
-                                    peer_names.clear();
+                                    // Seed peer_names from signaling response
+                                    peer_names = mesh.take_initial_peer_names();
                                     peer_identities.clear();
                                     hello_sent.clear();
                                     peer_reconnect_attempts.clear();

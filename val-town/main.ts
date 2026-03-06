@@ -795,20 +795,25 @@ export default async function(req: Request): Promise<Response> {
           args: [room, peer_id, ts, display_name || null, bpm || null, streamCount, ts, display_name || null, bpm || null, streamCount],
         });
 
-        // Get current peers (excluding self)
+        // Get current peers (excluding self) with display names
         const rows = await sqlite.execute({
-          sql: "SELECT peer_id, stream_count FROM peers WHERE room = ? AND peer_id != ?",
+          sql: "SELECT peer_id, stream_count, display_name FROM peers WHERE room = ? AND peer_id != ?",
           args: [room, peer_id],
         });
         const peers = rows.rows.map((r) => r[0] as string);
+        const peer_display_names: Record<string, string | null> = {};
+        for (const r of rows.rows) {
+          peer_display_names[r[0] as string] = (r[2] as string) || null;
+        }
 
-        // Enqueue PeerJoined for existing peers
+        // Enqueue PeerJoined for existing peers (include display_name)
         await enqueueForRoom(room, peer_id, {
           type: "PeerJoined",
           peer_id,
+          display_name: display_name || null,
         });
 
-        return json({ peers, slots_used: currentStreams + streamCount, slots_total: 31 });
+        return json({ peers, peer_display_names, slots_used: currentStreams + streamCount, slots_total: 31 });
       }
 
       // -------------------------------------------------------------------

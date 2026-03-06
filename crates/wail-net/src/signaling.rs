@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -46,6 +47,9 @@ pub async fn list_public_rooms(base_url: &str) -> Result<Vec<PublicRoom>> {
 #[derive(serde::Deserialize)]
 struct JoinResponse {
     peers: Vec<String>,
+    /// Map of peer_id → display_name for existing peers (new servers only).
+    #[serde(default)]
+    peer_display_names: HashMap<String, Option<String>>,
 }
 
 /// A single queued message returned by `?action=poll`.
@@ -72,7 +76,7 @@ impl SignalingClient {
     /// - Polls `?action=poll` at the configured interval
     ///
     /// Pass `None` for `password` to create/join a public room.
-    pub async fn connect(base_url: &str, room: &str, peer_id: &str, password: Option<&str>) -> Result<Self> {
+    pub async fn connect(base_url: &str, room: &str, peer_id: &str, password: Option<&str>) -> Result<(Self, HashMap<String, Option<String>>)> {
         Self::connect_with_poll_interval(base_url, room, peer_id, password, 5_000).await
     }
 
@@ -83,11 +87,11 @@ impl SignalingClient {
         peer_id: &str,
         password: Option<&str>,
         poll_interval_ms: u64,
-    ) -> Result<Self> {
-        Self::connect_with_options(base_url, room, peer_id, password, poll_interval_ms, 1).await
+    ) -> Result<(Self, HashMap<String, Option<String>>)> {
+        Self::connect_with_options(base_url, room, peer_id, password, poll_interval_ms, 1, None).await
     }
 
-    /// Connect with full options including stream count.
+    /// Connect with full options including stream count and display name.
     pub async fn connect_with_options(
         base_url: &str,
         room: &str,
@@ -95,7 +99,8 @@ impl SignalingClient {
         password: Option<&str>,
         poll_interval_ms: u64,
         stream_count: u16,
-    ) -> Result<Self> {
+        display_name: Option<&str>,
+    ) -> Result<(Self, HashMap<String, Option<String>>)> {
         let client = Client::new();
         let base = base_url.trim_end_matches('/').to_string();
 
@@ -108,6 +113,9 @@ impl SignalingClient {
         });
         if let Some(pw) = password {
             body["password"] = serde_json::Value::String(pw.to_string());
+        }
+        if let Some(name) = display_name {
+            body["display_name"] = serde_json::Value::String(name.to_string());
         }
         let resp = client
             .post(format!("{base}/?action=join"))
@@ -135,6 +143,7 @@ impl SignalingClient {
         }
 
         let join_resp: JoinResponse = resp.error_for_status()?.json().await?;
+        let initial_peer_names = join_resp.peer_display_names;
 
         info!(
             %base_url, %room, %peer_id,
@@ -262,9 +271,12 @@ impl SignalingClient {
             }
         });
 
-        Ok(Self {
-            incoming_rx,
-            outgoing_tx,
-        })
+        Ok((
+            Self {
+                incoming_rx,
+                outgoing_tx,
+            },
+            initial_peer_names,
+        ))
     }
 }

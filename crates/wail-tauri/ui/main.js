@@ -356,7 +356,8 @@ async function setupListeners() {
       peerList.innerHTML = '<span class="empty">No peers connected</span>';
     } else {
       peerList.innerHTML = s.peers.map(p => {
-        const name = p.display_name || p.peer_id.slice(0, 6);
+        const shortId = p.peer_id.slice(0, 6);
+        const name = p.display_name ? `${p.display_name} (${shortId})` : shortId;
         const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '...';
         return `<div class="peer-item">
           <span class="peer-name">${escapeHtml(name)}</span>

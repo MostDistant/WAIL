@@ -44,6 +44,7 @@ async fn handle_join(
 ) -> Json<serde_json::Value> {
     let room = body["room"].as_str().unwrap().to_string();
     let peer_id = body["peer_id"].as_str().unwrap().to_string();
+    let display_name = body["display_name"].as_str().map(|s| s.to_string());
 
     let mut s = state.lock().await;
     let peers_in_room = s.rooms.entry(room.clone()).or_default();
@@ -65,11 +66,15 @@ async fn handle_join(
             seq,
             room: room.clone(),
             to_peer: p.clone(),
-            body: serde_json::json!({ "type": "PeerJoined", "peer_id": peer_id }),
+            body: serde_json::json!({
+                "type": "PeerJoined",
+                "peer_id": peer_id,
+                "display_name": display_name,
+            }),
         });
     }
 
-    Json(serde_json::json!({ "peers": existing }))
+    Json(serde_json::json!({ "peers": existing, "peer_display_names": {} }))
 }
 
 async fn handle_signal(
