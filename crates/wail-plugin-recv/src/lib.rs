@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
@@ -51,6 +52,12 @@ pub struct WailRecvPlugin {
     /// doesn't provide `pos_beats()`.
     cumulative_samples: u64,
     beat_fallback_warned: bool,
+    /// Display names received via IPC, keyed by peer_id.
+    /// Cached here because NameChanged arrives before slots are active.
+    pending_names: HashMap<String, String>,
+    /// The name most recently applied to each slot (indexed by slot).
+    /// Used to avoid redundant `rescan_audio_port_names()` calls.
+    applied_slot_names: Vec<Option<String>>,
 }
 
 impl Default for WailRecvPlugin {
@@ -65,6 +72,8 @@ impl Default for WailRecvPlugin {
             peer_bufs: Default::default(),
             cumulative_samples: 0,
             beat_fallback_warned: false,
+            pending_names: HashMap::new(),
+            applied_slot_names: vec![None; wail_audio::MAX_REMOTE_PEERS],
         }
     }
 }
@@ -241,6 +250,10 @@ impl Plugin for WailRecvPlugin {
 
     fn reset(&mut self) {
         self.cumulative_samples = 0;
+        self.pending_names.clear();
+        for name in &mut self.applied_slot_names {
+            *name = None;
+        }
         if let Ok(mut bridge) = self.bridge.lock() {
             if let Some(ref mut b) = *bridge {
                 b.reset();
@@ -301,24 +314,19 @@ impl Plugin for WailRecvPlugin {
                                     bridge.notify_peer_joined(&peer_id, &identity);
                                 }
                                 PeerEvent::Left { peer_id } => {
+                                    // Clear applied names for this peer's slots so they
+                                    // get renamed again if the peer reconnects.
+                                    for (slot, pid, _) in bridge.peer_info() {
+                                        if pid == peer_id {
+                                            self.applied_slot_names[slot] = None;
+                                        }
+                                    }
                                     bridge.remove_peer(&peer_id);
                                 }
                                 PeerEvent::NameChanged { peer_id, display_name } => {
-                                    // Rename all slots for this peer (may have multiple streams)
-                                    let slots: Vec<(usize, u16)> = bridge.peer_info().iter()
-                                        .filter(|(_, pid, _)| *pid == peer_id)
-                                        .map(|(slot, _, stream_id)| (*slot, *stream_id))
-                                        .collect();
-                                    let multi = slots.len() > 1;
-                                    for (slot, stream_id) in slots {
-                                        let name = if multi {
-                                            format!("{} {}", display_name, stream_id + 1)
-                                        } else {
-                                            display_name.clone()
-                                        };
-                                        context.set_aux_output_name(slot, Some(name));
-                                        port_names_dirty = true;
-                                    }
+                                    // Cache the name — slots may not be active yet when this
+                                    // arrives, so we apply deferred below after audio is fed.
+                                    self.pending_names.insert(peer_id, display_name);
                                 }
                             }
                         }
@@ -332,6 +340,33 @@ impl Plugin for WailRecvPlugin {
                     // Use a zero-length slice as silent input — IntervalRing
                     // handles zero-length input gracefully (nothing recorded).
                     drop(bridge.process_rt(&[], playback, beat_position));
+
+                    // Deferred name apply: slots become active only after audio arrives
+                    // at an interval boundary. Apply any cached display names now.
+                    if !self.pending_names.is_empty() {
+                        let active = bridge.peer_info();
+                        let mut counts: HashMap<&str, usize> = HashMap::new();
+                        for (_, pid, _) in &active {
+                            *counts.entry(pid.as_str()).or_insert(0) += 1;
+                        }
+                        for (slot, peer_id, stream_id) in &active {
+                            if let Some(display_name) = self.pending_names.get(peer_id.as_str()) {
+                                let multi = counts.get(peer_id.as_str()).copied().unwrap_or(1) > 1;
+                                let name = if multi {
+                                    format!("{} {}", display_name, stream_id + 1)
+                                } else {
+                                    display_name.clone()
+                                };
+                                if self.applied_slot_names.get(*slot).and_then(|n| n.as_deref()) != Some(name.as_str()) {
+                                    context.set_aux_output_name(*slot, Some(name.clone()));
+                                    if *slot < self.applied_slot_names.len() {
+                                        self.applied_slot_names[*slot] = Some(name);
+                                    }
+                                    port_names_dirty = true;
+                                }
+                            }
+                        }
+                    }
                 });
                 if port_names_dirty {
                     context.rescan_audio_port_names();
