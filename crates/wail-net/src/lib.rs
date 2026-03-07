@@ -157,26 +157,10 @@ impl PeerMesh {
         mpsc::UnboundedReceiver<(String, SyncMessage)>,
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
-        Self::connect_with_options(server_url, room, peer_id, password, ice_servers, 5_000).await
+        Self::connect_full(server_url, room, peer_id, password, ice_servers, false, 1, None).await
     }
 
-    /// Connect with custom ICE servers and signaling poll interval.
-    pub async fn connect_with_options(
-        server_url: &str,
-        room: &str,
-        peer_id: &str,
-        password: Option<&str>,
-        ice_servers: Vec<RTCIceServer>,
-        poll_interval_ms: u64,
-    ) -> Result<(
-        Self,
-        mpsc::UnboundedReceiver<(String, SyncMessage)>,
-        mpsc::Receiver<(String, Vec<u8>)>,
-    )> {
-        Self::connect_full(server_url, room, peer_id, password, ice_servers, poll_interval_ms, false, 1, None).await
-    }
-
-    /// Connect with custom ICE servers, poll interval, relay-only mode, stream count, and display name.
+    /// Connect with custom ICE servers, relay-only mode, stream count, and display name.
     /// When `relay_only` is true, only TURN relay candidates are used (no host/srflx).
     pub async fn connect_full(
         server_url: &str,
@@ -184,7 +168,6 @@ impl PeerMesh {
         peer_id: &str,
         password: Option<&str>,
         ice_servers: Vec<RTCIceServer>,
-        poll_interval_ms: u64,
         relay_only: bool,
         stream_count: u16,
         display_name: Option<&str>,
@@ -194,7 +177,7 @@ impl PeerMesh {
         mpsc::Receiver<(String, Vec<u8>)>,
     )> {
         let (signaling, initial_peer_names) = SignalingClient::connect_with_options(
-            server_url, room, peer_id, password, poll_interval_ms, stream_count, display_name,
+            server_url, room, peer_id, password, stream_count, display_name,
         ).await?;
         let (sync_tx, sync_rx) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(64);

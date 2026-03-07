@@ -55,9 +55,9 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ### W16. Signaling server has no rate limiting
 **Status:** Deferred — infrastructure concern
-**File:** `val-town/signaling.ts`
-**Problem:** No rate limiting on the HTTP signaling endpoint.
-**Fix when ready:** Add rate limiting at the Val Town level or via middleware.
+**File:** `signaling-server/main.go`
+**Problem:** No rate limiting on the WebSocket signaling server.
+**Fix when ready:** Add rate limiting via middleware or per-connection message throttling.
 
 ---
 
@@ -80,10 +80,10 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 ## Skipped
 
 ### C4. Signaling server has no rate-limiting
-**Status:** Partially addressed — room passwords added
-**File:** `val-town/signaling.ts`
-**Problem:** No rate limiting, no per-room peer limits.
-**Rationale:** Room passwords prevent unauthorized joins. Rate limiting and peer caps to revisit when needed.
+**Status:** Partially addressed — room passwords + capacity check added
+**File:** `signaling-server/main.go`
+**Problem:** No rate limiting, no per-connection message throttling.
+**Rationale:** Room passwords prevent unauthorized joins. 32-slot capacity check prevents room overflow. Rate limiting to revisit when needed.
 
 ---
 

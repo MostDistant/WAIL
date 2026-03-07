@@ -8,21 +8,22 @@ use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
+use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use wail_audio::AudioBridge;
 use wail_net::PeerMesh;
 
 // ---------------------------------------------------------------------------
-// Configurable in-process HTTP signaling server (mirrors Val Town endpoint)
+// Configurable in-process WebSocket signaling server (mirrors Go server)
 // ---------------------------------------------------------------------------
 
-/// Server-side configuration injected at startup for §1.x signaling tests.
+/// Server-side configuration injected at startup for signaling tests.
 #[derive(Default, Clone)]
 pub struct TestServerConfig {
     /// Minimum acceptable `client_version` (semver string). `None` = no check.
@@ -31,8 +32,6 @@ pub struct TestServerConfig {
     pub password: Option<String>,
     /// Maximum stream slots per room. `None` = unlimited.
     pub room_capacity: Option<usize>,
-    /// When `true`, all requests immediately return HTTP 429.
-    pub rate_limit_mode: bool,
 }
 
 #[derive(Default)]
@@ -41,44 +40,39 @@ struct SignalingState {
     rooms: HashMap<String, Vec<String>>,
     /// "room:peer_id" → stream_count, for capacity accounting
     peer_slots: HashMap<String, usize>,
-    /// Queued signaling messages
-    messages: Vec<StoredMessage>,
-    next_seq: i64,
-    /// "room:peer_id" keys scheduled to receive `evicted: true` on next poll
+    /// room → peer_id → tx for sending messages to that peer's WebSocket
+    peer_senders: HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
+    /// "room:peer_id" keys scheduled to receive `evicted` on next message
     evicted_peers: HashSet<String>,
     config: TestServerConfig,
-}
-
-struct StoredMessage {
-    seq: i64,
-    room: String,
-    to_peer: String,
-    body: serde_json::Value,
 }
 
 type SharedState = Arc<Mutex<SignalingState>>;
 
 // ---------------------------------------------------------------------------
-// Public test handle (exposes admin operations)
+// Public test handle
 // ---------------------------------------------------------------------------
 
 /// A handle to the running test server that allows in-test control.
 #[derive(Clone)]
 pub struct TestServerHandle {
-    /// Base URL of the signaling server (e.g. `"http://127.0.0.1:PORT"`).
+    /// Base URL of the signaling server (e.g. `"ws://127.0.0.1:PORT"`).
     pub url: String,
     state: SharedState,
 }
 
 impl TestServerHandle {
-    /// Schedule a peer to receive `evicted: true` on its next poll, causing
-    /// the signaling client to close its channel and trigger session reconnection.
+    /// Schedule a peer to receive eviction on its next interaction.
     pub async fn evict_peer(&self, room: &str, peer_id: &str) {
-        self.state
-            .lock()
-            .await
-            .evicted_peers
-            .insert(format!("{room}:{peer_id}"));
+        let mut s = self.state.lock().await;
+        s.evicted_peers.insert(format!("{room}:{peer_id}"));
+
+        // Send eviction message immediately if peer has an active sender
+        if let Some(room_senders) = s.peer_senders.get(room) {
+            if let Some(tx) = room_senders.get(peer_id) {
+                let _ = tx.send(serde_json::json!({"type": "evicted"}).to_string());
+            }
+        }
     }
 
     /// Return the IDs of all peers currently in a room.
@@ -113,10 +107,9 @@ impl TestServerHandle {
 }
 
 // ---------------------------------------------------------------------------
-// Simple semver comparison for the min_version check
+// Simple semver comparison
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if `a` is strictly less than `b` under semver ordering.
 fn semver_less_than(a: &str, b: &str) -> bool {
     fn parse(s: &str) -> (u64, u64, u64) {
         let mut parts = s.split('.').filter_map(|p| p.parse::<u64>().ok());
@@ -130,260 +123,282 @@ fn semver_less_than(a: &str, b: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Request handlers
+// WebSocket handler
 // ---------------------------------------------------------------------------
 
-async fn handle_join(
+async fn handle_ws(
+    ws: WebSocketUpgrade,
     State(state): State<SharedState>,
-    Json(body): Json<serde_json::Value>,
 ) -> Response {
-    let room = body["room"].as_str().unwrap_or("").to_string();
-    let peer_id = body["peer_id"].as_str().unwrap_or("").to_string();
-    let display_name = body["display_name"].as_str().map(|s| s.to_string());
-    let stream_count = body["stream_count"].as_u64().unwrap_or(1) as usize;
-    let client_version = body["client_version"].as_str().unwrap_or("0.0.0").to_string();
-    let password = body["password"].as_str().map(|s| s.to_string());
-
-    let mut s = state.lock().await;
-
-    // §1.1 — version check
-    if let Some(min) = &s.config.min_version.clone() {
-        if semver_less_than(&client_version, min) {
-            return (
-                StatusCode::UPGRADE_REQUIRED,
-                Json(serde_json::json!({
-                    "error": "client_version_too_old",
-                    "min_version": min
-                })),
-            )
-                .into_response();
-        }
-    }
-
-    // §1.1 — password check
-    if let Some(required) = &s.config.password.clone() {
-        let sent = password.as_deref().unwrap_or("");
-        if sent != required {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({ "error": "invalid_password" })),
-            )
-                .into_response();
-        }
-    }
-
-    // §1.1 — capacity check
-    if let Some(capacity) = s.config.room_capacity {
-        let used: usize = s
-            .rooms
-            .get(&room)
-            .map(|peers| {
-                peers
-                    .iter()
-                    .map(|p| {
-                        s.peer_slots
-                            .get(&format!("{room}:{p}"))
-                            .copied()
-                            .unwrap_or(1)
-                    })
-                    .sum()
-            })
-            .unwrap_or(0);
-        if used + stream_count > capacity {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": "room_full",
-                    "slots_available": capacity.saturating_sub(used)
-                })),
-            )
-                .into_response();
-        }
-    }
-
-    // Standard join
-    let peers_in_room = s.rooms.entry(room.clone()).or_default();
-    let existing: Vec<String> = peers_in_room
-        .iter()
-        .filter(|p| *p != &peer_id)
-        .cloned()
-        .collect();
-    if !peers_in_room.contains(&peer_id) {
-        peers_in_room.push(peer_id.clone());
-    }
-    s.peer_slots
-        .insert(format!("{room}:{peer_id}"), stream_count);
-
-    for p in &existing {
-        s.next_seq += 1;
-        let seq = s.next_seq;
-        s.messages.push(StoredMessage {
-            seq,
-            room: room.clone(),
-            to_peer: p.clone(),
-            body: serde_json::json!({
-                "type": "PeerJoined",
-                "peer_id": peer_id,
-                "display_name": display_name,
-            }),
-        });
-    }
-
-    let peer_display_names: HashMap<String, Option<String>> = existing
-        .iter()
-        .map(|id| (id.clone(), None))
-        .collect();
-
-    Json(serde_json::json!({
-        "peers": existing,
-        "peer_display_names": peer_display_names
-    }))
-    .into_response()
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_signal(
-    State(state): State<SharedState>,
-    Json(body): Json<serde_json::Value>,
-) -> Response {
-    let to = body["to"].as_str().unwrap_or("").to_string();
-    let from = body["from"].as_str().unwrap_or("").to_string();
+async fn handle_socket(mut socket: WebSocket, state: SharedState) {
+    // Phase 1: Wait for the join message and validate it.
+    // We keep the socket unsplit so we can send errors directly and close cleanly.
+    let join_result = handle_join_phase(&mut socket, &state).await;
 
-    let mut s = state.lock().await;
-    let room = s
-        .rooms
-        .iter()
-        .find(|(_, peers)| peers.contains(&from))
-        .map(|(r, _)| r.clone())
-        .unwrap_or_default();
+    let (room, peer_id, send_tx, send_rx) = match join_result {
+        Some(v) => v,
+        None => return, // join failed or connection closed
+    };
 
-    s.next_seq += 1;
-    let seq = s.next_seq;
-    s.messages.push(StoredMessage {
-        seq,
-        room,
-        to_peer: to,
-        body,
+    // Spawn writer from send_rx
+    let (mut ws_tx, ws_rx) = socket.split();
+    let write_handle = tokio::spawn(async move {
+        let mut send_rx = send_rx;
+        while let Some(msg) = send_rx.recv().await {
+            if ws_tx.send(Message::Text(msg)).await.is_err() {
+                break;
+            }
+        }
+        let _ = ws_tx.close().await;
     });
 
-    Json(serde_json::json!({ "ok": true })).into_response()
+    // Phase 2: relay messages
+    relay_messages(ws_rx, &state, &room, &peer_id, &send_tx).await;
+
+    // Clean up
+    cleanup_peer(&state, &room, &peer_id).await;
+    write_handle.abort();
 }
 
-async fn handle_leave(
-    State(state): State<SharedState>,
-    Json(body): Json<serde_json::Value>,
-) -> Response {
-    let room = body["room"].as_str().unwrap_or("").to_string();
-    let peer_id = body["peer_id"].as_str().unwrap_or("").to_string();
+/// Handle the join phase. Returns (room, peer_id, send_tx, send_rx) on success, None on failure.
+async fn handle_join_phase(
+    socket: &mut WebSocket,
+    state: &SharedState,
+) -> Option<(
+    String,
+    String,
+    tokio::sync::mpsc::UnboundedSender<String>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+)> {
+    loop {
+        let msg = match socket.recv().await {
+            Some(Ok(Message::Text(t))) => t,
+            Some(Ok(Message::Close(_))) | None => return None,
+            _ => continue,
+        };
 
+        let parsed: serde_json::Value = match serde_json::from_str(&msg) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if parsed["type"].as_str() != Some("join") {
+            continue;
+        }
+
+        let room = parsed["room"].as_str().unwrap_or("").to_string();
+        let peer_id = parsed["peer_id"].as_str().unwrap_or("").to_string();
+        let display_name = parsed["display_name"].as_str().map(|s| s.to_string());
+        let stream_count = parsed["stream_count"].as_u64().unwrap_or(1) as usize;
+        let client_version = parsed["client_version"]
+            .as_str()
+            .unwrap_or("0.0.0")
+            .to_string();
+        let password = parsed["password"].as_str().map(|s| s.to_string());
+
+        let mut s = state.lock().await;
+
+        // Version check
+        if let Some(min) = &s.config.min_version.clone() {
+            if semver_less_than(&client_version, min) {
+                let _ = socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "join_error",
+                            "code": "version_outdated",
+                            "min_version": min
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = socket.close().await;
+                return None;
+            }
+        }
+
+        // Password check
+        if let Some(required) = &s.config.password.clone() {
+            let sent = password.as_deref().unwrap_or("");
+            if sent != required {
+                let _ = socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "join_error",
+                            "code": "unauthorized"
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = socket.close().await;
+                return None;
+            }
+        }
+
+        // Capacity check
+        if let Some(capacity) = s.config.room_capacity {
+            let used: usize = s
+                .rooms
+                .get(&room)
+                .map(|peers| {
+                    peers
+                        .iter()
+                        .map(|p| {
+                            s.peer_slots
+                                .get(&format!("{room}:{p}"))
+                                .copied()
+                                .unwrap_or(1)
+                        })
+                        .sum()
+                })
+                .unwrap_or(0);
+            if used + stream_count > capacity {
+                let _ = socket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "type": "join_error",
+                            "code": "room_full",
+                            "slots_available": capacity.saturating_sub(used)
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = socket.close().await;
+                return None;
+            }
+        }
+
+        // Register peer
+        let peers_in_room = s.rooms.entry(room.clone()).or_default();
+        let existing: Vec<String> = peers_in_room
+            .iter()
+            .filter(|p| *p != &peer_id)
+            .cloned()
+            .collect();
+        if !peers_in_room.contains(&peer_id) {
+            peers_in_room.push(peer_id.clone());
+        }
+        s.peer_slots
+            .insert(format!("{room}:{peer_id}"), stream_count);
+
+        // Create channel for this peer
+        let (send_tx, send_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        // Register sender
+        s.peer_senders
+            .entry(room.clone())
+            .or_default()
+            .insert(peer_id.clone(), send_tx.clone());
+
+        // Notify existing peers
+        if let Some(room_senders) = s.peer_senders.get(&room) {
+            for (id, tx) in room_senders {
+                if id != &peer_id {
+                    let _ = tx.send(
+                        serde_json::json!({
+                            "type": "peer_joined",
+                            "peer_id": peer_id,
+                            "display_name": display_name,
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        }
+
+        // Build peer display names
+        let peer_display_names: HashMap<String, Option<String>> = existing
+            .iter()
+            .map(|id| (id.clone(), None))
+            .collect();
+
+        // Send join_ok
+        let _ = socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "join_ok",
+                    "peers": existing,
+                    "peer_display_names": peer_display_names
+                })
+                .to_string(),
+            ))
+            .await;
+
+        return Some((room, peer_id, send_tx, send_rx));
+    }
+}
+
+async fn relay_messages(
+    mut ws_rx: futures_util::stream::SplitStream<WebSocket>,
+    state: &SharedState,
+    room: &str,
+    peer_id: &str,
+    send_tx: &tokio::sync::mpsc::UnboundedSender<String>,
+) {
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        let text = match msg {
+            Message::Text(t) => t,
+            Message::Close(_) => break,
+            _ => continue,
+        };
+
+        let parsed: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let msg_type = parsed["type"].as_str().unwrap_or("");
+
+        match msg_type {
+            "signal" => {
+                let to = parsed["to"].as_str().unwrap_or("").to_string();
+                let s = state.lock().await;
+                if let Some(room_senders) = s.peer_senders.get(room) {
+                    if let Some(tx) = room_senders.get(&to) {
+                        let _ = tx.send(text.clone());
+                    }
+                }
+            }
+            "leave" => break,
+            _ => {}
+        }
+    }
+}
+
+async fn cleanup_peer(state: &SharedState, room: &str, peer_id: &str) {
     let mut s = state.lock().await;
-    if let Some(peers) = s.rooms.get_mut(&room) {
-        peers.retain(|p| p != &peer_id);
-        // §1.1 — delete room when empty so it can be recreated with different config
+
+    if let Some(peers) = s.rooms.get_mut(room) {
+        peers.retain(|p| p != peer_id);
         if peers.is_empty() {
-            s.rooms.remove(&room);
+            s.rooms.remove(room);
         }
     }
     s.peer_slots.remove(&format!("{room}:{peer_id}"));
 
     // Notify remaining peers
-    let remaining: Vec<String> = s
-        .rooms
-        .get(&room)
-        .cloned()
-        .unwrap_or_default();
-    for p in remaining {
-        s.next_seq += 1;
-        let seq = s.next_seq;
-        s.messages.push(StoredMessage {
-            seq,
-            room: room.clone(),
-            to_peer: p,
-            body: serde_json::json!({
-                "type": "PeerLeft",
-                "peer_id": peer_id,
-            }),
-        });
+    if let Some(room_senders) = s.peer_senders.get(room) {
+        for (id, tx) in room_senders {
+            if id != peer_id {
+                let _ = tx.send(
+                    serde_json::json!({
+                        "type": "peer_left",
+                        "peer_id": peer_id,
+                    })
+                    .to_string(),
+                );
+            }
+        }
     }
 
-    Json(serde_json::json!({ "ok": true })).into_response()
-}
-
-#[derive(serde::Deserialize)]
-struct PollQuery {
-    room: String,
-    peer_id: String,
-    after: Option<i64>,
-}
-
-async fn handle_poll(
-    State(state): State<SharedState>,
-    Query(q): Query<PollQuery>,
-) -> Response {
-    let after = q.after.unwrap_or(0);
-    let mut s = state.lock().await;
-
-    // §1.2 — eviction support
-    let evict_key = format!("{}:{}", q.room, q.peer_id);
-    let evicted = s.evicted_peers.remove(&evict_key);
-
-    let messages: Vec<serde_json::Value> = s
-        .messages
-        .iter()
-        .filter(|m| m.room == q.room && m.to_peer == q.peer_id && m.seq > after)
-        .map(|m| serde_json::json!({ "seq": m.seq, "body": m.body }))
-        .collect();
-
-    Json(serde_json::json!({
-        "messages": messages,
-        "evicted": evicted,
-    }))
-    .into_response()
-}
-
-async fn handle_post(
-    Query(params): Query<HashMap<String, String>>,
-    State(state): State<SharedState>,
-    body: Json<serde_json::Value>,
-) -> Response {
-    // §1.2 — rate-limit mode
-    if state.lock().await.config.rate_limit_mode {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({ "error": "rate_limited" })),
-        )
-            .into_response();
-    }
-
-    match params.get("action").map(|s| s.as_str()) {
-        Some("join") => handle_join(State(state), body).await,
-        Some("signal") => handle_signal(State(state), body).await,
-        Some("leave") => handle_leave(State(state), body).await,
-        _ => Json(serde_json::json!({ "error": "unknown action" })).into_response(),
-    }
-}
-
-async fn handle_get(
-    Query(params): Query<HashMap<String, String>>,
-    State(state): State<SharedState>,
-) -> Response {
-    // §1.2 — rate-limit mode
-    if state.lock().await.config.rate_limit_mode {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({ "error": "rate_limited" })),
-        )
-            .into_response();
-    }
-
-    if params.get("action").map(|s| s.as_str()) == Some("poll") {
-        let q = PollQuery {
-            room: params.get("room").cloned().unwrap_or_default(),
-            peer_id: params.get("peer_id").cloned().unwrap_or_default(),
-            after: params.get("after").and_then(|s| s.parse().ok()),
-        };
-        handle_poll(State(state), Query(q)).await
-    } else {
-        Json(serde_json::json!({ "error": "unknown action" })).into_response()
+    // Remove sender
+    if let Some(room_senders) = s.peer_senders.get_mut(room) {
+        room_senders.remove(peer_id);
+        if room_senders.is_empty() {
+            s.peer_senders.remove(room);
+        }
     }
 }
 
@@ -393,13 +408,11 @@ async fn handle_get(
 
 fn build_app(state: SharedState) -> Router {
     Router::new()
-        .route("/", post(handle_post))
-        .route("/", get(handle_get))
+        .route("/ws", get(handle_ws))
         .with_state(state)
 }
 
 /// Start a plain test signaling server. Returns the base URL.
-/// All existing tests use this function — signature is unchanged.
 pub async fn start_test_signaling_server() -> String {
     start_configured_signaling_server(TestServerConfig::default())
         .await
@@ -419,7 +432,7 @@ pub async fn start_configured_signaling_server(config: TestServerConfig) -> Test
     tokio::spawn(axum::serve(listener, app).into_future());
 
     TestServerHandle {
-        url: format!("http://{}", addr),
+        url: format!("ws://{}", addr),
         state,
     }
 }
@@ -451,7 +464,6 @@ pub fn rms(samples: &[f32]) -> f32 {
 }
 
 /// Produce an encoded audio interval from an AudioBridge.
-/// Records a sine wave through one full interval, crosses the boundary, returns wire bytes.
 pub fn produce_interval(freq_hz: f32) -> Vec<u8> {
     let sr = 48000u32;
     let ch = 2u16;
@@ -512,8 +524,20 @@ pub async fn establish_connection_timeout(
     }
 }
 
+/// Try to process one signaling message within a short timeout.
+/// Returns true if a message was processed, false if nothing was pending.
+async fn poll_one(mesh: &mut PeerMesh) -> bool {
+    matches!(
+        tokio::time::timeout(Duration::from_millis(5), mesh.poll_signaling()).await,
+        Ok(Ok(_))
+    )
+}
+
 /// Pump signaling for three meshes until all six directed DataChannel paths are open.
-/// `ids` is `(id_a, id_b, id_c)` matching mesh_a, mesh_b, mesh_c respectively.
+///
+/// Uses explicit round-robin polling to ensure all meshes get fair scheduling.
+/// With WebSocket signaling, messages arrive instantly and tokio::select! can
+/// starve lower-priority meshes when one mesh has a flood of ICE candidates.
 pub async fn establish_three_way_connection(
     mesh_a: &mut PeerMesh,
     mesh_b: &mut PeerMesh,
@@ -523,50 +547,44 @@ pub async fn establish_three_way_connection(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
 
     loop {
-        tokio::select! {
-            result = mesh_a.poll_signaling() => {
-                if let Err(e) = result { eprintln!("[test] mesh_a poll error: {e}"); }
-            }
-            result = mesh_b.poll_signaling() => {
-                if let Err(e) = result { eprintln!("[test] mesh_b poll error: {e}"); }
-            }
-            result = mesh_c.poll_signaling() => {
-                if let Err(e) = result { eprintln!("[test] mesh_c poll error: {e}"); }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                // All six directed paths must have open audio DCs.
-                let all_open =
-                    mesh_a.is_peer_audio_dc_open(ids.1) && mesh_a.is_peer_audio_dc_open(ids.2)
-                    && mesh_b.is_peer_audio_dc_open(ids.0) && mesh_b.is_peer_audio_dc_open(ids.2)
-                    && mesh_c.is_peer_audio_dc_open(ids.0) && mesh_c.is_peer_audio_dc_open(ids.1);
-                if all_open {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    return;
-                }
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                panic!(
-                    "3-way WebRTC connection timed out. \
-                     A→B={} A→C={} B→A={} B→C={} C→A={} C→B={}",
-                    mesh_a.is_peer_audio_dc_open(ids.1),
-                    mesh_a.is_peer_audio_dc_open(ids.2),
-                    mesh_b.is_peer_audio_dc_open(ids.0),
-                    mesh_b.is_peer_audio_dc_open(ids.2),
-                    mesh_c.is_peer_audio_dc_open(ids.0),
-                    mesh_c.is_peer_audio_dc_open(ids.1),
-                );
-            }
+        // Process one message from each mesh in strict round-robin.
+        // Repeat while any mesh had work, to drain queued messages quickly.
+        let mut any_progress = true;
+        while any_progress {
+            any_progress = false;
+            any_progress |= poll_one(mesh_a).await;
+            any_progress |= poll_one(mesh_b).await;
+            any_progress |= poll_one(mesh_c).await;
         }
+
+        let all_open =
+            mesh_a.is_peer_audio_dc_open(ids.1) && mesh_a.is_peer_audio_dc_open(ids.2)
+            && mesh_b.is_peer_audio_dc_open(ids.0) && mesh_b.is_peer_audio_dc_open(ids.2)
+            && mesh_c.is_peer_audio_dc_open(ids.0) && mesh_c.is_peer_audio_dc_open(ids.1);
+        if all_open {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            return;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "3-way WebRTC connection timed out. \
+                 A→B={} A→C={} B→A={} B→C={} C→A={} C→B={}",
+                mesh_a.is_peer_audio_dc_open(ids.1),
+                mesh_a.is_peer_audio_dc_open(ids.2),
+                mesh_b.is_peer_audio_dc_open(ids.0),
+                mesh_b.is_peer_audio_dc_open(ids.2),
+                mesh_c.is_peer_audio_dc_open(ids.0),
+                mesh_c.is_peer_audio_dc_open(ids.1),
+            );
+        }
+
+        // Yield to let WebSocket I/O and ICE background tasks make progress
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
 /// Produce a realistically-sized encoded audio interval from an AudioBridge.
-///
-/// Unlike `produce_interval()` which only records a handful of buffers,
-/// this simulates a real DAW callback loop: 256-frame buffers at 120 BPM,
-/// advancing beat position proportionally, filling the full 8-second interval.
-///
-/// Returns `(wire_bytes, expected_interleaved_samples)`.
 pub fn produce_full_interval(freq_hz: f32) -> (Vec<u8>, usize) {
     let sr = 48000u32;
     let ch = 2u16;
@@ -582,17 +600,14 @@ pub fn produce_full_interval(freq_hz: f32) -> (Vec<u8>, usize) {
     let beats_per_callback = buf_frames as f64 / sr as f64 * bpm / 60.0;
     let mut beat = 0.0_f64;
 
-    // Fill interval 0 (beats 0..16)
     while beat < 16.0 {
         bridge.process(&signal, &mut out, beat);
         beat += beats_per_callback;
     }
 
-    // Cross boundary — this triggers encode and returns wire bytes
     let wire_msgs = bridge.process(&signal, &mut out, beat);
     assert_eq!(wire_msgs.len(), 1, "Should produce exactly 1 interval");
 
-    // Expected interleaved sample count for a full interval
     let expected_samples = (sr as f64 * ch as f64 * 16.0 / (bpm / 60.0)) as usize;
     (wire_msgs.into_iter().next().unwrap(), expected_samples)
 }
@@ -614,8 +629,8 @@ mod tests {
     #[test]
     fn semver_comparison_basic() {
         assert!(semver_less_than("1.0.0", "2.0.0"));
-        assert!(semver_less_than("1.2.3", "1.10.0")); // would fail lexicographic
+        assert!(semver_less_than("1.2.3", "1.10.0"));
         assert!(!semver_less_than("2.0.0", "1.9.9"));
-        assert!(!semver_less_than("1.2.3", "1.2.3")); // equal is not less than
+        assert!(!semver_less_than("1.2.3", "1.2.3"));
     }
 }

@@ -25,7 +25,7 @@ crates/
 │   └── pipeline.rs       Encode/decode pipeline (interval → wire → DataChannel)
 ├── wail-net/            Networking layer
 │   ├── lib.rs            PeerMesh + ICE server config (Metered TURN)
-│   ├── signaling.rs      HTTP polling signaling client
+│   ├── signaling.rs      WebSocket signaling client
 │   └── peer.rs           WebRTC peer with "sync" + "audio" DataChannels
 ├── wail-tauri/          Tauri desktop app (session orchestration)
 │   ├── main.rs           App entry point
@@ -44,8 +44,8 @@ crates/
 
 xtask/                   Build tasks (build-plugin, install-plugin, build-tauri, etc.)
 
-val-town/
-└── main.ts           HTTP signaling server (deployed to Val Town)
+signaling-server/
+└── main.go           WebSocket signaling server (Go + SQLite, deployed to fly.io)
 
 vendor/
 └── link/             Ableton Link 4.0.0 beta SDK (git submodule)

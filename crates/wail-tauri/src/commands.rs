@@ -12,7 +12,7 @@ use crate::PluginInstallErrors;
 
 pub type SessionState = Mutex<Option<SessionHandle>>;
 
-const SIGNALING_URL: &str = "https://wail.val.run/";
+const SIGNALING_URL: &str = "wss://wail-signal.fly.dev";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JoinResult {

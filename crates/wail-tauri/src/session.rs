@@ -169,7 +169,7 @@ async fn session_loop(
 
     // Connect to signaling server
     let (mut mesh, mut sync_rx, mut audio_rx) =
-        PeerMesh::connect_full(&server, &room, &peer_id, password.as_deref(), ice_servers, 5_000, false, stream_count, Some(&display_name)).await?;
+        PeerMesh::connect_full(&server, &room, &peer_id, password.as_deref(), ice_servers, false, stream_count, Some(&display_name)).await?;
     ui_info!(&app, "Connected to signaling server at {server}");
 
     app.emit(
@@ -597,7 +597,7 @@ async fn session_loop(
 
                 match wail_net::PeerMesh::connect_full(
                     &server, &room, &peer_id, password.as_deref(), ice,
-                    5_000, false, stream_count, Some(&display_name),
+                    false, stream_count, Some(&display_name),
                 ).await {
                     Ok((new_mesh, new_sync_rx, new_audio_rx)) => {
                         mesh = new_mesh;

@@ -32,20 +32,21 @@ WAIL connects musicians over the internet using WebRTC DataChannels for both syn
 │   Session orchestrator: Link + WebRTC + IPC + UI        │
 ├─────────────────────────────────────────────────────────┤
 │                   wail-net / PeerMesh                   │
-│   WebRTC peer management + signaling polling            │
+│   WebRTC peer management + signaling                    │
 │   ┌──────────────┐  ┌────────────────────────────────┐  │
 │   │ SignalingClient│  │ PeerConnection (one per peer)  │  │
-│   │ HTTP polling  │  │ - "sync" DataChannel (JSON)    │  │
+│   │ WebSocket     │  │ - "sync" DataChannel (JSON)    │  │
 │   └──────────────┘  │ - "audio" DataChannel (binary) │  │
 │                     └────────────────────────────────┘  │
 ├─────────────────────────────────────────────────────────┤
-│               val-town/main.ts (signaling server)       │
-│   HTTP endpoint: join / signal / poll / leave / list    │
-│   SQLite: peers, messages, rooms                        │
+│            signaling-server/main.go (Go + SQLite)       │
+│   WebSocket server: join / signal / leave               │
+│   SQLite: peers, rooms                                  │
+│   Deployed to fly.io (wail-signal.fly.dev)              │
 └─────────────────────────────────────────────────────────┘
 ```
 
-Peers communicate directly (P2P) once WebRTC connects. The signaling server is only used during connection setup — it relays SDP offers/answers and ICE candidates. Once DataChannels open, the server is never contacted again (except for the 5-second heartbeat poll).
+Peers communicate directly (P2P) once WebRTC connects. The signaling server is only used during connection setup — it relays SDP offers/answers and ICE candidates over a persistent WebSocket connection. Once DataChannels open, the WebSocket stays connected for peer join/leave notifications and heartbeat (ping/pong).
 
 ---
 
@@ -56,8 +57,8 @@ Peers communicate directly (P2P) once WebRTC connects. The signaling server is o
 | Session orchestration | `wail-tauri/session.rs` | Drives the `tokio::select!` loop, owns all state, routes messages between Link, mesh, plugins, and frontend |
 | Peer mesh | `wail-net/lib.rs` | Manages the `HashMap<peer_id, PeerConnection>` and the signaling polling loop |
 | Single peer | `wail-net/peer.rs` | One WebRTC peer connection with two DataChannels |
-| Signaling | `wail-net/signaling.rs` | HTTP polling client; drives outgoing signals and polls for incoming |
-| Signaling server | `val-town/main.ts` | Val Town HTTP endpoint; stores peers/messages in SQLite |
+| Signaling | `wail-net/signaling.rs` | WebSocket client; sends/receives signaling messages in real time |
+| Signaling server | `signaling-server/main.go` | Go WebSocket server on fly.io; stores peers/rooms in SQLite |
 | Core protocol | `wail-core/protocol.rs` | `SyncMessage` and `SignalMessage` type definitions |
 | Ableton Link | `wail-core/link.rs` | FFI bridge to the Link SDK; 50 Hz poller |
 | Clock sync | `wail-core/clock.rs` | NTP-style RTT estimation |
@@ -67,48 +68,55 @@ Peers communicate directly (P2P) once WebRTC connects. The signaling server is o
 
 ## 3. Signaling Server
 
+### Architecture
+
+The signaling server is a Go WebSocket server (`signaling-server/main.go`) using gorilla/websocket and modernc.org/sqlite (pure-Go SQLite). It is deployed to fly.io at `wss://wail-signal.fly.dev`.
+
 ### Storage
 
-The Val Town server uses SQLite with three tables:
+SQLite with two tables:
 
-- `peers(room, peer_id, last_seen, display_name, bpm, stream_count)` — one row per live peer
-- `messages(id, room, to_peer, body, created_at)` — queued signaling messages addressed to a specific peer
+- `peers(room, peer_id, display_name, stream_count, last_seen)` — one row per live peer
 - `rooms(room, password_hash, created_at)` — room metadata and optional password
 
-### Endpoints
+### Protocol
 
-| Method | Action | Description |
-|--------|--------|-------------|
-| `POST` | `?action=join` | Peer registers itself; returns list of existing peers |
-| `POST` | `?action=signal` | Relay a signaling message (offer/answer/ICE) to another peer |
-| `GET` | `?action=poll` | Fetch pending messages for this peer, update heartbeat |
-| `POST` | `?action=leave` | Peer deregisters; notifies remaining peers |
-| `GET` | `?action=list` | Public room list |
-| `GET` | (no action) | Serves the browser listener UI |
+All signaling happens over a single WebSocket connection per client. Messages are JSON with a `type` field:
+
+| Type (client→server) | Description |
+|----------------------|-------------|
+| `join` | Join a room with peer_id, password, stream_count, display_name |
+| `signal` | Relay a signaling message (offer/answer/ICE) to a specific peer |
+| `leave` | Leave the current room |
+
+| Type (server→client) | Description |
+|----------------------|-------------|
+| `join_ok` | Room joined; includes peer list and display names |
+| `join_error` | Join failed (version_outdated, unauthorized, room_full) |
+| `peer_joined` | A new peer entered the room |
+| `peer_left` | A peer left the room |
+| `signal` | Forwarded signaling message from another peer |
 
 ### Join flow
 
-On `?action=join`, the server:
-1. Checks `client_version >= MIN_CLIENT_VERSION` ("0.4.16"). Older clients get 426 Upgrade Required.
+On `join`, the server:
+1. Checks `client_version >= minVersion`. Older clients get `join_error` with code `version_outdated`.
 2. Checks/creates the room, verifies password (SHA-256 hash comparison).
-3. Checks room capacity: `8 * stream_count` total stream slots. Full rooms get 409 Conflict.
-4. Inserts peer into `peers`.
-5. Enqueues a `PeerJoined` message for all existing peers.
-6. Returns the list of existing `peer_id`s and their display names.
+3. Checks room capacity: 32 total stream slots. Full rooms get `join_error` with code `room_full`.
+4. Upserts peer into `peers` table.
+5. Sends `peer_joined` to all existing peers in the room (instant push).
+6. Sends `join_ok` with the list of existing `peer_id`s and their display names.
 
 ### Heartbeat and stale peer cleanup
 
-The polling client sends `?action=poll` every 5 seconds. This updates `last_seen`. On each poll request, the server runs `cleanStalePeers()`:
-- Peers not seen in 30+ seconds are removed.
-- `PeerLeft` is enqueued for remaining peers.
-- If the room is now empty, the room row is deleted (freeing the name/password).
-- Messages older than 60 seconds are deleted.
+The server sends WebSocket pings every 15 seconds. The client's pong response updates `last_seen` in the DB. Stale peers (not seen in 30+ seconds) are cleaned on server startup. During runtime, peers are cleaned when the WebSocket connection closes (the `readPump` defer calls `leave()`).
 
-The poll response includes an `evicted` boolean. When `true`, the polling loop exits immediately, closing `incoming_rx`. The session layer sees `Ok(None)` from `poll_signaling()` and triggers signaling reconnection.
+### HTTP endpoints
 
-### Rate limiting
-
-If the server returns 429, the polling client doubles `current_poll_ms` up to a 30-second cap. It resets to the base interval on the next successful response.
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/rooms` | List public rooms (excludes password-protected rooms) |
+| `GET` | `/health` | Health check |
 
 ---
 
@@ -119,40 +127,40 @@ If the server returns 429, the polling client doubles `current_poll_ms` up to a 
 ```
 Peer A (lower peer_id)                  Signaling Server               Peer B (higher peer_id)
 ───────────────────────                 ────────────────               ───────────────────────
-POST ?action=join ──────────────────────────►│
-◄──────────────── { peers: [] } ────────────│
+WS connect ─────────────────────────────────►│
+send: {type: "join", room, peer_id: "A"} ──►│
+◄──────── {type: "join_ok", peers: []} ──────│
 (room empty, no connections needed)          │
                                              │
-                    POST ?action=join ───────────────────────────────►│
-                    ◄──── { peers: ["A"] } ──────────────────────────│
-                                             │
-                                             │◄── POST ?action=signal (PeerJoined{B}) ──(enqueued for A)
-                                             │
-A polls: GET ?action=poll ──────────────────►│
-◄── { messages: [PeerJoined{B}] } ──────────│
+                    WS connect ──────────────────────────────────────►│
+                    send: {type: "join", room, peer_id: "B"} ───────►│
+                                             │                        │
+◄──── {type: "peer_joined", peer_id: "B"} ──│  (instant push to A)   │
+                                             │                        │
+                    ◄──── {type: "join_ok", peers: ["A"]} ───────────│
                                              │
 A: lower peer_id → initiates WebRTC to B     │
 A creates offer SDP                          │
 A sets local description                     │
-A: POST ?action=signal (Offer{sdp}) ────────►│──── enqueue for B ────►│
+A: send {type: "signal", to: "B",            │
+         payload: Offer{sdp}} ──────────────►│──── push to B ────────►│
                                              │                         │
 A: ICE candidates discovered (async)         │                         │
-A: POST ?action=signal (IceCandidate) ──────►│──── enqueue for B ────►│
-                                             │                         │
-                  B polls: GET ?action=poll ──────────────────────────►│
-                  ◄── { messages: [Offer{sdp}, IceCandidate...] } ─────│
+A: send {type: "signal", to: "B",            │                         │
+         payload: IceCandidate} ────────────►│──── push to B ────────►│
                                              │                         │
                   B: creates PeerConnection, handle_offer()            │
                   B: sets remote description (offer)                   │
                   B: applies pending ICE candidates                    │
                   B: creates answer SDP                                │
                   B: sets local description                            │
-                  B: POST ?action=signal (Answer{sdp}) ──────────────►│──── enqueue for A
+                  B: send {type: "signal", to: "A",                    │
+                           payload: Answer{sdp}} ─────────────────────►│
+◄──── push to A ─────────────────────────────│                         │
                   B: ICE candidates discovered                         │
-                  B: POST ?action=signal (IceCandidate) ─────────────►│──── enqueue for A
-                                             │
-A polls: GET ?action=poll ──────────────────►│
-◄── { messages: [Answer{sdp}, IceCandidate...] } ────────────────────│
+                  B: send {type: "signal", to: "A",                    │
+                           payload: IceCandidate} ────────────────────►│
+◄──── push to A ─────────────────────────────│
                                              │
 A: handle_answer() → sets remote description │
 A: adds ICE candidates                       │
@@ -489,7 +497,7 @@ After `re_initiate()`, the new connection must go through the full ICE + DataCha
 
 ### Signaling reconnection
 
-When `poll_signaling()` returns `Ok(None)` (the signaling channel closed), the session enters a **signaling reconnection loop** that runs *inside* the `tokio::select!` arm (blocking the other arms):
+When `poll_signaling()` returns `Ok(None)` (the signaling WebSocket closed), the session enters a **signaling reconnection loop** that runs *inside* the `tokio::select!` arm (blocking the other arms):
 
 ```
 Ok(None) from poll_signaling
@@ -630,9 +638,9 @@ let ice = match wail_net::fetch_metered_ice_servers().await {
 ```
 But individual peer reconnections (PeerFailed → re_initiate) do not. The mesh holds its `ice_servers` from construction time.
 
-### H. Outgoing signal queue drains at most 5 per poll tick
+### H. WebSocket signaling throughput
 
-The polling loop processes at most 5 outgoing signals per tick (5-second interval). If ICE negotiation with many peers generates more than 5 signals (e.g., 3 peers × 3 ICE candidates = 9), the 6th–9th signals are deferred to the next poll tick (5 seconds later). This significantly slows down connection setup in larger rooms.
+With the WebSocket signaling server, signals are delivered instantly (no polling delay). This eliminates the previous bottleneck where at most 5 outgoing signals were processed per 5-second poll tick.
 
 ### I. Liveness watchdog peer seeding (fixed)
 

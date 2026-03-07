@@ -29,8 +29,8 @@ crates/
 
 xtask/                   Build tasks (build-plugin, install-plugin, build-tauri, etc.)
 
-val-town/
-└── main.ts              HTTP signaling server (deployed to Val Town)
+signaling-server/
+└── main.go              WebSocket signaling server (Go + SQLite, deployed to fly.io)
 
 vendor/
 └── link/                Ableton Link 4.0.0 beta SDK (git submodule)

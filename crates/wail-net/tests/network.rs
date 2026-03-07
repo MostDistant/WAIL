@@ -32,14 +32,14 @@ async fn two_peers_exchange_audio_over_webrtc() {
     //    "peer-a" < "peer-b" → peer-a will be the WebRTC initiator
     let ice = wail_net::default_ice_servers();
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
-        PeerMesh::connect_with_options(&server_url, "test-room", "peer-a", Some("test"), ice.clone(), 200)
+        PeerMesh::connect_with_ice(&server_url, "test-room", "peer-a", Some("test"), ice.clone())
             .await
             .expect("Peer A failed to connect to signaling");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
-        PeerMesh::connect_with_options(&server_url, "test-room", "peer-b", Some("test"), ice, 200)
+        PeerMesh::connect_with_ice(&server_url, "test-room", "peer-b", Some("test"), ice)
             .await
             .expect("Peer B failed to connect to signaling");
 
@@ -110,14 +110,14 @@ async fn audio_dc_reports_open_after_connection() {
 
     let ice = wail_net::default_ice_servers();
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
-        PeerMesh::connect_with_options(&server_url, "test-room", "peer-a", Some("test"), ice.clone(), 200)
+        PeerMesh::connect_with_ice(&server_url, "test-room", "peer-a", Some("test"), ice.clone())
             .await
             .expect("Peer A failed to connect");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
-        PeerMesh::connect_with_options(&server_url, "test-room", "peer-b", Some("test"), ice, 200)
+        PeerMesh::connect_with_ice(&server_url, "test-room", "peer-b", Some("test"), ice)
             .await
             .expect("Peer B failed to connect");
 
@@ -278,8 +278,8 @@ async fn two_peers_exchange_audio_via_turn() {
 
     // 3. Connect both peers using TURN (fast polling for tests)
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
-        PeerMesh::connect_with_options(
-            &server_url, "test-room", "peer-a", Some("test"), ice_servers.clone(), 200,
+        PeerMesh::connect_with_ice(
+            &server_url, "test-room", "peer-a", Some("test"), ice_servers.clone(),
         )
             .await
             .expect("Peer A failed to connect to signaling");
@@ -287,8 +287,8 @@ async fn two_peers_exchange_audio_via_turn() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
-        PeerMesh::connect_with_options(
-            &server_url, "test-room", "peer-b", Some("test"), ice_servers, 200,
+        PeerMesh::connect_with_ice(
+            &server_url, "test-room", "peer-b", Some("test"), ice_servers,
         )
             .await
             .expect("Peer B failed to connect to signaling");
@@ -415,7 +415,7 @@ async fn metered_turn_relay_live() {
     // 3. Connect both peers in relay-only mode (forces TURN, no host/srflx candidates)
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
         PeerMesh::connect_full(
-            &server_url, "turn-test", "peer-a", Some("test"), ice_servers.clone(), 200, true, 1, None,
+            &server_url, "turn-test", "peer-a", Some("test"), ice_servers.clone(), true, 1, None,
         )
             .await
             .expect("Peer A failed to connect to signaling");
@@ -424,7 +424,7 @@ async fn metered_turn_relay_live() {
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
         PeerMesh::connect_full(
-            &server_url, "turn-test", "peer-b", Some("test"), ice_servers, 200, true, 1, None,
+            &server_url, "turn-test", "peer-b", Some("test"), ice_servers, true, 1, None,
         )
             .await
             .expect("Peer B failed to connect to signaling");
@@ -540,15 +540,15 @@ async fn peer_failure_detected_within_timeout() {
     let ice = wail_net::default_ice_servers();
 
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
-        PeerMesh::connect_with_options(
-            &server_url, "dc-close-test", "peer-a", Some("test"), ice.clone(), 200,
+        PeerMesh::connect_with_ice(
+            &server_url, "dc-close-test", "peer-a", Some("test"), ice.clone(),
         ).await.expect("Peer A connect failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
-        PeerMesh::connect_with_options(
-            &server_url, "dc-close-test", "peer-b", Some("test"), ice, 200,
+        PeerMesh::connect_with_ice(
+            &server_url, "dc-close-test", "peer-b", Some("test"), ice,
         ).await.expect("Peer B connect failed");
 
     establish_connection(&mut mesh_a, &mut mesh_b).await;
@@ -643,17 +643,17 @@ async fn peer_failure_emits_event() {
     let server_url = start_test_signaling_server().await;
 
     let (mut mesh_a, _sync_rx_a, _audio_rx_a) =
-        PeerMesh::connect_with_options(
+        PeerMesh::connect_with_ice(
             &server_url, "fail-test", "peer-a", Some("test"),
-            wail_net::default_ice_servers(), 200,
+            wail_net::default_ice_servers(),
         ).await.expect("Peer A connect failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut mesh_b, _sync_rx_b, _audio_rx_b) =
-        PeerMesh::connect_with_options(
+        PeerMesh::connect_with_ice(
             &server_url, "fail-test", "peer-b", Some("test"),
-            wail_net::default_ice_servers(), 200,
+            wail_net::default_ice_servers(),
         ).await.expect("Peer B connect failed");
 
     // 2. Establish WebRTC connection
@@ -700,17 +700,17 @@ async fn peer_reconnects_after_close() {
     let server_url = start_test_signaling_server().await;
 
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
-        PeerMesh::connect_with_options(
+        PeerMesh::connect_with_ice(
             &server_url, "reconn-test", "peer-a", Some("test"),
-            wail_net::default_ice_servers(), 200,
+            wail_net::default_ice_servers(),
         ).await.expect("Peer A connect failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
-        PeerMesh::connect_with_options(
+        PeerMesh::connect_with_ice(
             &server_url, "reconn-test", "peer-b", Some("test"),
-            wail_net::default_ice_servers(), 200,
+            wail_net::default_ice_servers(),
         ).await.expect("Peer B connect failed");
 
     establish_connection(&mut mesh_a, &mut mesh_b).await;
@@ -761,17 +761,17 @@ async fn new_offer_replaces_stale_connection() {
     let server_url = start_test_signaling_server().await;
 
     let (mut mesh_a, _sync_rx_a, mut audio_rx_a) =
-        PeerMesh::connect_with_options(
+        PeerMesh::connect_with_ice(
             &server_url, "stale-test", "peer-a", Some("test"),
-            wail_net::default_ice_servers(), 200,
+            wail_net::default_ice_servers(),
         ).await.expect("Peer A connect failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (mut mesh_b, _sync_rx_b, mut audio_rx_b) =
-        PeerMesh::connect_with_options(
+        PeerMesh::connect_with_ice(
             &server_url, "stale-test", "peer-b", Some("test"),
-            wail_net::default_ice_servers(), 200,
+            wail_net::default_ice_servers(),
         ).await.expect("Peer B connect failed");
 
     establish_connection(&mut mesh_a, &mut mesh_b).await;
@@ -820,24 +820,24 @@ async fn three_peers_exchange_audio() {
 
     // Lexicographic order: peer-a < peer-b < peer-c
     // peer-a initiates to peer-b and peer-c; peer-b initiates to peer-c.
-    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) = PeerMesh::connect_with_options(
-        &server_url, "three-room", "peer-a", None, ice.clone(), 200,
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) = PeerMesh::connect_with_ice(
+        &server_url, "three-room", "peer-a", None, ice.clone(),
     )
     .await
     .expect("peer-a connect failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) = PeerMesh::connect_with_options(
-        &server_url, "three-room", "peer-b", None, ice.clone(), 200,
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) = PeerMesh::connect_with_ice(
+        &server_url, "three-room", "peer-b", None, ice.clone(),
     )
     .await
     .expect("peer-b connect failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (mut mesh_c, _sync_rx_c, mut audio_rx_c) = PeerMesh::connect_with_options(
-        &server_url, "three-room", "peer-c", None, ice.clone(), 200,
+    let (mut mesh_c, _sync_rx_c, mut audio_rx_c) = PeerMesh::connect_with_ice(
+        &server_url, "three-room", "peer-c", None, ice.clone(),
     )
     .await
     .expect("peer-c connect failed");
@@ -892,20 +892,20 @@ async fn one_peer_leaves_three_peer_room_others_continue() {
     let server_url = start_test_signaling_server().await;
     let ice = wail_net::default_ice_servers();
 
-    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) = PeerMesh::connect_with_options(
-        &server_url, "leave-room", "peer-a", None, ice.clone(), 200,
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) = PeerMesh::connect_with_ice(
+        &server_url, "leave-room", "peer-a", None, ice.clone(),
     ).await.expect("peer-a failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) = PeerMesh::connect_with_options(
-        &server_url, "leave-room", "peer-b", None, ice.clone(), 200,
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) = PeerMesh::connect_with_ice(
+        &server_url, "leave-room", "peer-b", None, ice.clone(),
     ).await.expect("peer-b failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (mut mesh_c, _sync_rx_c, _audio_rx_c) = PeerMesh::connect_with_options(
-        &server_url, "leave-room", "peer-c", None, ice.clone(), 200,
+    let (mut mesh_c, _sync_rx_c, _audio_rx_c) = PeerMesh::connect_with_ice(
+        &server_url, "leave-room", "peer-c", None, ice.clone(),
     ).await.expect("peer-c failed");
 
     establish_three_way_connection(&mut mesh_a, &mut mesh_b, &mut mesh_c, ("peer-a", "peer-b", "peer-c")).await;
@@ -958,14 +958,14 @@ async fn duplicate_peer_failed_signals_deduplicated() {
     let server_url = start_test_signaling_server().await;
     let ice = wail_net::default_ice_servers();
 
-    let (mut mesh_a, _sync_rx_a, _audio_rx_a) = PeerMesh::connect_with_options(
-        &server_url, "dedup-fail-room", "peer-a", None, ice.clone(), 200,
+    let (mut mesh_a, _sync_rx_a, _audio_rx_a) = PeerMesh::connect_with_ice(
+        &server_url, "dedup-fail-room", "peer-a", None, ice.clone(),
     ).await.expect("peer-a failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (mut mesh_b, _sync_rx_b, _audio_rx_b) = PeerMesh::connect_with_options(
-        &server_url, "dedup-fail-room", "peer-b", None, ice, 200,
+    let (mut mesh_b, _sync_rx_b, _audio_rx_b) = PeerMesh::connect_with_ice(
+        &server_url, "dedup-fail-room", "peer-b", None, ice,
     ).await.expect("peer-b failed");
 
     establish_connection(&mut mesh_a, &mut mesh_b).await;
@@ -1040,14 +1040,14 @@ async fn higher_id_re_initiate_does_not_create_offer() {
     let ice = wail_net::default_ice_servers();
 
     // peer-a < peer-b → peer-a is the initiator
-    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) = PeerMesh::connect_with_options(
-        &server_url, "tie-room", "peer-a", None, ice.clone(), 200,
+    let (mut mesh_a, _sync_rx_a, mut audio_rx_a) = PeerMesh::connect_with_ice(
+        &server_url, "tie-room", "peer-a", None, ice.clone(),
     ).await.expect("peer-a failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) = PeerMesh::connect_with_options(
-        &server_url, "tie-room", "peer-b", None, ice, 200,
+    let (mut mesh_b, _sync_rx_b, mut audio_rx_b) = PeerMesh::connect_with_ice(
+        &server_url, "tie-room", "peer-b", None, ice,
     ).await.expect("peer-b failed");
 
     establish_connection(&mut mesh_a, &mut mesh_b).await;
@@ -1103,16 +1103,16 @@ async fn single_failure_produces_bounded_peer_failed_events() {
     let server_url = start_test_signaling_server().await;
     let ice = wail_net::default_ice_servers();
 
-    let (mut mesh_a, _sync_a, _audio_a) = PeerMesh::connect_with_options(
-        &server_url, "bounded-fail-room", "peer-a", None, ice.clone(), 200,
+    let (mut mesh_a, _sync_a, _audio_a) = PeerMesh::connect_with_ice(
+        &server_url, "bounded-fail-room", "peer-a", None, ice.clone(),
     )
     .await
     .expect("peer-a connect failed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (mut mesh_b, _sync_b, _audio_b) = PeerMesh::connect_with_options(
-        &server_url, "bounded-fail-room", "peer-b", None, ice, 200,
+    let (mut mesh_b, _sync_b, _audio_b) = PeerMesh::connect_with_ice(
+        &server_url, "bounded-fail-room", "peer-b", None, ice,
     )
     .await
     .expect("peer-b connect failed");

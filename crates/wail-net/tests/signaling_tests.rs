@@ -25,9 +25,9 @@ async fn join_old_client_version_rejected_426() {
     })
     .await;
 
-    let result = PeerMesh::connect_with_options(
+    let result = PeerMesh::connect_with_ice(
         &server.url, "room", "peer-a", None,
-        wail_net::default_ice_servers(), 200,
+        wail_net::default_ice_servers(),
     )
     .await;
 
@@ -51,9 +51,9 @@ async fn join_exact_minimum_version_accepted() {
     })
     .await;
 
-    let result = PeerMesh::connect_with_options(
+    let result = PeerMesh::connect_with_ice(
         &server.url, "room", "peer-a", None,
-        wail_net::default_ice_servers(), 200,
+        wail_net::default_ice_servers(),
     )
     .await;
 
@@ -71,9 +71,9 @@ async fn join_wrong_password_rejected_401() {
     })
     .await;
 
-    let result = PeerMesh::connect_with_options(
+    let result = PeerMesh::connect_with_ice(
         &server.url, "room", "peer-a", Some("wrong-password"),
-        wail_net::default_ice_servers(), 200,
+        wail_net::default_ice_servers(),
     )
     .await;
 
@@ -96,9 +96,9 @@ async fn join_correct_password_accepted() {
     })
     .await;
 
-    let result = PeerMesh::connect_with_options(
+    let result = PeerMesh::connect_with_ice(
         &server.url, "room", "peer-a", Some("secret"),
-        wail_net::default_ice_servers(), 200,
+        wail_net::default_ice_servers(),
     )
     .await;
 
@@ -118,17 +118,18 @@ async fn join_full_room_rejected_409() {
     .await;
 
     // peer-a joins (stream_count = 1 → fills the only slot)
-    let _ = PeerMesh::connect_with_options(
+    // Must keep _mesh_a alive so peer-a doesn't leave the room before peer-b joins.
+    let _mesh_a = PeerMesh::connect_with_ice(
         &server.url, "room", "peer-a", None,
-        wail_net::default_ice_servers(), 200,
+        wail_net::default_ice_servers(),
     )
     .await
     .expect("peer-a should join the non-full room");
 
     // peer-b is rejected
-    let result = PeerMesh::connect_with_options(
+    let result = PeerMesh::connect_with_ice(
         &server.url, "room", "peer-b", None,
-        wail_net::default_ice_servers(), 200,
+        wail_net::default_ice_servers(),
     )
     .await;
 
@@ -149,8 +150,8 @@ async fn join_display_name_forwarded_in_peer_joined() {
     let ice = wail_net::default_ice_servers();
 
     // peer-a joins first (no display name)
-    let (mut mesh_a, mut sync_rx_a, _audio_rx_a) = PeerMesh::connect_with_options(
-        &server.url, "room", "peer-a", None, ice.clone(), 200,
+    let (mut mesh_a, mut sync_rx_a, _audio_rx_a) = PeerMesh::connect_with_ice(
+        &server.url, "room", "peer-a", None, ice.clone(),
     )
     .await
     .expect("peer-a join failed");
@@ -159,7 +160,7 @@ async fn join_display_name_forwarded_in_peer_joined() {
 
     // peer-b joins with display name "Bob"
     let (_mesh_b, _sync_rx_b, _audio_rx_b) = PeerMesh::connect_full(
-        &server.url, "room", "peer-b", None, ice, 200, false, 1, Some("Bob"),
+        &server.url, "room", "peer-b", None, ice, false, 1, Some("Bob"),
     )
     .await
     .expect("peer-b join failed");
@@ -190,8 +191,8 @@ async fn join_display_name_forwarded_in_peer_joined() {
     // The PeerJoined handling in PeerMesh emits a MeshEvent::PeerJoined{display_name}.
     // Re-connect with a fresh mesh to inspect:
     let ice2 = wail_net::default_ice_servers();
-    let (mesh_c, _sync_rx_c, _) = PeerMesh::connect_with_options(
-        &server.url, "room", "peer-c", None, ice2, 200,
+    let (mesh_c, _sync_rx_c, _) = PeerMesh::connect_with_ice(
+        &server.url, "room", "peer-c", None, ice2,
     )
     .await
     .expect("peer-c join failed");
@@ -216,9 +217,9 @@ async fn room_recreatable_after_last_peer_leaves() {
 
     // peer-a joins with the correct password, then we simulate it leaving
     // by just dropping the mesh (the signaling client sends leave on drop).
-    let (mesh_a, _, _) = PeerMesh::connect_with_options(
+    let (mesh_a, _, _) = PeerMesh::connect_with_ice(
         &server.url, "room", "peer-a", Some("first-password"),
-        wail_net::default_ice_servers(), 200,
+        wail_net::default_ice_servers(),
     )
     .await
     .expect("peer-a should join with first-password");
@@ -246,9 +247,9 @@ async fn room_recreatable_after_last_peer_leaves() {
     })
     .await;
 
-    let result = PeerMesh::connect_with_options(
+    let result = PeerMesh::connect_with_ice(
         &server2.url, "fresh-room", "peer-b", Some("new-password"),
-        wail_net::default_ice_servers(), 200,
+        wail_net::default_ice_servers(),
     )
     .await;
     assert!(result.is_ok(), "New peer should create room with new password");
@@ -269,7 +270,7 @@ async fn stream_count_consumes_multiple_slots() {
     // peer-a joins with stream_count = 3 → uses 3 of 4 slots
     let result_a = PeerMesh::connect_full(
         &server.url, "room", "peer-a", None,
-        wail_net::default_ice_servers(), 200, false, 3, None,
+        wail_net::default_ice_servers(), false, 3, None,
     )
     .await;
     assert!(result_a.is_ok(), "peer-a (3 streams) should fit in capacity-4 room");
@@ -277,7 +278,7 @@ async fn stream_count_consumes_multiple_slots() {
     // peer-b with stream_count = 2 → needs 2 slots, only 1 available → rejected
     let result_b = PeerMesh::connect_full(
         &server.url, "room", "peer-b", None,
-        wail_net::default_ice_servers(), 200, false, 2, None,
+        wail_net::default_ice_servers(), false, 2, None,
     )
     .await;
     assert!(result_b.is_err(), "peer-b (2 streams) should be rejected (only 1 slot left)");
@@ -285,7 +286,7 @@ async fn stream_count_consumes_multiple_slots() {
     // peer-c with stream_count = 1 → fits in the last slot → accepted
     let result_c = PeerMesh::connect_full(
         &server.url, "room", "peer-c", None,
-        wail_net::default_ice_servers(), 200, false, 1, None,
+        wail_net::default_ice_servers(), false, 1, None,
     )
     .await;
     assert!(result_c.is_ok(), "peer-c (1 stream) should fit in the remaining slot");
@@ -308,14 +309,14 @@ async fn poll_after_sequence_prevents_duplicates() {
     let server_url = common::start_test_signaling_server().await;
     let ice = wail_net::default_ice_servers();
 
-    let (mut mesh_a, _, _) = PeerMesh::connect_with_options(
-        &server_url, "dedup-room", "peer-a", None, ice.clone(), 200,
+    let (mut mesh_a, _, _) = PeerMesh::connect_with_ice(
+        &server_url, "dedup-room", "peer-a", None, ice.clone(),
     )
     .await
     .expect("peer-a failed");
 
-    let (mut mesh_b, _, _) = PeerMesh::connect_with_options(
-        &server_url, "dedup-room", "peer-b", None, ice.clone(), 200,
+    let (mut mesh_b, _, _) = PeerMesh::connect_with_ice(
+        &server_url, "dedup-room", "peer-b", None, ice.clone(),
     )
     .await
     .expect("peer-b failed");
@@ -325,8 +326,8 @@ async fn poll_after_sequence_prevents_duplicates() {
     // peer-c joins after peer-b is already polling → peer-b must see PeerJoined
     // for peer-c via a signaling poll (not from the join response), and must see
     // it exactly once across many poll ticks.
-    let (mut mesh_c, _, _) = PeerMesh::connect_with_options(
-        &server_url, "dedup-room", "peer-c", None, ice, 200,
+    let (mut mesh_c, _, _) = PeerMesh::connect_with_ice(
+        &server_url, "dedup-room", "peer-c", None, ice,
     )
     .await
     .expect("peer-c failed");
@@ -369,8 +370,8 @@ async fn evicted_peer_signaling_channel_closes() {
     let server = start_configured_signaling_server(TestServerConfig::default()).await;
     let ice = wail_net::default_ice_servers();
 
-    let (mut mesh_a, _, _) = PeerMesh::connect_with_options(
-        &server.url, "evict-room", "peer-a", None, ice, 200,
+    let (mut mesh_a, _, _) = PeerMesh::connect_with_ice(
+        &server.url, "evict-room", "peer-a", None, ice,
     )
     .await
     .expect("peer-a failed to join");

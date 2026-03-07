@@ -11,6 +11,8 @@ webrtc-ice = "0.11"
 bytes = "1"
 tokio = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
@@ -18,6 +20,7 @@ uuid = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
+futures-util = "0.3"
 md5 = "0.7"
 tracing-subscriber = { workspace = true }

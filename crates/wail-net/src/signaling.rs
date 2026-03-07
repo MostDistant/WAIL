@@ -1,15 +1,15 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 use anyhow::Result;
-use reqwest::Client;
+use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
 use wail_core::protocol::SignalMessage;
 
-/// HTTP polling signaling client that connects to a Val Town HTTP endpoint,
-/// joins a room, and relays WebRTC signaling messages via polling.
+/// WebSocket signaling client that connects to the WAIL signaling server,
+/// joins a room, and relays WebRTC signaling messages in real time.
 pub struct SignalingClient {
     pub incoming_rx: mpsc::UnboundedReceiver<SignalMessage>,
     pub outgoing_tx: mpsc::UnboundedSender<SignalMessage>,
@@ -22,6 +22,7 @@ pub struct PublicRoom {
     pub created_at: i64,
     pub peer_count: u32,
     pub display_names: Vec<String>,
+    #[serde(default)]
     pub bpm: Option<f64>,
 }
 
@@ -31,11 +32,16 @@ struct ListResponse {
 }
 
 /// Fetch the list of public rooms from a signaling server.
+///
+/// Uses the HTTP `/rooms` endpoint (not WebSocket).
 pub async fn list_public_rooms(base_url: &str) -> Result<Vec<PublicRoom>> {
-    let client = Client::new();
-    let base = base_url.trim_end_matches('/');
-    let resp = client
-        .get(format!("{base}/?action=list"))
+    // Convert ws(s):// to http(s):// for the REST endpoint
+    let http_url = base_url
+        .replace("wss://", "https://")
+        .replace("ws://", "http://");
+    let base = http_url.trim_end_matches('/');
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/rooms"))
         .send()
         .await?
         .error_for_status()?;
@@ -43,112 +49,138 @@ pub async fn list_public_rooms(base_url: &str) -> Result<Vec<PublicRoom>> {
     Ok(list.rooms)
 }
 
-/// Response from the `?action=join` endpoint.
+/// Server response to a join request.
 #[derive(serde::Deserialize)]
-struct JoinResponse {
-    peers: Vec<String>,
-    /// Map of peer_id → display_name for existing peers (new servers only).
-    #[serde(default)]
-    peer_display_names: HashMap<String, Option<String>>,
-}
-
-/// A single queued message returned by `?action=poll`.
-#[derive(serde::Deserialize)]
-struct PollMessage {
-    seq: i64,
-    body: SignalMessage,
-}
-
-/// Response from the `?action=poll` endpoint.
-#[derive(serde::Deserialize)]
-struct PollResponse {
-    messages: Vec<PollMessage>,
-    /// Set to `true` by the server when this peer has been evicted (stale heartbeat).
-    #[serde(default)]
-    evicted: bool,
+#[serde(tag = "type")]
+enum ServerMsg {
+    #[serde(rename = "join_ok")]
+    JoinOk {
+        peers: Vec<String>,
+        #[serde(default)]
+        peer_display_names: HashMap<String, Option<String>>,
+    },
+    #[serde(rename = "join_error")]
+    JoinError {
+        code: String,
+        #[serde(default)]
+        min_version: Option<String>,
+        #[serde(default)]
+        slots_available: Option<u64>,
+    },
+    #[serde(rename = "peer_joined")]
+    PeerJoined {
+        peer_id: String,
+        display_name: Option<String>,
+    },
+    #[serde(rename = "peer_left")]
+    PeerLeft {
+        peer_id: String,
+    },
+    #[serde(rename = "signal")]
+    Signal {
+        to: String,
+        from: String,
+        payload: serde_json::Value,
+    },
+    #[serde(rename = "evicted")]
+    Evicted,
 }
 
 impl SignalingClient {
-    /// Connect to the HTTP signaling server and join a room.
-    ///
-    /// Sends a `join` request, then spawns a background polling loop that:
-    /// - Drains outgoing signals and POSTs them as `?action=signal`
-    /// - Polls `?action=poll` at the configured interval
-    ///
-    /// Pass `None` for `password` to create/join a public room.
-    pub async fn connect(base_url: &str, room: &str, peer_id: &str, password: Option<&str>) -> Result<(Self, HashMap<String, Option<String>>)> {
-        Self::connect_with_poll_interval(base_url, room, peer_id, password, 5_000).await
-    }
-
-    /// Connect with a custom poll interval (milliseconds).
-    pub async fn connect_with_poll_interval(
-        base_url: &str,
+    /// Connect to the WebSocket signaling server and join a room.
+    pub async fn connect(
+        server_url: &str,
         room: &str,
         peer_id: &str,
         password: Option<&str>,
-        poll_interval_ms: u64,
     ) -> Result<(Self, HashMap<String, Option<String>>)> {
-        Self::connect_with_options(base_url, room, peer_id, password, poll_interval_ms, 1, None).await
+        Self::connect_with_options(server_url, room, peer_id, password, 1, None).await
     }
 
     /// Connect with full options including stream count and display name.
     pub async fn connect_with_options(
-        base_url: &str,
+        server_url: &str,
         room: &str,
         peer_id: &str,
         password: Option<&str>,
-        poll_interval_ms: u64,
         stream_count: u16,
         display_name: Option<&str>,
     ) -> Result<(Self, HashMap<String, Option<String>>)> {
-        let client = Client::new();
-        let base = base_url.trim_end_matches('/').to_string();
+        // Build WebSocket URL
+        let ws_url = format!("{}/ws", server_url.trim_end_matches('/'));
 
-        // POST ?action=join
-        let mut body = serde_json::json!({
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await?;
+        let (mut ws_write, mut ws_read) = ws_stream.split();
+
+        // Send join message
+        let mut join_msg = serde_json::json!({
+            "type": "join",
             "room": room,
             "peer_id": peer_id,
             "stream_count": stream_count,
             "client_version": env!("CARGO_PKG_VERSION"),
         });
         if let Some(pw) = password {
-            body["password"] = serde_json::Value::String(pw.to_string());
+            join_msg["password"] = serde_json::Value::String(pw.to_string());
         }
         if let Some(name) = display_name {
-            body["display_name"] = serde_json::Value::String(name.to_string());
+            join_msg["display_name"] = serde_json::Value::String(name.to_string());
         }
-        let resp = client
-            .post(format!("{base}/?action=join"))
-            .json(&body)
-            .send()
+        ws_write
+            .send(Message::Text(join_msg.to_string()))
             .await?;
 
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            anyhow::bail!("Invalid room password — the room exists and the password doesn't match");
-        }
+        // Wait for join_ok or join_error
+        let join_response = loop {
+            match ws_read.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    break serde_json::from_str::<ServerMsg>(&text)?;
+                }
+                Some(Ok(Message::Close(_))) | None => {
+                    anyhow::bail!("WebSocket closed before join response");
+                }
+                Some(Err(e)) => {
+                    anyhow::bail!("WebSocket error waiting for join response: {e}");
+                }
+                _ => continue, // skip ping/pong/binary
+            }
+        };
 
-        if resp.status() == reqwest::StatusCode::CONFLICT {
-            let error_body: serde_json::Value = resp.json().await.unwrap_or_default();
-            let slots = error_body["slots_available"].as_u64().unwrap_or(0);
-            anyhow::bail!("Room full — only {slots} stream slots available");
-        }
-
-        if resp.status() == reqwest::StatusCode::UPGRADE_REQUIRED {
-            let error_body: serde_json::Value = resp.json().await.unwrap_or_default();
-            let min_version = error_body["min_version"].as_str().unwrap_or("unknown");
-            anyhow::bail!(
-                "Your WAIL version ({}) is outdated. Please update to at least version {min_version}.",
-                env!("CARGO_PKG_VERSION")
-            );
-        }
-
-        let join_resp: JoinResponse = resp.error_for_status()?.json().await?;
-        let initial_peer_names = join_resp.peer_display_names;
+        let (peers, initial_peer_names) = match join_response {
+            ServerMsg::JoinOk {
+                peers,
+                peer_display_names,
+            } => (peers, peer_display_names),
+            ServerMsg::JoinError {
+                code,
+                min_version,
+                slots_available,
+            } => match code.as_str() {
+                "unauthorized" => {
+                    anyhow::bail!(
+                        "Invalid room password — the room exists and the password doesn't match"
+                    );
+                }
+                "room_full" => {
+                    let slots = slots_available.unwrap_or(0);
+                    anyhow::bail!("Room full — only {slots} stream slots available");
+                }
+                "version_outdated" => {
+                    let min = min_version.as_deref().unwrap_or("unknown");
+                    anyhow::bail!(
+                        "Your WAIL version ({}) is outdated. Please update to at least version {min}.",
+                        env!("CARGO_PKG_VERSION")
+                    );
+                }
+                other => anyhow::bail!("Join failed: {other}"),
+            },
+            _ => anyhow::bail!("Unexpected server message before join_ok"),
+        };
 
         info!(
-            %base_url, %room, %peer_id,
-            existing_peers = join_resp.peers.len(),
-            "Joined signaling room via HTTP"
+            %server_url, %room, %peer_id,
+            existing_peers = peers.len(),
+            "Joined signaling room via WebSocket"
         );
 
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
@@ -157,118 +189,109 @@ impl SignalingClient {
         // Push PeerList so PeerMesh sees existing peers
         if incoming_tx
             .send(SignalMessage::PeerList {
-                peers: join_resp.peers,
+                peers,
             })
             .is_err()
         {
             anyhow::bail!("incoming channel closed immediately");
         }
 
-        // Spawn polling loop
-        let poll_room = room.to_string();
-        let poll_peer = peer_id.to_string();
+        // Spawn read task: server → incoming channel
+        let incoming_tx2 = incoming_tx.clone();
         tokio::spawn(async move {
-            let mut last_seq: i64 = 0;
-            let base_poll_ms: u64 = poll_interval_ms;
-            let mut current_poll_ms: u64 = base_poll_ms;
-            let max_backoff_ms: u64 = 30_000;
-
-            loop {
-                tokio::time::sleep(Duration::from_millis(current_poll_ms)).await;
-
-                // Drain all pending outgoing signals and POST them (batch up to 5 per tick)
-                let mut sent = 0;
-                loop {
-                    if sent >= 5 {
-                        break;
-                    }
-                    match outgoing_rx.try_recv() {
-                        Ok(msg) => {
-                            debug!(?msg, "Sending signal via HTTP");
-                            let res = client
-                                .post(format!("{base}/?action=signal"))
-                                .json(&msg)
-                                .send()
-                                .await;
-                            match res {
-                                Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                                    warn!("Rate limited on signal POST, backing off");
-                                    current_poll_ms = (current_poll_ms * 2).min(max_backoff_ms);
-                                    break;
-                                }
-                                Ok(_) => {}
-                                Err(e) => {
-                                    warn!(error = %e, "Failed to POST signal");
-                                }
-                            }
-                            sent += 1;
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            // Outgoing channel closed — send leave and exit
-                            info!("Outgoing channel closed, sending leave");
-                            let _ = client
-                                .post(format!("{base}/?action=leave"))
-                                .json(&serde_json::json!({
-                                    "room": poll_room,
-                                    "peer_id": poll_peer,
-                                }))
-                                .send()
-                                .await;
-                            return;
-                        }
-                    }
-                }
-
-                // GET ?action=poll
-                let poll_url = format!(
-                    "{base}/?action=poll&room={}&peer_id={}&after={}",
-                    poll_room, poll_peer, last_seq
-                );
-                match client.get(&poll_url).send().await {
-                    Ok(resp) if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                        current_poll_ms = (current_poll_ms * 2).min(max_backoff_ms);
-                        warn!(backoff_ms = current_poll_ms, "Rate limited, backing off");
-                    }
-                    Ok(resp) => {
-                        // Successful response — restore base interval
-                        current_poll_ms = base_poll_ms;
-
-                        let text = match resp.text().await {
-                            Ok(t) => t,
-                            Err(e) => {
-                                warn!(error = %e, "Failed to read poll response body");
-                                continue;
-                            }
-                        };
-                        match serde_json::from_str::<PollResponse>(&text) {
-                            Ok(poll) => {
-                                if poll.evicted {
-                                    warn!("Server indicates peer was evicted (stale heartbeat) — triggering reconnection");
-                                    return; // Drop incoming_tx, closing the channel → session sees Ok(None)
-                                }
-                                for pm in poll.messages {
-                                    if pm.seq > last_seq {
-                                        last_seq = pm.seq;
+            while let Some(msg_result) = ws_read.next().await {
+                match msg_result {
+                    Ok(Message::Text(text)) => {
+                        match serde_json::from_str::<ServerMsg>(&text) {
+                            Ok(server_msg) => {
+                                let signal = match server_msg {
+                                    ServerMsg::PeerJoined {
+                                        peer_id,
+                                        display_name,
+                                    } => SignalMessage::PeerJoined {
+                                        peer_id,
+                                        display_name,
+                                    },
+                                    ServerMsg::PeerLeft { peer_id } => {
+                                        SignalMessage::PeerLeft { peer_id }
                                     }
-                                    debug!(?pm.body, seq = pm.seq, "Poll received");
-                                    if incoming_tx.send(pm.body).is_err() {
-                                        info!("Incoming channel closed, stopping poll loop");
+                                    ServerMsg::Signal { to, from, payload } => {
+                                        // Reconstruct SignalPayload from the raw JSON
+                                        match serde_json::from_value(payload) {
+                                            Ok(p) => SignalMessage::Signal { to, from, payload: p },
+                                            Err(e) => {
+                                                warn!(error = %e, "Failed to parse signal payload");
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    ServerMsg::Evicted => {
+                                        warn!("Server evicted us — closing signaling");
                                         return;
                                     }
+                                    _ => continue,
+                                };
+                                debug!(?signal, "WS received");
+                                if incoming_tx2.send(signal).is_err() {
+                                    info!("Incoming channel closed, stopping WS read");
+                                    return;
                                 }
                             }
                             Err(e) => {
-                                warn!(error = %e, body = %text, "Failed to parse poll response");
+                                warn!(error = %e, body = %text, "Failed to parse server message");
                             }
                         }
                     }
-                    Err(e) => {
-                        error!(error = %e, "Poll request failed");
-                        current_poll_ms = (current_poll_ms * 2).min(max_backoff_ms);
+                    Ok(Message::Close(_)) => {
+                        info!("WebSocket closed by server");
+                        return;
                     }
+                    Err(e) => {
+                        error!(error = %e, "WebSocket read error");
+                        return;
+                    }
+                    _ => {} // ping/pong handled by tungstenite
                 }
             }
+            info!("WebSocket stream ended");
+        });
+
+        // Spawn write task: outgoing channel → server
+        tokio::spawn(async move {
+            while let Some(msg) = outgoing_rx.recv().await {
+                debug!(?msg, "Sending signal via WS");
+                let raw = serde_json::json!({
+                    "type": "signal",
+                    "to": match &msg {
+                        SignalMessage::Signal { to, .. } => to.as_str(),
+                        _ => "",
+                    },
+                    "from": match &msg {
+                        SignalMessage::Signal { from, .. } => from.as_str(),
+                        _ => "",
+                    },
+                    "payload": match &msg {
+                        SignalMessage::Signal { payload, .. } => serde_json::to_value(payload).unwrap_or_default(),
+                        _ => serde_json::Value::Null,
+                    },
+                });
+                if ws_write
+                    .send(Message::Text(raw.to_string()))
+                    .await
+                    .is_err()
+                {
+                    warn!("WebSocket write failed — connection lost");
+                    return;
+                }
+            }
+            // Outgoing channel closed — send leave
+            info!("Outgoing channel closed, sending leave");
+            let _ = ws_write
+                .send(Message::Text(
+                    serde_json::json!({"type": "leave"}).to_string(),
+                ))
+                .await;
+            let _ = ws_write.close().await;
         });
 
         Ok((

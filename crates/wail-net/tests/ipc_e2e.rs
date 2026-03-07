@@ -33,16 +33,14 @@ async fn mini_app_session(
     room: String,
     peer_id: String,
     password: String,
-    poll_interval_ms: u64,
 ) {
     let ice = wail_net::default_ice_servers();
-    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_with_options(
+    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_with_ice(
         &signaling_url,
         &room,
         &peer_id,
         Some(password.as_str()),
         ice,
-        poll_interval_ms,
     )
     .await
     .expect("Mini app failed to connect to signaling");
@@ -309,7 +307,6 @@ async fn plugin_ipc_to_webrtc_to_plugin_ipc() {
         "e2e-room".into(),
         "peer-a".into(),
         "test".into(),
-        200,
     ));
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -321,7 +318,6 @@ async fn plugin_ipc_to_webrtc_to_plugin_ipc() {
         "e2e-room".into(),
         "peer-b".into(),
         "test".into(),
-        200,
     ));
 
     // 4. Wait for WebRTC connection to establish between the two mini apps.
@@ -386,7 +382,6 @@ async fn multi_interval_full_size_e2e() {
         "multi-room".into(),
         "peer-a".into(),
         "test".into(),
-        200,
     ));
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -398,7 +393,6 @@ async fn multi_interval_full_size_e2e() {
         "multi-room".into(),
         "peer-b".into(),
         "test".into(),
-        200,
     ));
 
     // Wait for WebRTC connection
@@ -466,16 +460,14 @@ async fn mini_app_session_v2(
     room: String,
     peer_id: String,
     password: String,
-    poll_interval_ms: u64,
 ) {
     let ice = wail_net::default_ice_servers();
-    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_with_options(
+    let (mut mesh, _sync_rx, mut audio_rx) = PeerMesh::connect_with_ice(
         &signaling_url,
         &room,
         &peer_id,
         Some(password.as_str()),
         ice,
-        poll_interval_ms,
     )
     .await
     .expect("Mini app V2 failed to connect");
@@ -567,7 +559,6 @@ async fn dual_plugin_ipc_only_recv_gets_audio() {
         "dual-room".into(),
         "peer-a".into(),
         "test".into(),
-        200,
     ));
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -580,7 +571,6 @@ async fn dual_plugin_ipc_only_recv_gets_audio() {
         "dual-room".into(),
         "peer-b".into(),
         "test".into(),
-        200,
     ));
 
     // 4. Wait for WebRTC connection

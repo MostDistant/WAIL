@@ -27,11 +27,11 @@ WAIL bridges Ableton Link sessions across the internet via WebRTC peer-to-peer D
 │  │  Ableton Live / Link app     │    │                    │    │  Ableton Live / Link app     │  │
 │  └──────────────────────────────┘    │                    │    └──────────────────────────────┘  │
 └──────────────────────────────────────┘                    └──────────────────────────────────────┘
-                    │ HTTP polling                                           │ HTTP polling
+                    │ WebSocket                                             │ WebSocket
                     │                                                        │
                     │              ┌──────────────────┐                      │
                     └─────────────►│ Signaling Server │◄─────────────────────┘
-                                   │  (Val Town HTTP)  │
+                                   │  (Go + SQLite)    │
                                    └──────────────────┘
 ```
 
@@ -59,7 +59,7 @@ wail-plugin-test (integration test harness for Send/Recv plugins)
 ├── wail-audio
 └── wail-core
 
-val-town/main.ts (HTTP signaling server, deployed to Val Town)
+signaling-server/ (Go WebSocket signaling server, deployed to fly.io)
 ```
 
 ## The NINJAM Model
@@ -195,11 +195,11 @@ App→Plugin: remote peer's interval, peer_id identifies the sender.
 
 ```
 1. Peer A fetches ICE servers (Metered TURN credentials via API)
-2. Peer A POSTs join to HTTP signaling server (with room password, stream_count, client_version)
-   - Server rejects outdated clients with 426 Upgrade Required (minimum version enforced server-side)
-3. Server replies with list of existing peers
+2. Peer A connects to WebSocket signaling server, sends join (with room password, stream_count, client_version)
+   - Server rejects outdated clients with join_error code "version_outdated"
+3. Server replies with join_ok containing list of existing peers
 4. For each peer: lower peer_id creates SDP Offer (deterministic initiator)
-5. Offer relayed through signaling server (HTTP polling)
+5. Offer relayed through signaling server (WebSocket push — instant delivery)
 6. Peer B creates Answer, relayed back
 7. ICE candidates exchanged via signaling server
 8. Two DataChannels established per peer:
