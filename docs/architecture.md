@@ -251,6 +251,7 @@ Two independent time domains exist in the system:
 | `PeerJoined` | Server → Client | New peer notification |
 | `PeerLeft` | Server → Client | Peer disconnect notification |
 | `Signal` | Client ↔ Server ↔ Client | Relay SDP/ICE between peers |
+| `LogBroadcast` (`log`) | Client → Server → Room | Broadcast structured log entry to all room peers (opt-in) |
 
 ## Key Design Decisions
 
