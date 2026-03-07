@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,9 +13,9 @@ mod params;
 
 use params::WailRecvParams;
 use wail_audio::{
-    nearest_opus_rate, AudioBridge, AudioDecoder, AudioWire, IpcMessage, IpcRecvBuffer,
-    IPC_ROLE_RECV, IPC_TAG_AUDIO_PUB, IPC_TAG_PEER_JOINED_PUB, IPC_TAG_PEER_LEFT_PUB,
-    IPC_TAG_PEER_NAME_PUB,
+    nearest_opus_rate, AudioBridge, AudioDecoder, AudioFrameWire, IpcMessage,
+    IpcRecvBuffer, IPC_ROLE_RECV, IPC_TAG_AUDIO_PUB, IPC_TAG_PEER_JOINED_PUB,
+    IPC_TAG_PEER_LEFT_PUB, IPC_TAG_PEER_NAME_PUB,
 };
 
 /// Peer lifecycle events sent from IPC thread to audio thread.
@@ -44,6 +45,8 @@ pub struct WailRecvPlugin {
     ipc_incoming_rx: Option<Receiver<(String, u16, i64, Vec<f32>)>>,
     /// Peer lifecycle events from IPC thread (for slot affinity)
     peer_event_rx: Option<Receiver<PeerEvent>>,
+    /// Shutdown flag for the IPC thread (set on re-initialization)
+    ipc_shutdown: Option<Arc<AtomicBool>>,
     /// Pre-allocated playback buffer (reused every process call)
     playback_buf: Vec<f32>,
     /// Pre-allocated per-peer buffers (reused every process call)
@@ -68,6 +71,7 @@ impl Default for WailRecvPlugin {
             sample_rate: 48000.0,
             ipc_incoming_rx: None,
             peer_event_rx: None,
+            ipc_shutdown: None,
             playback_buf: Vec::new(),
             peer_bufs: Default::default(),
             cumulative_samples: 0,
@@ -219,11 +223,19 @@ impl Plugin for WailRecvPlugin {
             }
         }
 
+        // Signal the old IPC thread to shut down before spawning a new one
+        if let Some(ref flag) = self.ipc_shutdown {
+            flag.store(true, Ordering::Relaxed);
+        }
+
         let (in_tx, in_rx) = crossbeam_channel::bounded::<(String, u16, i64, Vec<f32>)>(64);
         self.ipc_incoming_rx = Some(in_rx);
 
         let (peer_tx, peer_rx) = crossbeam_channel::bounded::<PeerEvent>(32);
         self.peer_event_rx = Some(peer_rx);
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        self.ipc_shutdown = Some(shutdown.clone());
 
         let addr = std::env::var("WAIL_IPC_ADDR")
             .unwrap_or_else(|_| DEFAULT_IPC_ADDR.to_string());
@@ -231,12 +243,14 @@ impl Plugin for WailRecvPlugin {
         let ipc_sample_rate = buffer_config.sample_rate as u32;
         let ipc_channels = channels;
 
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("wail-ipc-recv".into())
             .spawn(move || {
-                ipc_thread_recv(in_tx, peer_tx, addr, ipc_sample_rate, ipc_channels)
+                ipc_thread_recv(in_tx, peer_tx, addr, ipc_sample_rate, ipc_channels, shutdown)
             })
-            .ok();
+        {
+            nih_error!("WAIL Recv: failed to spawn IPC thread: {}", e);
+        }
 
         nih_log!(
             "WAIL Recv initialized: {}Hz, {} channels, {} bars",
@@ -406,6 +420,116 @@ impl Plugin for WailRecvPlugin {
     }
 }
 
+/// Assembles streaming audio frames into complete intervals for decoding.
+///
+/// Keyed by (interval_index, stream_id, peer_id). Collects Opus frames by
+/// frame_number, and when the final frame arrives, assembles them into the
+/// length-prefixed format that `AudioDecoder::decode_interval` expects.
+struct FrameAssembler {
+    /// (interval_index, stream_id, peer_id) → collected frames
+    pending: HashMap<(i64, u16, String), FrameCollection>,
+}
+
+struct FrameCollection {
+    frames: Vec<Option<Vec<u8>>>,
+    channels: u16,
+    sample_rate: u32,
+    bpm: f64,
+    quantum: f64,
+    bars: u32,
+}
+
+impl FrameAssembler {
+    fn new() -> Self {
+        Self {
+            pending: HashMap::new(),
+        }
+    }
+
+    /// Insert a frame. If it's the final frame, returns assembled opus_data blob
+    /// along with metadata needed to create an AudioInterval.
+    fn insert(
+        &mut self,
+        peer_id: &str,
+        frame: &wail_audio::AudioFrame,
+    ) -> Option<(String, u16, i64, u16, u32, f64, f64, u32, Vec<u8>)> {
+        let key = (frame.interval_index, frame.stream_id, peer_id.to_string());
+
+        let collection = self.pending.entry(key.clone()).or_insert_with(|| FrameCollection {
+            frames: Vec::new(),
+            channels: frame.channels,
+            sample_rate: 0,
+            bpm: 0.0,
+            quantum: 0.0,
+            bars: 0,
+        });
+
+        // Ensure vec is large enough (cap to prevent OOM from malicious peers)
+        let idx = frame.frame_number as usize;
+        const MAX_FRAMES_PER_INTERVAL: usize = 10_000;
+        if idx >= MAX_FRAMES_PER_INTERVAL {
+            tracing::warn!(
+                frame_number = idx,
+                "FrameAssembler: frame_number exceeds maximum, dropping"
+            );
+            return None;
+        }
+        if collection.frames.len() <= idx {
+            collection.frames.resize(idx + 1, None);
+        }
+        collection.frames[idx] = Some(frame.opus_data.clone());
+
+        if frame.is_final {
+            collection.sample_rate = frame.sample_rate;
+            collection.bpm = frame.bpm;
+            collection.quantum = frame.quantum;
+            collection.bars = frame.bars;
+
+            let total = frame.total_frames as usize;
+            let Some(coll) = self.pending.remove(&key) else {
+                tracing::warn!("FrameAssembler: missing collection for key after insert");
+                return None;
+            };
+
+            // Assemble into encode_interval format:
+            // [u32 LE frame_count][u16 LE len][opus bytes]...
+            let mut opus_data = Vec::new();
+            opus_data.extend_from_slice(&(total as u32).to_le_bytes());
+            for i in 0..total {
+                if let Some(Some(data)) = coll.frames.get(i) {
+                    opus_data.extend_from_slice(&(data.len() as u16).to_le_bytes());
+                    opus_data.extend_from_slice(data);
+                } else {
+                    // Missing frame — insert silence marker (zero-length Opus packet
+                    // would fail decoding, so skip with a 0-length entry)
+                    // The decoder will handle this as a gap.
+                    opus_data.extend_from_slice(&0u16.to_le_bytes());
+                }
+            }
+
+            return Some((
+                peer_id.to_string(),
+                frame.stream_id,
+                frame.interval_index,
+                coll.channels,
+                coll.sample_rate,
+                coll.bpm,
+                coll.quantum,
+                coll.bars,
+                opus_data,
+            ));
+        }
+
+        None
+    }
+
+    /// Evict stale entries for intervals older than `current - 2`.
+    fn evict_stale(&mut self, current_interval: i64) {
+        self.pending
+            .retain(|&(idx, _, _), _| idx >= current_interval - 2);
+    }
+}
+
 /// Receive-only IPC thread: reads from TCP, Opus-decodes, sends PCM to audio thread.
 fn ipc_thread_recv(
     incoming_tx: crossbeam_channel::Sender<(String, u16, i64, Vec<f32>)>,
@@ -413,6 +537,7 @@ fn ipc_thread_recv(
     addr: String,
     sample_rate: u32,
     channels: u16,
+    shutdown: Arc<AtomicBool>,
 ) {
     let opus_rate = nearest_opus_rate(sample_rate);
     if opus_rate != sample_rate {
@@ -423,15 +548,15 @@ fn ipc_thread_recv(
         );
     }
 
-    let mut decoder = match AudioDecoder::new(opus_rate, channels) {
-        Ok(dec) => Some(dec),
-        Err(e) => {
-            tracing::warn!(error = %e, "IPC recv thread: failed to create Opus decoder");
-            None
-        }
-    };
+    let mut decoders: HashMap<(String, u16), AudioDecoder> = HashMap::new();
+
+    let mut assembler = FrameAssembler::new();
 
     loop {
+        if shutdown.load(Ordering::Relaxed) {
+            tracing::info!("WAIL Recv IPC thread: shutdown requested, exiting");
+            return;
+        }
         let mut stream = match TcpStream::connect(&addr) {
             Ok(s) => {
                 tracing::info!(addr = %addr, "WAIL Recv IPC connected to wail-app");
@@ -450,8 +575,11 @@ fn ipc_thread_recv(
             continue;
         }
 
-        // No read timeout — we block until data arrives or the connection closes
-        stream.set_read_timeout(None).ok();
+        // Use a read timeout so the thread can detect when channels are disconnected
+        // (e.g., when the DAW re-initializes the plugin and replaces receivers).
+        if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(5))) {
+            tracing::warn!(error = %e, "WAIL Recv: failed to set read timeout");
+        }
 
         let mut recv_buf = IpcRecvBuffer::new();
         let mut read_buf = [0u8; 65536];
@@ -468,33 +596,54 @@ fn ipc_thread_recv(
                         match IpcMessage::tag(&payload) {
                             Some(IPC_TAG_AUDIO_PUB) => {
                                 if let Some((peer_id, wire_data)) = IpcMessage::decode_audio(&payload) {
-                                    match AudioWire::decode(&wire_data) {
-                                        Ok(interval) => {
-                                            if let Some(ref mut dec) = decoder {
-                                                match dec.decode_interval(&interval.opus_data) {
-                                                    Ok(samples) => {
-                                                        let _ = incoming_tx.try_send((
-                                                            peer_id,
-                                                            interval.stream_id,
-                                                            interval.index,
-                                                            samples,
-                                                        ));
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!(
-                                                            error = %e,
-                                                            "IPC recv: failed to decode Opus audio"
-                                                        );
+                                    // Detect inner wire format by magic: WAIF = streaming frame, WAIL = full interval
+                                    if wire_data.starts_with(b"WAIF") {
+                                        match AudioFrameWire::decode(&wire_data) {
+                                            Ok(frame) => {
+                                                if frame.is_final {
+                                                    assembler.evict_stale(frame.interval_index);
+                                                }
+                                                if let Some((pid, stream_id, interval_idx, ch, sr, _bpm, _q, _bars, opus_data)) =
+                                                    assembler.insert(&peer_id, &frame)
+                                                {
+                                                    let dec_key = (pid.clone(), stream_id);
+                                                    let dec = decoders.entry(dec_key).or_insert_with(|| {
+                                                        let rate = nearest_opus_rate(sr);
+                                                        match AudioDecoder::new(rate, ch) {
+                                                            Ok(d) => d,
+                                                            Err(e) => {
+                                                                tracing::warn!(error = %e, "IPC recv: failed to create decoder, using fallback");
+                                                                AudioDecoder::new(opus_rate, channels).expect("fallback opus decoder at known-good params")
+                                                            }
+                                                        }
+                                                    });
+                                                    match dec.decode_interval(&opus_data) {
+                                                        Ok(samples) => {
+                                                            let _ = incoming_tx.try_send((
+                                                                pid,
+                                                                stream_id,
+                                                                interval_idx,
+                                                                samples,
+                                                            ));
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(
+                                                                error = %e,
+                                                                "IPC recv: failed to decode assembled Opus audio"
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    "IPC recv: failed to decode audio frame wire"
+                                                );
+                                            }
                                         }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                "IPC recv: failed to decode wire data"
-                                            );
-                                        }
+                                    } else {
+                                        tracing::warn!("IPC recv: unexpected non-WAIF audio data, ignoring");
                                     }
                                 }
                             }
@@ -524,6 +673,14 @@ fn ipc_thread_recv(
                             }
                         }
                     }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                    // Read timeout — check if shutdown was requested (plugin re-initialized)
+                    if shutdown.load(Ordering::Relaxed) {
+                        tracing::info!("WAIL Recv IPC thread: shutdown requested, exiting");
+                        return;
+                    }
+                    continue;
                 }
                 Err(_) => {
                     tracing::warn!("WAIL Recv IPC read error — reconnecting");

@@ -96,6 +96,7 @@ const IPC_TAG_AUDIO: u8 = 0x01;
 const IPC_TAG_PEER_JOINED: u8 = 0x02;
 const IPC_TAG_PEER_LEFT: u8 = 0x03;
 const IPC_TAG_PEER_NAME: u8 = 0x04;
+const IPC_TAG_AUDIO_FRAME: u8 = 0x05;
 
 /// IPC message encoding for Plugin ↔ App communication.
 ///
@@ -227,6 +228,25 @@ impl IpcMessage {
         Some((peer_id, display_name))
     }
 
+    /// Encode a streaming audio frame message (no peer_id — send plugin only).
+    pub fn encode_audio_frame(wire_data: &[u8]) -> Vec<u8> {
+        let mut msg = Vec::with_capacity(1 + wire_data.len());
+        msg.push(IPC_TAG_AUDIO_FRAME);
+        msg.extend_from_slice(wire_data);
+        msg
+    }
+
+    /// Decode a streaming audio frame message. Returns the AudioFrameWire bytes.
+    pub fn decode_audio_frame(payload: &[u8]) -> Option<Vec<u8>> {
+        if payload.len() < 2 {
+            return None;
+        }
+        if payload[0] != IPC_TAG_AUDIO_FRAME {
+            return None;
+        }
+        Some(payload[1..].to_vec())
+    }
+
     /// Get the tag byte from a payload, if any.
     pub fn tag(payload: &[u8]) -> Option<u8> {
         payload.first().copied()
@@ -238,6 +258,7 @@ pub const IPC_TAG_AUDIO_PUB: u8 = IPC_TAG_AUDIO;
 pub const IPC_TAG_PEER_JOINED_PUB: u8 = IPC_TAG_PEER_JOINED;
 pub const IPC_TAG_PEER_LEFT_PUB: u8 = IPC_TAG_PEER_LEFT;
 pub const IPC_TAG_PEER_NAME_PUB: u8 = IPC_TAG_PEER_NAME;
+pub const IPC_TAG_AUDIO_FRAME_PUB: u8 = IPC_TAG_AUDIO_FRAME;
 
 #[cfg(test)]
 mod tests {
@@ -528,5 +549,34 @@ mod tests {
     fn peer_name_rejects_truncated() {
         assert!(IpcMessage::decode_peer_name(&[]).is_none());
         assert!(IpcMessage::decode_peer_name(&[IPC_TAG_PEER_NAME]).is_none());
+    }
+
+    // --- Audio frame messages ---
+
+    #[test]
+    fn audio_frame_roundtrip() {
+        let wire_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let encoded = IpcMessage::encode_audio_frame(&wire_data);
+        assert_eq!(encoded[0], IPC_TAG_AUDIO_FRAME);
+
+        let decoded = IpcMessage::decode_audio_frame(&encoded).unwrap();
+        assert_eq!(decoded, wire_data);
+    }
+
+    #[test]
+    fn audio_frame_rejects_wrong_tag() {
+        let encoded = IpcMessage::encode_audio("peer-1", &[0xAA]);
+        assert!(IpcMessage::decode_audio_frame(&encoded).is_none());
+    }
+
+    #[test]
+    fn audio_frame_rejects_short() {
+        assert!(IpcMessage::decode_audio_frame(&[]).is_none());
+        assert!(IpcMessage::decode_audio_frame(&[IPC_TAG_AUDIO_FRAME]).is_none());
+    }
+
+    #[test]
+    fn audio_frame_tag_constant() {
+        assert_eq!(IPC_TAG_AUDIO_FRAME_PUB, 0x05);
     }
 }

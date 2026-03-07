@@ -98,7 +98,6 @@ pub fn run() {
             commands::join_room,
             commands::disconnect,
             commands::change_bpm,
-            commands::set_test_tone,
             commands::set_telemetry,
             commands::set_log_sharing,
             commands::list_public_rooms,

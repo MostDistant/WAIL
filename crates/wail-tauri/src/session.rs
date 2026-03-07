@@ -6,9 +6,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn, Instrument};
 
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use wail_audio::{AudioDecoder, AudioEncoder, AudioInterval, AudioWire, ClientChannelMapping, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
+use wail_audio::{ClientChannelMapping, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
 use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
 use wail_net::PeerMesh;
 
@@ -52,7 +50,6 @@ pub struct SessionHandle {
 
 pub enum SessionCommand {
     ChangeBpm(f64),
-    SetTestTone(bool),
     Disconnect,
 }
 
@@ -73,7 +70,6 @@ pub struct SessionConfig {
     pub bars: u32,
     pub quantum: f64,
     pub ipc_port: u16,
-    pub test_tone: bool,
     pub recording: Option<RecordingConfig>,
     pub stream_count: u16,
 }
@@ -144,7 +140,6 @@ async fn session_loop(
         bars,
         quantum,
         ipc_port,
-        test_tone,
         recording: recording_config,
         stream_count,
     } = config;
@@ -202,40 +197,10 @@ async fn session_loop(
     // Link peer count — updated every status tick; used to gate audio when Link is not running
     let mut link_peers: u64 = 0;
 
-    // Audio interval stats
-    let mut audio_intervals_sent: u64 = 0;
+    // Audio stats
     let mut audio_intervals_received: u64 = 0;
     let mut audio_bytes_sent: u64 = 0;
     let mut audio_bytes_recv: u64 = 0;
-    let mut audio_intervals_sent_prev: u64 = 0;
-
-    // Test tone state
-    let mut test_tone_enabled = test_tone;
-    let mut test_tone_encoder: Option<AudioEncoder> = if test_tone_enabled {
-        match AudioEncoder::new(48000, 1, 64) {
-            Ok(enc) => {
-                ui_info!(&app, "Test tone encoder ready (48kHz mono 64kbps)");
-                Some(enc)
-            }
-            Err(e) => {
-                ui_warn!(&app, "Failed to create test tone encoder: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let mut audio_decoder: Option<AudioDecoder> = match AudioDecoder::new(48000, 1) {
-        Ok(dec) => Some(dec),
-        Err(e) => {
-            ui_warn!(&app, "Failed to create audio decoder for logging: {e}");
-            None
-        }
-    };
-    let mut rng = StdRng::from_entropy();
-    if test_tone_enabled {
-        ui_info!(&app, "Test tone ENABLED — will generate sine tones at interval boundaries");
-    }
 
     // IPC: listen for plugin connections.
     // Use TcpSocket builder to set SO_REUSEADDR before binding, so that reconnecting
@@ -304,19 +269,6 @@ async fn session_loop(
                         last_broadcast_bpm = new_bpm;
                         if link_cmd_tx.send(LinkCommand::SetTempo(new_bpm)).is_err() {
                             ui_warn!(&app, "Link bridge stopped");
-                        }
-                    }
-                    SessionCommand::SetTestTone(enabled) => {
-                        test_tone_enabled = enabled;
-                        ui_info!(&app, "Test tone {}", if enabled { "ENABLED" } else { "DISABLED" });
-                        if enabled && test_tone_encoder.is_none() {
-                            match AudioEncoder::new(48000, 1, 64) {
-                                Ok(enc) => {
-                                    ui_info!(&app, "Test tone encoder ready (48kHz mono 64kbps)");
-                                    test_tone_encoder = Some(enc);
-                                }
-                                Err(e) => ui_warn!(&app, "Failed to create test tone encoder: {e}"),
-                            }
                         }
                     }
                     SessionCommand::Disconnect => {
@@ -433,36 +385,20 @@ async fn session_loop(
 
             // --- Audio from plugin IPC → broadcast to WebRTC peers ---
             Some(frame) = ipc_from_plugin_rx.recv() => {
-                if let Some((_peer_id, wire_data)) = IpcMessage::decode_audio(&frame) {
-                    // Discard plugin backlog that accumulated before the first real interval
-                    // boundary. Interval 0 is a warmup period: stale buffered intervals from
-                    // the DAW's history flood in during this window. After the first boundary
-                    // (interval >= 1) we're live. NINJAM semantics: interval N audio is only
-                    // played back in interval N+1, so interval 0 is a throw-away anyway.
+                // Streaming audio frames (20ms Opus chunks, tag 0x05)
+                if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
                     if interval.current_index() <= Some(0) {
                         continue;
-                    }
-                    if let Some(ref rec) = recorder {
-                        rec.record_own(wire_data.clone());
                     }
                     if audio_gate.is_gated() || link_peers == 0 {
                         continue;
                     }
-                    // Clear any stale retry from the previous interval.
-                    audio_retry = None;
                     let failed_peers = mesh.broadcast_audio(&wire_data).await;
-                    audio_intervals_sent += 1;
                     audio_bytes_sent += wire_data.len() as u64;
                     if !failed_peers.is_empty() {
-                        audio_retry = Some((
-                            tokio::time::Instant::now() + Duration::from_millis(250),
-                            failed_peers,
-                            wire_data.clone(),
-                            3,
-                        ));
+                        // Don't retry individual frames — next frame will arrive in 20ms
+                        debug!("Frame send failed for {} peers", failed_peers.len());
                     }
-                    let connected_peers = mesh.connected_peers();
-                    ui_info!(&app, "[AUDIO SEND] wire={} bytes, peers=[{}], total_sent={}", wire_data.len(), connected_peers.join(", "), audio_intervals_sent);
                 }
             }
 
@@ -871,56 +807,6 @@ async fn session_loop(
                 }
                 audio_intervals_received += 1;
                 audio_bytes_recv += data.len() as u64;
-                let peer_name: String = peers.get(&from)
-                    .and_then(|p| p.display_name.clone())
-                    .unwrap_or_else(|| from.clone());
-
-                match AudioWire::decode(&data) {
-                    Ok(audio_interval) => {
-                        // Assign slot for new (peer, stream_id) pairs
-                        let already_had_slot = peers.slot_for(&from, audio_interval.stream_id).is_some();
-                        if let Some(slot) = peers.assign_slot(&from, audio_interval.stream_id) {
-                            if !already_had_slot {
-                                let identity = peers.get(&from).and_then(|p| p.identity.clone()).unwrap_or_else(|| from.clone());
-                                let ccm = ClientChannelMapping::new(&identity, audio_interval.stream_id);
-                                ui_info!(&app, "[{}] {peer_name} stream {} assigned to slot {}", ccm.short_id(), audio_interval.stream_id, slot + 1);
-                            }
-                        }
-
-                        let mut rms_info = String::new();
-                        if let Some(ref mut decoder) = audio_decoder {
-                            match decoder.decode_interval(&audio_interval.opus_data) {
-                                Ok(pcm) => {
-                                    let rms = if pcm.is_empty() {
-                                        0.0
-                                    } else {
-                                        (pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len() as f32).sqrt()
-                                    };
-                                    rms_info = format!(", decoded={} samples, RMS={:.4}", pcm.len(), rms);
-                                }
-                                Err(e) => {
-                                    rms_info = format!(", decode_err={e}");
-                                }
-                            }
-                        }
-                        let slot_label = peers.slot_for(&from, audio_interval.stream_id)
-                            .map(|s| format!("slot={}", s + 1))
-                            .unwrap_or_else(|| "slot=?".to_string());
-                        ui_info!(
-                            &app,
-                            "[AUDIO RECV] {slot_label} peer={peer_name}, interval={}, wire={} bytes, opus={} bytes, sr={}, ch={}, bpm={:.1}{rms_info}",
-                            audio_interval.index,
-                            data.len(),
-                            audio_interval.opus_data.len(),
-                            audio_interval.sample_rate,
-                            audio_interval.channels,
-                            audio_interval.bpm,
-                        );
-                    }
-                    Err(e) => {
-                        ui_warn!(&app, "[AUDIO RECV] peer={peer_name}, wire={} bytes, decode_err={e}", data.len());
-                    }
-                }
 
                 if let Some(ref rec) = recorder {
                     let name = peers.get(&from).and_then(|p| p.display_name.clone());
@@ -962,11 +848,7 @@ async fn session_loop(
                         if let Some(idx) = interval.update(beat) {
                             info!(interval = idx, beat = format!("{:.1}", beat), ">>> INTERVAL BOUNDARY <<<");
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
-                            if test_tone_enabled && !audio_gate.is_gated() {
-                                if let Some(ref mut encoder) = test_tone_encoder {
-                                    send_test_tone(&app, &mesh, encoder, &mut rng, idx, last_broadcast_bpm, bars, quantum, &mut audio_intervals_sent, &mut audio_bytes_sent).await;
-                                }
-                            }
+
                         }
                     }
 
@@ -983,11 +865,7 @@ async fn session_loop(
                         if let Some(idx) = interval.update(beat) {
                             info!(interval = idx, beat = format!("{:.1}", beat), ">>> INTERVAL BOUNDARY <<<");
                             mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
-                            if test_tone_enabled && !audio_gate.is_gated() {
-                                if let Some(ref mut encoder) = test_tone_encoder {
-                                    send_test_tone(&app, &mesh, encoder, &mut rng, idx, last_broadcast_bpm, bars, quantum, &mut audio_intervals_sent, &mut audio_bytes_sent).await;
-                                }
-                            }
+
                         }
                     }
                 }
@@ -1023,7 +901,7 @@ async fn session_loop(
                 if let Ok(state) = rx.await {
                     let connected = mesh.connected_peers();
                     let dc_open = mesh.any_audio_dc_open();
-                    let is_sending = audio_intervals_sent > audio_intervals_sent_prev;
+                    let is_sending = mesh.any_audio_dc_open();
                     let peer_infos: Vec<PeerInfo> = connected
                         .iter()
                         .map(|p| {
@@ -1118,7 +996,6 @@ async fn session_loop(
 
                     // Update snapshots for next tick
                     peers.flush_audio_recv_prev();
-                    audio_intervals_sent_prev = audio_intervals_sent;
                     link_peers = state.num_peers;
 
                     let _ = app.emit("status:update", StatusUpdate {
@@ -1129,13 +1006,12 @@ async fn session_loop(
                         peers: peer_infos,
                         slots: slot_infos,
                         interval_bars: interval.bars(),
-                        audio_sent: audio_intervals_sent,
+                        audio_sent: 0,
                         audio_recv: audio_intervals_received,
                         audio_bytes_sent,
                         audio_bytes_recv,
                         audio_dc_open: dc_open,
                         plugin_connected: !ipc_pool.is_empty(),
-                        test_tone_enabled,
                         audio_send_gated: audio_gate.is_gated(),
                         recording: recorder.is_some(),
                         recording_size_bytes: recorder.as_ref().map_or(0, |r| r.bytes_written()),
@@ -1144,7 +1020,7 @@ async fn session_loop(
                     // Broadcast audio pipeline status to remote peers
                     let status_msg = SyncMessage::AudioStatus {
                         audio_dc_open: dc_open,
-                        intervals_sent: audio_intervals_sent,
+                        intervals_sent: 0,
                         intervals_received: audio_intervals_received,
                         plugin_connected: !ipc_pool.is_empty(),
                     };
@@ -1163,80 +1039,6 @@ async fn session_loop(
     Ok(())
 }
 
-/// Generate a random sine tone, Opus-encode it, and broadcast as an audio interval.
-async fn send_test_tone(
-    app: &AppHandle,
-    mesh: &PeerMesh,
-    encoder: &mut AudioEncoder,
-    rng: &mut impl Rng,
-    idx: i64,
-    bpm: f64,
-    bars: u32,
-    quantum: f64,
-    audio_intervals_sent: &mut u64,
-    audio_bytes_sent: &mut u64,
-) {
-    let freq: f32 = rng.gen_range(220.0..=880.0);
-    let sample_rate: u32 = 48000;
-    let interval_beats = bars as f64 * quantum;
-    let duration_secs = (interval_beats * 60.0) / bpm.max(1.0);
-    let duration_secs = duration_secs.clamp(0.5, 30.0);
-    let num_samples = (duration_secs * sample_rate as f64).round() as usize;
-
-    let samples: Vec<f32> = (0..num_samples)
-        .map(|i| {
-            let t = i as f32 / sample_rate as f32;
-            (t * freq * 2.0 * std::f32::consts::PI).sin() * 0.5
-        })
-        .collect();
-
-    let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len().max(1) as f32).sqrt();
-
-    ui_info!(
-        app,
-        "[TEST TONE] Interval {idx}: freq={freq:.1}Hz, {num_samples} samples ({duration_secs:.2}s), RMS={rms:.4}, bpm={bpm:.1}"
-    );
-
-    match encoder.encode_interval(&samples) {
-        Ok(opus_data) => {
-            let audio_interval = AudioInterval {
-                index: idx,
-                stream_id: 0,
-                opus_data: opus_data.clone(),
-                sample_rate,
-                channels: 1,
-                num_frames: num_samples as u32,
-                bpm,
-                quantum,
-                bars,
-            };
-            let wire_data = AudioWire::encode(&audio_interval);
-
-            ui_info!(
-                app,
-                "[TEST TONE] Encoded: opus={} bytes, wire={} bytes",
-                opus_data.len(),
-                wire_data.len()
-            );
-
-            let _ = mesh.broadcast_audio(&wire_data).await;
-            *audio_intervals_sent += 1;
-            *audio_bytes_sent += wire_data.len() as u64;
-
-            let ready_msg = SyncMessage::AudioIntervalReady {
-                interval_index: idx,
-                wire_size: wire_data.len() as u32,
-            };
-            mesh.broadcast(&ready_msg).await;
-
-            let connected_peers = mesh.connected_peers();
-            ui_info!(app, "[TEST TONE] Broadcast interval {idx} to peers: [{}]", connected_peers.join(", "));
-        }
-        Err(e) => {
-            ui_warn!(app, "[TEST TONE] Encode failed: {e}");
-        }
-    }
-}
 
 struct AudioSendGate {
     gated: bool,

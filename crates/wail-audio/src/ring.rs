@@ -495,13 +495,16 @@ impl IntervalRing {
         // the head of the new interval to prevent clicks at interval boundaries.
         for slot in &mut self.peer_slots {
             if slot.active && !slot.samples.is_empty() {
+                // Capture the last XFADE_SAMPLES of the outgoing interval, left-aligned.
+                // The crossfade loop reads tail[0..fade_len], so the captured audio must
+                // start at index 0.
                 let src_len = slot.samples.len().min(XFADE_SAMPLES);
                 let src_start = slot.samples.len() - src_len;
-                let dst_start = XFADE_SAMPLES - src_len;
-                slot.crossfade_tail[..dst_start].fill(0.0);
                 for j in 0..src_len {
-                    slot.crossfade_tail[dst_start + j] = slot.samples[src_start + j];
+                    slot.crossfade_tail[j] = slot.samples[src_start + j];
                 }
+                // Zero the remainder (if the interval was shorter than XFADE_SAMPLES)
+                slot.crossfade_tail[src_len..].fill(0.0);
             }
             // Inactive or empty slots: crossfade_tail stays zero → fade from silence
         }

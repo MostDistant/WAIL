@@ -107,6 +107,32 @@ impl AudioEncoder {
         Ok(output)
     }
 
+    /// Encode a single 20ms frame of interleaved f32 audio into raw Opus bytes.
+    ///
+    /// Input: interleaved f32 samples for one frame (frame_size * channels samples).
+    /// Zero-pads if the input is shorter than one full frame.
+    /// Returns raw Opus packet bytes (no length prefix).
+    pub fn encode_frame(&mut self, samples: &[f32]) -> Result<Vec<u8>> {
+        let ch = self.channels as usize;
+        let frame_samples = self.frame_size * ch;
+
+        let padded;
+        let frame = if samples.len() < frame_samples {
+            padded = {
+                let mut p = samples.to_vec();
+                p.resize(frame_samples, 0.0);
+                p
+            };
+            &padded
+        } else {
+            &samples[..frame_samples]
+        };
+
+        let mut opus_buf = vec![0u8; 4000];
+        let encoded_len = self.encoder.encode_float(frame, &mut opus_buf)?;
+        Ok(opus_buf[..encoded_len].to_vec())
+    }
+
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
@@ -259,6 +285,46 @@ mod tests {
 
         // Should decode to at least one frame (960 samples at 48kHz/20ms)
         assert!(decoded.len() >= 960);
+    }
+
+    #[test]
+    fn encode_frame_roundtrip() {
+        let sample_rate = 48000;
+        let channels = 2;
+        let mut encoder = AudioEncoder::new(sample_rate, channels, 128).unwrap();
+        let mut decoder = AudioDecoder::new(sample_rate, channels).unwrap();
+
+        let frame_size = encoder.frame_size(); // 960 for 48kHz
+        let frame_samples = frame_size * channels as usize;
+
+        // Generate one 20ms frame of sine wave
+        let samples: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / channels as usize) as f32 / sample_rate as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+
+        let opus_bytes = encoder.encode_frame(&samples).unwrap();
+        assert!(!opus_bytes.is_empty());
+        assert!(opus_bytes.len() < 4000);
+
+        // Decode single frame
+        let opus_packet = Packet::try_from(opus_bytes.as_slice()).unwrap();
+        let mut decode_buf = vec![0f32; frame_samples];
+        let mut_signals = MutSignals::try_from(decode_buf.as_mut_slice()).unwrap();
+        let decoded = decoder.decoder.decode_float(Some(opus_packet), mut_signals, false).unwrap();
+        assert_eq!(decoded, frame_size);
+    }
+
+    #[test]
+    fn encode_frame_zero_pads_short_input() {
+        let mut encoder = AudioEncoder::new(48000, 1, 64).unwrap();
+
+        // Short input (less than one frame)
+        let samples = vec![0.5f32; 100];
+        let opus_bytes = encoder.encode_frame(&samples).unwrap();
+        assert!(!opus_bytes.is_empty());
     }
 
     #[test]

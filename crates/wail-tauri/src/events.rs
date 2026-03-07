@@ -90,7 +90,6 @@ pub struct StatusUpdate {
     pub audio_bytes_recv: u64,
     pub audio_dc_open: bool,
     pub plugin_connected: bool,
-    pub test_tone_enabled: bool,
     pub audio_send_gated: bool,
     pub recording: bool,
     pub recording_size_bytes: u64,

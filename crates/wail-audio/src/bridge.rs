@@ -216,6 +216,12 @@ impl AudioBridge {
     pub fn bitrate_kbps(&self) -> u32 {
         self.bitrate_kbps
     }
+
+    /// Return the current interval index (from the ring buffer's beat tracking).
+    /// Returns 0 if no interval has started yet.
+    pub fn current_interval_index(&self) -> i64 {
+        self.ring.current_interval().unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

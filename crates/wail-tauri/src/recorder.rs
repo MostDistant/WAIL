@@ -22,7 +22,6 @@ pub struct RecordingConfig {
 
 /// Commands sent from the session loop to the writer task.
 enum RecordCommand {
-    OwnInterval { wire_data: Vec<u8> },
     PeerInterval { peer_id: String, display_name: Option<String>, wire_data: Vec<u8> },
     Finalize,
 }
@@ -81,16 +80,16 @@ impl SessionRecorder {
         Ok(Self { tx, bytes_written })
     }
 
-    pub fn record_own(&self, wire_data: Vec<u8>) {
-        let _ = self.tx.send(RecordCommand::OwnInterval { wire_data });
-    }
-
     pub fn record_peer(&self, peer_id: String, display_name: Option<String>, wire_data: Vec<u8>) {
-        let _ = self.tx.send(RecordCommand::PeerInterval { peer_id, display_name, wire_data });
+        if let Err(e) = self.tx.send(RecordCommand::PeerInterval { peer_id, display_name, wire_data }) {
+            warn!("Recording: failed to send peer interval: {e}");
+        }
     }
 
     pub fn finalize(&self) {
-        let _ = self.tx.send(RecordCommand::Finalize);
+        if let Err(e) = self.tx.send(RecordCommand::Finalize) {
+            warn!("Recording: failed to send finalize command: {e}");
+        }
     }
 
     pub fn bytes_written(&self) -> u64 {
@@ -184,9 +183,6 @@ impl RecorderWriter {
         let mut rx = rx;
         loop {
             match rx.blocking_recv() {
-                Some(RecordCommand::OwnInterval { wire_data }) => {
-                    self.handle_interval("self", None, &wire_data);
-                }
                 Some(RecordCommand::PeerInterval { peer_id, display_name, wire_data }) => {
                     self.peers.entry(peer_id.clone()).or_insert(display_name.clone());
                     self.handle_interval(&peer_id, display_name.as_deref(), &wire_data);
@@ -223,16 +219,23 @@ impl RecorderWriter {
         let ch = interval.channels;
 
         // Get or create decoder for this source
-        let decoder = self.decoders.entry(source_id.to_string()).or_insert_with(|| {
-            match AudioDecoder::new(sr, ch) {
+        if !self.decoders.contains_key(source_id) {
+            let decoder = match AudioDecoder::new(sr, ch) {
                 Ok(d) => d,
                 Err(e) => {
                     warn!(source = source_id, "Recording: failed to create decoder: {e}");
-                    // Return a dummy — we'll handle the error on decode
-                    AudioDecoder::new(48000, 1).expect("fallback decoder")
+                    match AudioDecoder::new(48000, 1) {
+                        Ok(d) => d,
+                        Err(e2) => {
+                            warn!(source = source_id, "Recording: fallback decoder also failed: {e2}");
+                            return;
+                        }
+                    }
                 }
-            }
-        });
+            };
+            self.decoders.insert(source_id.to_string(), decoder);
+        }
+        let decoder = self.decoders.get_mut(source_id).unwrap();
 
         let pcm = match decoder.decode_interval(&interval.opus_data) {
             Ok(pcm) => pcm,

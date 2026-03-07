@@ -21,6 +21,28 @@ pub struct AudioInterval {
     pub bars: u32,
 }
 
+/// A single 20ms Opus frame for streaming transmission during an interval.
+///
+/// Unlike `AudioInterval` (which contains an entire interval's worth of encoded audio),
+/// an `AudioFrame` represents one 20ms chunk that can be sent immediately as it's recorded.
+/// The final frame of an interval carries metadata needed to reconstruct the full interval
+/// on the receiver side.
+#[derive(Debug, Clone)]
+pub struct AudioFrame {
+    pub interval_index: i64,
+    pub stream_id: u16,
+    pub frame_number: u32,
+    pub channels: u16,
+    pub opus_data: Vec<u8>,
+    pub is_final: bool,
+    // Metadata — only meaningful when is_final is true:
+    pub sample_rate: u32,
+    pub total_frames: u32,
+    pub bpm: f64,
+    pub quantum: f64,
+    pub bars: u32,
+}
+
 /// Records audio samples into intervals, triggering encoding at interval boundaries.
 ///
 /// Usage in an audio processing callback:

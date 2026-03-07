@@ -60,7 +60,6 @@ pub fn join_room(
     bars: Option<u32>,
     quantum: Option<f64>,
     ipc_port: Option<u16>,
-    test_tone: Option<bool>,
     recording_enabled: Option<bool>,
     recording_directory: Option<String>,
     recording_stems: Option<bool>,
@@ -83,7 +82,6 @@ pub fn join_room(
         bars: bars.unwrap_or(4),
         quantum: quantum.unwrap_or(4.0),
         ipc_port: ipc_port.unwrap_or(9191),
-        test_tone: test_tone.unwrap_or(false),
         recording: if recording_enabled.unwrap_or(false) {
             Some(RecordingConfig {
                 enabled: true,
@@ -140,17 +138,6 @@ pub fn set_telemetry(handle: State<'_, TelemetryHandle>, enabled: bool) -> Resul
 pub fn set_log_sharing(handle: State<'_, WsLogHandle>, enabled: bool) -> Result<(), String> {
     handle.set_enabled(enabled);
     info!(enabled, "Peer log sharing toggled");
-    Ok(())
-}
-
-#[tauri::command]
-pub fn set_test_tone(state: State<'_, SessionState>, enabled: bool) -> Result<(), String> {
-    let session = state.lock().map_err(|e| e.to_string())?;
-    if let Some(ref handle) = *session {
-        let _ = handle.cmd_tx.send(SessionCommand::SetTestTone(enabled));
-    } else {
-        warn!("No active session for test tone toggle");
-    }
     Ok(())
 }
 

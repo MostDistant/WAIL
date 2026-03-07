@@ -11,8 +11,8 @@ mod params;
 
 use params::WailSendParams;
 use wail_audio::{
-    nearest_opus_rate, AudioBridge, AudioEncoder, AudioInterval, AudioWire, CompletedInterval,
-    IpcFramer, IpcMessage, IPC_ROLE_SEND,
+    nearest_opus_rate, AudioBridge, AudioEncoder, AudioFrame, AudioFrameWire, IpcFramer,
+    IpcMessage, IPC_ROLE_SEND,
 };
 
 /// Default IPC address (overridable via WAIL_IPC_ADDR env var).
@@ -22,13 +22,18 @@ const DEFAULT_BARS: u32 = 4;
 const DEFAULT_QUANTUM: f64 = 4.0;
 const DEFAULT_BITRATE_KBPS: u32 = 128;
 
-/// Raw completed interval with config snapshot, sent from audio thread to IPC
-/// thread for Opus encoding (keeps Opus off the real-time audio callback).
-struct RawInterval {
-    completed: CompletedInterval,
+/// A single 20ms frame of raw PCM, sent from the audio thread to the IPC thread
+/// for immediate Opus encoding and streaming transmission.
+struct RawFrame {
+    samples: Vec<f32>,
+    interval_index: i64,
     stream_id: u16,
-    sample_rate: u32,
+    frame_number: u32,
     channels: u16,
+    is_final: bool,
+    // Metadata for the final frame:
+    sample_rate: u32,
+    total_frames: u32,
     bpm: f64,
     quantum: f64,
     bars: u32,
@@ -46,7 +51,8 @@ pub struct WailSendPlugin {
     params: Arc<WailSendParams>,
     bridge: Arc<Mutex<Option<AudioBridge>>>,
     sample_rate: f32,
-    ipc_outgoing_tx: Option<Sender<RawInterval>>,
+    /// Channel for streaming 20ms frames to the IPC thread
+    frame_tx: Option<Sender<RawFrame>>,
     /// Pre-allocated interleaved input buffer (reused every process call)
     interleave_buf: Vec<f32>,
     /// Pre-allocated dummy playback buffer (bridge.process_rt requires it)
@@ -55,6 +61,14 @@ pub struct WailSendPlugin {
     /// doesn't provide `pos_beats()`.
     cumulative_samples: u64,
     beat_fallback_warned: bool,
+    /// Accumulates interleaved samples until we have a full 20ms frame
+    frame_buffer: Vec<f32>,
+    /// Current interval index for streaming frame dispatch
+    streaming_interval_index: Option<i64>,
+    /// Current frame number within the interval (resets at boundary)
+    streaming_frame_number: u32,
+    /// Opus frame size in samples per channel (set during initialize)
+    opus_frame_size: usize,
 }
 
 impl Default for WailSendPlugin {
@@ -63,11 +77,15 @@ impl Default for WailSendPlugin {
             params: Arc::new(WailSendParams::default()),
             bridge: Arc::new(Mutex::new(None)),
             sample_rate: 48000.0,
-            ipc_outgoing_tx: None,
+            frame_tx: None,
             interleave_buf: Vec::new(),
             playback_buf: Vec::new(),
             cumulative_samples: 0,
             beat_fallback_warned: false,
+            frame_buffer: Vec::new(),
+            streaming_interval_index: None,
+            streaming_frame_number: 0,
+            opus_frame_size: 960, // 20ms at 48kHz, updated in initialize
         }
     }
 }
@@ -158,7 +176,7 @@ impl Plugin for WailSendPlugin {
             .main_input_channels
             .map(|c| c.get() as u16)
             .unwrap_or(2);
-        let mut bridge = AudioBridge::new(
+        let bridge = AudioBridge::new(
             buffer_config.sample_rate as u32,
             channels,
             DEFAULT_BARS,
@@ -170,11 +188,6 @@ impl Plugin for WailSendPlugin {
         self.interleave_buf = vec![0.0f32; max_buf];
         self.playback_buf = vec![0.0f32; max_buf];
 
-        // Buffer return channel: IPC thread sends back empty Vec<f32> after encoding
-        // so the audio thread can reuse it as spare_record (zero alloc after warmup).
-        let (buf_return_tx, buf_return_rx) = crossbeam_channel::bounded::<Vec<f32>>(4);
-        bridge.set_buffer_return_rx(buf_return_rx);
-
         match self.bridge.lock() {
             Ok(mut guard) => *guard = Some(bridge),
             Err(_) => {
@@ -183,8 +196,14 @@ impl Plugin for WailSendPlugin {
             }
         }
 
-        let (out_tx, out_rx) = crossbeam_channel::bounded::<RawInterval>(64);
-        self.ipc_outgoing_tx = Some(out_tx);
+        let (ftx, frx) = crossbeam_channel::bounded::<RawFrame>(512);
+        self.frame_tx = Some(ftx);
+
+        let opus_rate = nearest_opus_rate(buffer_config.sample_rate as u32);
+        self.opus_frame_size = (opus_rate as usize * 20) / 1000;
+        self.frame_buffer = Vec::with_capacity(self.opus_frame_size * channels as usize);
+        self.streaming_interval_index = None;
+        self.streaming_frame_number = 0;
 
         let addr = std::env::var("WAIL_IPC_ADDR")
             .unwrap_or_else(|_| DEFAULT_IPC_ADDR.to_string());
@@ -194,12 +213,14 @@ impl Plugin for WailSendPlugin {
         let ipc_bitrate = DEFAULT_BITRATE_KBPS;
         let ipc_params = self.params.clone();
 
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("wail-ipc-send".into())
             .spawn(move || {
-                ipc_thread_send(out_rx, buf_return_tx, addr, ipc_sample_rate, ipc_channels, ipc_bitrate, ipc_params)
+                ipc_thread_send(frx, addr, ipc_sample_rate, ipc_channels, ipc_bitrate, ipc_params)
             })
-            .ok();
+        {
+            nih_error!("WAIL Send: failed to spawn IPC thread: {}", e);
+        }
 
         nih_log!(
             "WAIL Send initialized: {}Hz, {} channels, {} bars",
@@ -213,6 +234,9 @@ impl Plugin for WailSendPlugin {
 
     fn reset(&mut self) {
         self.cumulative_samples = 0;
+        self.frame_buffer.clear();
+        self.streaming_interval_index = None;
+        self.streaming_frame_number = 0;
         if let Ok(mut bridge) = self.bridge.lock() {
             if let Some(ref mut b) = *bridge {
                 b.reset();
@@ -264,32 +288,79 @@ impl Plugin for WailSendPlugin {
                 let playback = &mut self.playback_buf[..buf_size];
                 playback.fill(0.0);
 
-                let completed = permit_alloc(|| {
-                    bridge.process_rt(interleave, playback, beat_position)
+                permit_alloc(|| {
+                    drop(bridge.process_rt(interleave, playback, beat_position));
                 });
 
-                // Send completed intervals to IPC thread for encoding
+                // --- Streaming frame dispatch ---
+                // Accumulate interleaved input into frame_buffer, dispatch
+                // each full 20ms frame to the IPC thread immediately.
                 permit_alloc(|| {
-                    if let Some(ref tx) = self.ipc_outgoing_tx {
+                    if let Some(ref ftx) = self.frame_tx {
                         let sr = bridge.sample_rate();
                         let ch = bridge.channels();
                         let bpm_snap = bridge.bpm();
                         let q = bridge.quantum();
                         let b = bridge.bars();
                         let stream_id = self.params.stream_index.value() as u16;
-                        for c in completed {
-                            let _ = tx.try_send(RawInterval {
-                                completed: c,
+                        let frame_samples = self.opus_frame_size * ch as usize;
+                        let interval_idx = bridge.current_interval_index();
+
+                        // Detect interval boundary: flush partial + mark final
+                        if let Some(prev_idx) = self.streaming_interval_index {
+                            if prev_idx != interval_idx {
+                                // Flush remaining samples as final frame (zero-padded),
+                                // or send an empty final frame so the receiver knows
+                                // the interval is complete.
+                                let samples = std::mem::take(&mut self.frame_buffer);
+                                let total_frames = if samples.is_empty() {
+                                    self.streaming_frame_number
+                                } else {
+                                    self.streaming_frame_number + 1
+                                };
+                                let _ = ftx.try_send(RawFrame {
+                                    samples,
+                                    interval_index: prev_idx,
+                                    stream_id,
+                                    frame_number: self.streaming_frame_number,
+                                    channels: ch,
+                                    is_final: true,
+                                    sample_rate: sr,
+                                    total_frames,
+                                    bpm: bpm_snap,
+                                    quantum: q,
+                                    bars: b,
+                                });
+                                self.streaming_frame_number = 0;
+                            }
+                        }
+                        self.streaming_interval_index = Some(interval_idx);
+
+                        // Feed input into frame buffer
+                        self.frame_buffer.extend_from_slice(interleave);
+
+                        // Dispatch full 20ms frames
+                        while self.frame_buffer.len() >= frame_samples {
+                            let rest = self.frame_buffer.split_off(frame_samples);
+                            let samples = std::mem::replace(&mut self.frame_buffer, rest);
+                            let _ = ftx.try_send(RawFrame {
+                                samples,
+                                interval_index: interval_idx,
                                 stream_id,
-                                sample_rate: sr,
+                                frame_number: self.streaming_frame_number,
                                 channels: ch,
+                                is_final: false,
+                                sample_rate: sr,
+                                total_frames: 0,
                                 bpm: bpm_snap,
                                 quantum: q,
                                 bars: b,
                             });
+                            self.streaming_frame_number += 1;
                         }
                     }
                 });
+
             }
         }
 
@@ -305,13 +376,9 @@ impl Plugin for WailSendPlugin {
     }
 }
 
-/// Send-only IPC thread: Opus-encodes completed intervals and writes to TCP.
-///
-/// After encoding, sends the now-empty sample buffer back through
-/// `buf_return_tx` so the audio thread can reuse it (zero-allocation).
+/// Send-only IPC thread: Opus-encodes 20ms streaming frames and sends them to wail-app.
 fn ipc_thread_send(
-    outgoing_rx: crossbeam_channel::Receiver<RawInterval>,
-    buf_return_tx: Sender<Vec<f32>>,
+    frame_rx: crossbeam_channel::Receiver<RawFrame>,
     addr: String,
     sample_rate: u32,
     channels: u16,
@@ -327,10 +394,10 @@ fn ipc_thread_send(
         );
     }
 
-    let mut encoder = match AudioEncoder::new(opus_rate, channels, bitrate_kbps) {
+    let mut frame_encoder = match AudioEncoder::new(opus_rate, channels, bitrate_kbps) {
         Ok(enc) => Some(enc),
         Err(e) => {
-            tracing::warn!(error = %e, "IPC send thread: failed to create Opus encoder");
+            tracing::warn!(error = %e, "IPC send thread: failed to create streaming Opus encoder");
             None
         }
     };
@@ -358,33 +425,29 @@ fn ipc_thread_send(
             continue;
         }
 
-        loop {
-            // Block waiting for the next interval (with timeout so we detect disconnects)
-            match outgoing_rx.recv_timeout(Duration::from_secs(5)) {
-                Ok(raw) => {
-                    let mut samples = raw.completed.samples;
-                    let sample_count = samples.len();
-                    let mut write_failed = false;
+        let mut write_failed = false;
 
-                    if let Some(ref mut enc) = encoder {
-                        match enc.encode_interval(&samples) {
+        loop {
+            match frame_rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(raw_frame) => {
+                    if let Some(ref mut enc) = frame_encoder {
+                        match enc.encode_frame(&raw_frame.samples) {
                             Ok(opus_data) => {
-                                let num_frames = (sample_count
-                                    / raw.channels as usize)
-                                    as u32;
-                                let interval = AudioInterval {
-                                    index: raw.completed.index,
-                                    stream_id: raw.stream_id,
+                                let audio_frame = AudioFrame {
+                                    interval_index: raw_frame.interval_index,
+                                    stream_id: raw_frame.stream_id,
+                                    frame_number: raw_frame.frame_number,
+                                    channels: raw_frame.channels,
                                     opus_data,
-                                    sample_rate: raw.sample_rate,
-                                    channels: raw.channels,
-                                    num_frames,
-                                    bpm: raw.bpm,
-                                    quantum: raw.quantum,
-                                    bars: raw.bars,
+                                    is_final: raw_frame.is_final,
+                                    sample_rate: raw_frame.sample_rate,
+                                    total_frames: raw_frame.total_frames,
+                                    bpm: raw_frame.bpm,
+                                    quantum: raw_frame.quantum,
+                                    bars: raw_frame.bars,
                                 };
-                                let wire_data = AudioWire::encode(&interval);
-                                let msg = IpcMessage::encode_audio("", &wire_data);
+                                let wire_data = AudioFrameWire::encode(&audio_frame);
+                                let msg = IpcMessage::encode_audio_frame(&wire_data);
                                 let frame = IpcFramer::encode_frame(&msg);
                                 if stream.write_all(&frame).is_err() {
                                     tracing::warn!("WAIL Send IPC write error — reconnecting");
@@ -392,29 +455,22 @@ fn ipc_thread_send(
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "IPC send: failed to encode interval");
+                                tracing::warn!(error = %e, "IPC send: failed to encode frame");
                             }
                         }
                     }
-
-                    // Return the buffer to the audio thread for reuse
-                    samples.clear();
-                    if let Err(e) = buf_return_tx.try_send(samples) {
-                        tracing::warn!("Buffer return failed: {e}");
-                    }
-
-                    if write_failed {
-                        break;
-                    }
-                }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    // No data — check if TCP is still alive by writing nothing
-                    // (the next real write will detect if it's broken)
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    tracing::info!("WAIL Send IPC: audio channel closed, shutting down");
+                    tracing::info!("WAIL Send IPC: frame channel closed, shutting down");
                     return;
                 }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    // Timeout — connection check will happen on next write
+                }
+            }
+
+            if write_failed {
+                break;
             }
         }
 

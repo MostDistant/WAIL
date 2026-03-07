@@ -25,6 +25,13 @@ const MAGIC: &[u8; 4] = b"WAIL";
 const VERSION: u8 = 2;
 const HEADER_SIZE: usize = 48;
 
+const FRAME_MAGIC: &[u8; 4] = b"WAIF";
+const FRAME_HEADER_SIZE: usize = 21; // 4+1+2+8+4+2
+const FRAME_FINAL_EXTRA: usize = 28; // 4+4+8+8+4
+
+const FRAME_FLAG_STEREO: u8 = 0x01;
+const FRAME_FLAG_FINAL: u8 = 0x02;
+
 impl AudioWire {
     /// Serialize an AudioInterval into the binary wire format.
     pub fn encode(interval: &super::AudioInterval) -> Vec<u8> {
@@ -127,6 +134,128 @@ impl AudioWire {
             sample_rate,
             channels,
             num_frames,
+            bpm,
+            quantum,
+            bars,
+        })
+    }
+}
+
+/// Binary wire format for streaming audio frames over WebRTC DataChannels.
+///
+/// Each frame carries a single 20ms Opus packet. The final frame of an
+/// interval includes metadata so the receiver can reconstruct an AudioInterval.
+///
+/// Format (all integers are little-endian):
+/// ```text
+/// [4 bytes] magic: "WAIF"
+/// [1 byte]  flags: bit 0 = stereo, bit 1 = final (last frame of interval)
+/// [2 bytes] stream_id: u16
+/// [8 bytes] interval_index: i64
+/// [4 bytes] frame_number: u32  (0-indexed within interval)
+/// [2 bytes] opus_len: u16
+/// [N bytes] opus_data
+///
+/// If final flag set, append:
+/// [4 bytes] sample_rate: u32
+/// [4 bytes] total_frames: u32
+/// [8 bytes] bpm: f64
+/// [8 bytes] quantum: f64
+/// [4 bytes] bars: u32
+/// ```
+pub struct AudioFrameWire;
+
+impl AudioFrameWire {
+    pub fn encode(frame: &super::AudioFrame) -> Vec<u8> {
+        let extra = if frame.is_final { FRAME_FINAL_EXTRA } else { 0 };
+        let mut buf = Vec::with_capacity(FRAME_HEADER_SIZE + frame.opus_data.len() + extra);
+
+        buf.extend_from_slice(FRAME_MAGIC);
+
+        let mut flags: u8 = 0;
+        if frame.channels == 2 {
+            flags |= FRAME_FLAG_STEREO;
+        }
+        if frame.is_final {
+            flags |= FRAME_FLAG_FINAL;
+        }
+        buf.push(flags);
+
+        buf.extend_from_slice(&frame.stream_id.to_le_bytes());
+        buf.extend_from_slice(&frame.interval_index.to_le_bytes());
+        buf.extend_from_slice(&frame.frame_number.to_le_bytes());
+        buf.extend_from_slice(&(frame.opus_data.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&frame.opus_data);
+
+        if frame.is_final {
+            buf.extend_from_slice(&frame.sample_rate.to_le_bytes());
+            buf.extend_from_slice(&frame.total_frames.to_le_bytes());
+            buf.extend_from_slice(&frame.bpm.to_le_bytes());
+            buf.extend_from_slice(&frame.quantum.to_le_bytes());
+            buf.extend_from_slice(&frame.bars.to_le_bytes());
+        }
+
+        buf
+    }
+
+    pub fn decode(data: &[u8]) -> Result<super::AudioFrame> {
+        if data.len() < FRAME_HEADER_SIZE {
+            anyhow::bail!(
+                "Audio frame wire data too short: {} bytes, need at least {FRAME_HEADER_SIZE}",
+                data.len()
+            );
+        }
+
+        if &data[0..4] != FRAME_MAGIC {
+            anyhow::bail!("Invalid audio frame wire magic: {:?}", &data[0..4]);
+        }
+
+        let flags = data[4];
+        let channels = if flags & FRAME_FLAG_STEREO != 0 { 2 } else { 1 };
+        let is_final = flags & FRAME_FLAG_FINAL != 0;
+
+        let stream_id = u16::from_le_bytes(data[5..7].try_into()?);
+        let interval_index = i64::from_le_bytes(data[7..15].try_into()?);
+        let frame_number = u32::from_le_bytes(data[15..19].try_into()?);
+        let opus_len = u16::from_le_bytes(data[19..21].try_into()?) as usize;
+
+        if data.len() < FRAME_HEADER_SIZE + opus_len {
+            anyhow::bail!(
+                "Audio frame wire truncated: expected {} opus bytes, got {}",
+                opus_len,
+                data.len() - FRAME_HEADER_SIZE
+            );
+        }
+
+        let opus_data = data[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + opus_len].to_vec();
+
+        let (sample_rate, total_frames, bpm, quantum, bars) = if is_final {
+            let meta_start = FRAME_HEADER_SIZE + opus_len;
+            if data.len() < meta_start + FRAME_FINAL_EXTRA {
+                anyhow::bail!(
+                    "Audio frame final metadata truncated: need {} more bytes",
+                    meta_start + FRAME_FINAL_EXTRA - data.len()
+                );
+            }
+            let sr = u32::from_le_bytes(data[meta_start..meta_start + 4].try_into()?);
+            let tf = u32::from_le_bytes(data[meta_start + 4..meta_start + 8].try_into()?);
+            let b = f64::from_le_bytes(data[meta_start + 8..meta_start + 16].try_into()?);
+            let q = f64::from_le_bytes(data[meta_start + 16..meta_start + 24].try_into()?);
+            let bars = u32::from_le_bytes(data[meta_start + 24..meta_start + 28].try_into()?);
+            (sr, tf, b, q, bars)
+        } else {
+            (0, 0, 0.0, 0.0, 0)
+        };
+
+        Ok(super::AudioFrame {
+            interval_index,
+            stream_id,
+            frame_number,
+            channels,
+            opus_data,
+            is_final,
+            sample_rate,
+            total_frames,
             bpm,
             quantum,
             bars,
@@ -323,5 +452,106 @@ mod tests {
         assert_eq!(decoded.stream_id, u16::MAX);
         assert_eq!(decoded.num_frames, large_num_frames);
         assert_eq!(decoded.opus_data, opus_data);
+    }
+
+    // --- AudioFrameWire tests ---
+
+    #[test]
+    fn frame_wire_non_final_roundtrip() {
+        let frame = crate::AudioFrame {
+            interval_index: 42,
+            stream_id: 3,
+            frame_number: 7,
+            channels: 2,
+            opus_data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            is_final: false,
+            sample_rate: 0,
+            total_frames: 0,
+            bpm: 0.0,
+            quantum: 0.0,
+            bars: 0,
+        };
+
+        let encoded = AudioFrameWire::encode(&frame);
+        assert_eq!(&encoded[0..4], b"WAIF");
+        assert_eq!(encoded[4], FRAME_FLAG_STEREO); // stereo, not final
+        // Total: 21 header + 4 opus = 25 bytes
+        assert_eq!(encoded.len(), 25);
+
+        let decoded = AudioFrameWire::decode(&encoded).unwrap();
+        assert_eq!(decoded.interval_index, 42);
+        assert_eq!(decoded.stream_id, 3);
+        assert_eq!(decoded.frame_number, 7);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.opus_data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(!decoded.is_final);
+    }
+
+    #[test]
+    fn frame_wire_final_roundtrip() {
+        let frame = crate::AudioFrame {
+            interval_index: 10,
+            stream_id: 0,
+            frame_number: 399,
+            channels: 1,
+            opus_data: vec![0xAB],
+            is_final: true,
+            sample_rate: 48000,
+            total_frames: 400,
+            bpm: 120.0,
+            quantum: 4.0,
+            bars: 4,
+        };
+
+        let encoded = AudioFrameWire::encode(&frame);
+        assert_eq!(&encoded[0..4], b"WAIF");
+        assert_eq!(encoded[4], FRAME_FLAG_FINAL); // mono + final
+        // Total: 21 header + 1 opus + 28 final metadata = 50
+        assert_eq!(encoded.len(), 50);
+
+        let decoded = AudioFrameWire::decode(&encoded).unwrap();
+        assert_eq!(decoded.interval_index, 10);
+        assert_eq!(decoded.frame_number, 399);
+        assert_eq!(decoded.channels, 1);
+        assert!(decoded.is_final);
+        assert_eq!(decoded.sample_rate, 48000);
+        assert_eq!(decoded.total_frames, 400);
+        assert!((decoded.bpm - 120.0).abs() < f64::EPSILON);
+        assert!((decoded.quantum - 4.0).abs() < f64::EPSILON);
+        assert_eq!(decoded.bars, 4);
+    }
+
+    #[test]
+    fn frame_wire_rejects_bad_magic() {
+        let mut data = vec![0u8; 25];
+        data[0..4].copy_from_slice(b"NOPE");
+        assert!(AudioFrameWire::decode(&data).is_err());
+    }
+
+    #[test]
+    fn frame_wire_rejects_truncated() {
+        assert!(AudioFrameWire::decode(&[0u8; 10]).is_err());
+    }
+
+    #[test]
+    fn frame_wire_rejects_truncated_final_metadata() {
+        let frame = crate::AudioFrame {
+            interval_index: 0,
+            stream_id: 0,
+            frame_number: 0,
+            channels: 1,
+            opus_data: vec![0xAB],
+            is_final: true,
+            sample_rate: 48000,
+            total_frames: 1,
+            bpm: 120.0,
+            quantum: 4.0,
+            bars: 4,
+        };
+
+        let mut encoded = AudioFrameWire::encode(&frame);
+        // Truncate the final metadata
+        encoded.truncate(encoded.len() - 10);
+        assert!(AudioFrameWire::decode(&encoded).is_err());
     }
 }
