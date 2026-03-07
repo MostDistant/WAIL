@@ -6,6 +6,7 @@ use tracing::{info, warn};
 
 use crate::identity::PeerIdentity;
 use crate::filelog::TelemetryHandle;
+use crate::wslog::WsLogHandle;
 use crate::recorder::RecordingConfig;
 use crate::session::{SessionCommand, SessionConfig, SessionHandle};
 use crate::PluginInstallErrors;
@@ -132,6 +133,13 @@ pub fn change_bpm(state: State<'_, SessionState>, bpm: f64) -> Result<(), String
 pub fn set_telemetry(handle: State<'_, TelemetryHandle>, enabled: bool) -> Result<(), String> {
     handle.set_enabled(enabled);
     info!(enabled, "Telemetry toggled");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_log_sharing(handle: State<'_, WsLogHandle>, enabled: bool) -> Result<(), String> {
+    handle.set_enabled(enabled);
+    info!(enabled, "Peer log sharing toggled");
     Ok(())
 }
 

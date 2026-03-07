@@ -112,6 +112,14 @@ pub enum SignalMessage {
         from: String,
         payload: SignalPayload,
     },
+    /// Peer log broadcast: structured log entry relayed via the signaling server
+    LogBroadcast {
+        from: String,
+        level: String,
+        target: String,
+        message: String,
+        timestamp_us: u64,
+    },
 }
 
 /// WebRTC signaling payloads relayed through the signaling server.

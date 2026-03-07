@@ -112,4 +112,9 @@ pub struct SessionStale {
 pub struct LogEntry {
     pub level: String,
     pub message: String,
+    /// Set for log entries broadcast from a remote peer; None for local entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_name: Option<String>,
 }

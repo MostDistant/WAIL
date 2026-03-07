@@ -63,13 +63,6 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ## Deferred — Feature Work
 
-### W18. Interval index drifts by 1 when Link sessions have different absolute beat counts
-**Status:** Fixed for join-time via one-shot `ForceBeat`; residual warn suppressed by monotonic `update()`. Residual drift under high-latency still possible.
-**File:** `crates/wail-app/src/main.rs`, `crates/wail-core/src/interval.rs`
-**Problem:** Link syncs tempo and phase but not absolute beat count. On the first `StateSnapshot` received, WAIL calls `forceBeatAtTime` to snap the local beat clock to the remote's. This resolves the join-time offset. Residual `IntervalBoundary` mismatches are handled by monotonic `sync_to` without flapping.
-**Known limitation — same-LAN disruption:** `forceBeatAtTime` propagates to all LAN Link peers. If the joining peer (C) and the existing peers (A, B) share a LAN, C's snap will jolt A and B by approximately `RTT/2 * BPM/60` beats. At 100ms RTT, 120 BPM this is ~0.1 beats — imperceptible. At 500ms RTT it's ~0.5 beats — audible. In the typical WAIL use case (musicians on separate LANs), there is no cross-LAN Link interaction so no disruption occurs.
-**Known limitation — latency compensation:** ForceBeat uses `link.clock_micros()` (local time, now) and `remote_beat` (remote time, past). The beat value is slightly stale by `RTT/2`. A future improvement could add `RTT/2 * BPM/60` beats to compensate, once ClockSync is wired to the Link clock domain.
-
 ### W15. Clock offset computation removed
 **Status:** Done — dead code removed
 **File:** `crates/wail-core/src/clock.rs`
@@ -95,12 +88,10 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 | I5 | `now_us()` cast u128→i64 overflows after 292 years | `crates/wail-core/src/clock.rs:36` | Open |
 | I6 | Median uses upper-median for even-length arrays | `crates/wail-core/src/clock.rs:87` | Open |
 | I7 | Echo guard 150ms window suppresses legit fast tempo changes | `crates/wail-core/src/link.rs:89-94` | Open |
-| I9 | DAW aux output ports show "Peer 1–15" instead of actual peer display names | `crates/wail-plugin-recv/src/lib.rs:83-87` | Open |
+| I9 | DAW aux output ports show "Slot 1–31" instead of actual peer display names | `crates/wail-plugin-recv/src/lib.rs` | Fixed (CLAP only) |
 
-### I9. Static peer names in DAW aux outputs
-**Status:** Open — plugin API limitation
-**File:** `crates/wail-plugin-recv/src/lib.rs:83-87`
-**Problem:** DAW shows "Peer 1", "Peer 2", etc. instead of the peer's chosen display name (e.g. "Ringo"). Peer display names already flow through the protocol (`SyncMessage::Hello.display_name`) and are tracked in the Tauri session, but cannot be surfaced in DAW port labels.
-**Root cause:** nih_plug `PortNames` are `&'static str` (compile-time only). VST3 has no bus rename API. CLAP has `host.audio_ports->rescan(RESCAN_NAMES)` but nih_plug doesn't expose it.
-**Workaround:** Show "Peer 1 = Ringo" mapping in wail-app UI so users know which aux output corresponds to which musician.
-**Fix when ready:** Upstream nih_plug enhancement to expose CLAP's `rescan(RESCAN_NAMES)`, or use CLAP's `extensible_audio_ports` draft extension for dynamic port creation with correct names.
+### I9. Dynamic peer names in DAW aux outputs
+**Status:** Fixed for CLAP hosts — VST3 has no equivalent API
+**File:** `crates/wail-plugin-recv/src/lib.rs`, nih_plug fork at `MostDistant/nih-plug@feat/dynamic-audio-port-names`
+**Solution:** Forked nih_plug to add `ProcessContext::set_aux_output_name()` + `rescan_audio_port_names()` which call CLAP's `host.audio_ports->rescan(CLAP_AUDIO_PORTS_RESCAN_NAMES)`. Added `IPC_TAG_PEER_NAME` message type to forward display names from the Tauri session to the recv plugin. When a peer sends Hello with a display name, the session broadcasts it via IPC, the plugin updates the dynamic port name, and triggers a host rescan.
+**Limitation:** VST3 hosts will still show static "Slot 1–31" names — VST3 has no bus rename API.

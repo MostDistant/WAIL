@@ -13,12 +13,14 @@ use params::WailRecvParams;
 use wail_audio::{
     nearest_opus_rate, AudioBridge, AudioDecoder, AudioWire, IpcMessage, IpcRecvBuffer,
     IPC_ROLE_RECV, IPC_TAG_AUDIO_PUB, IPC_TAG_PEER_JOINED_PUB, IPC_TAG_PEER_LEFT_PUB,
+    IPC_TAG_PEER_NAME_PUB,
 };
 
 /// Peer lifecycle events sent from IPC thread to audio thread.
 enum PeerEvent {
     Joined { peer_id: String, identity: String },
     Left { peer_id: String },
+    NameChanged { peer_id: String, display_name: String },
 }
 
 /// Default IPC address (overridable via WAIL_IPC_ADDR env var).
@@ -289,6 +291,7 @@ impl Plugin for WailRecvPlugin {
                 // captures nothing useful (completed intervals are discarded).
                 // The Vec<CompletedInterval> must be dropped inside permit_alloc
                 // to avoid triggering assert_no_alloc on deallocation.
+                let mut port_names_dirty = false;
                 permit_alloc(|| {
                     // Process peer lifecycle events (slot affinity)
                     if let Some(ref rx) = self.peer_event_rx {
@@ -299,6 +302,23 @@ impl Plugin for WailRecvPlugin {
                                 }
                                 PeerEvent::Left { peer_id } => {
                                     bridge.remove_peer(&peer_id);
+                                }
+                                PeerEvent::NameChanged { peer_id, display_name } => {
+                                    // Rename all slots for this peer (may have multiple streams)
+                                    let slots: Vec<(usize, u16)> = bridge.peer_info().iter()
+                                        .filter(|(_, pid, _)| *pid == peer_id)
+                                        .map(|(slot, _, stream_id)| (*slot, *stream_id))
+                                        .collect();
+                                    let multi = slots.len() > 1;
+                                    for (slot, stream_id) in slots {
+                                        let name = if multi {
+                                            format!("{} {}", display_name, stream_id + 1)
+                                        } else {
+                                            display_name.clone()
+                                        };
+                                        context.set_aux_output_name(slot, Some(name));
+                                        port_names_dirty = true;
+                                    }
                                 }
                             }
                         }
@@ -313,6 +333,9 @@ impl Plugin for WailRecvPlugin {
                     // handles zero-length input gracefully (nothing recorded).
                     drop(bridge.process_rt(&[], playback, beat_position));
                 });
+                if port_names_dirty {
+                    context.rescan_audio_port_names();
+                }
 
                 // Mix playback into DAW main output
                 deinterleave_to_channels(playback, buffer.as_slice(), num_samples);
@@ -439,6 +462,13 @@ fn ipc_thread_recv(
                                 if let Some(peer_id) = IpcMessage::decode_peer_left(&payload) {
                                     if let Err(e) = peer_event_tx.try_send(PeerEvent::Left { peer_id }) {
                                         tracing::warn!(error = %e, "IPC recv: failed to send PeerLeft event (channel full)");
+                                    }
+                                }
+                            }
+                            Some(IPC_TAG_PEER_NAME_PUB) => {
+                                if let Some((peer_id, display_name)) = IpcMessage::decode_peer_name(&payload) {
+                                    if let Err(e) = peer_event_tx.try_send(PeerEvent::NameChanged { peer_id, display_name }) {
+                                        tracing::warn!(error = %e, "IPC recv: failed to send PeerName event (channel full)");
                                     }
                                 }
                             }

@@ -84,6 +84,14 @@ enum ServerMsg {
     },
     #[serde(rename = "evicted")]
     Evicted,
+    #[serde(rename = "log")]
+    Log {
+        from: String,
+        level: String,
+        target: String,
+        message: String,
+        timestamp_us: u64,
+    },
 }
 
 impl SignalingClient {
@@ -229,6 +237,9 @@ impl SignalingClient {
                                         warn!("Server evicted us — closing signaling");
                                         return;
                                     }
+                                    ServerMsg::Log { from, level, target, message, timestamp_us } => {
+                                        SignalMessage::LogBroadcast { from, level, target, message, timestamp_us }
+                                    }
                                     _ => continue,
                                 };
                                 debug!(?signal, "WS received");
@@ -260,7 +271,17 @@ impl SignalingClient {
         tokio::spawn(async move {
             while let Some(msg) = outgoing_rx.recv().await {
                 debug!(?msg, "Sending signal via WS");
-                let raw = serde_json::json!({
+                let raw = match &msg {
+                    SignalMessage::LogBroadcast { level, target, message, timestamp_us, .. } => {
+                        serde_json::json!({
+                            "type": "log",
+                            "level": level,
+                            "target": target,
+                            "message": message,
+                            "timestamp_us": timestamp_us,
+                        })
+                    }
+                    _ => serde_json::json!({
                     "type": "signal",
                     "to": match &msg {
                         SignalMessage::Signal { to, .. } => to.as_str(),
@@ -274,7 +295,8 @@ impl SignalingClient {
                         SignalMessage::Signal { payload, .. } => serde_json::to_value(payload).unwrap_or_default(),
                         _ => serde_json::Value::Null,
                     },
-                });
+                }),
+                };
                 if ws_write
                     .send(Message::Text(raw.to_string()))
                     .await

@@ -55,6 +55,13 @@ WAIL has three components that work together:
 
 - **WAIL Recv** (CLAP/VST3 plugin) — Place this on a track in your DAW to hear remote peers. It receives and decodes incoming audio intervals, mixing them into the main output with up to 31 auxiliary outputs (one per unique peer/stream slot).
 
+## Settings
+
+- **Display name** — Shown to other peers in the session.
+- **Save debug log locally** — Writes structured logs to a rotating file in the app data directory. Useful for diagnosing connection issues.
+- **Peer log streaming** — When enabled, your app's INFO-level logs are broadcast to all other peers in the session via the signaling server, and their logs are shown in your session log panel with a peer name prefix. Useful for collaborative debugging. Both sending and receiving are controlled by this single toggle.
+- **Remember settings** — Persists room name, password, and display name in localStorage.
+
 ## Troubleshooting
 
 **No sync / peers not connecting** — Make sure Ableton Link is enabled in your DAW. WAIL relies on Link for tempo and phase sync.

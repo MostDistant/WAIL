@@ -210,7 +210,6 @@ When encountering code quality trade-offs, follow these principles (derived from
 
 ### Scope and priorities
 - **Batch obvious fixes, discuss complex ones.** If a fix has no real trade-off (dead code, misleading labels, redundant imports), just do it. Only pause for decisions that involve architectural choices or behavioral changes.
-- **Defer infrastructure hardening in early development.** Authentication, rate limiting, TLS, connection limits, reconnection logic — track in `tradeoffs.md` but don't implement until the core product works end-to-end.
 - **Fix code, don't add process.** Prefer actual code changes over adding TODOs, lint suppressions, or documentation-only fixes. Exception: `#[allow(dead_code)]` is fine for fields that are structurally needed but not yet read.
 
 ### Trade-off log

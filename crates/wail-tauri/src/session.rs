@@ -14,8 +14,10 @@ use wail_net::PeerMesh;
 
 use crate::events::*;
 use crate::emit_log;
+use crate::emit_peer_log;
 use crate::peers::{IpcWriterPool, PeerRegistry};
 use crate::recorder::{RecordingConfig, SessionRecorder};
+use crate::wslog::WsLogHandle;
 
 /// Shorthand: log to tracing + emit to UI
 macro_rules! ui_info {
@@ -277,6 +279,10 @@ async fn session_loop(
     // Non-blocking signaling reconnection state (None = connected)
     let mut signaling_reconnect: Option<SignalingReconnect> = None;
 
+    // Peer log streaming: subscribe to the broadcast channel for forwarding to signaling.
+    let ws_log_handle = app.state::<WsLogHandle>().inner().clone();
+    let mut log_rx = ws_log_handle.subscribe();
+
     ui_info!(&app, "Waiting for peers...");
 
     loop {
@@ -309,6 +315,11 @@ async fn session_loop(
                         break;
                     }
                 }
+            }
+
+            // --- Outgoing peer log broadcast ---
+            Ok(entry) = log_rx.recv(), if ws_log_handle.is_enabled() && signaling_reconnect.is_none() => {
+                mesh.send_log(&entry.level, &entry.target, &entry.message, entry.timestamp_us);
             }
 
             // --- Accept plugin IPC connection ---
@@ -522,6 +533,12 @@ async fn session_loop(
                             ui_info!(&app, "Joined room with {n} peer(s) — audio send gated until beat sync");
                         }
                     }
+                    Ok(Some(wail_net::MeshEvent::PeerLogBroadcast { from, level, message, .. })) => {
+                        if ws_log_handle.is_enabled() {
+                            let peer_name = peers.get(&from).and_then(|p| p.display_name.clone());
+                            emit_peer_log(&app, &from, peer_name, &level, message);
+                        }
+                    }
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         ui_warn!(&app, "Signaling connection closed — attempting reconnection");
@@ -678,6 +695,13 @@ async fn session_loop(
                                 let msg = IpcMessage::encode_peer_joined(&pid, rid);
                                 let frame = IpcFramer::encode_frame(&msg);
                                 ipc_pool.broadcast(&frame).await;
+
+                                // Send display name so the plugin can rename DAW aux ports
+                                if let Some(ref display_name) = name {
+                                    let name_msg = IpcMessage::encode_peer_name(&pid, display_name);
+                                    let name_frame = IpcFramer::encode_frame(&name_msg);
+                                    ipc_pool.broadcast(&name_frame).await;
+                                }
                             }
                         }
 

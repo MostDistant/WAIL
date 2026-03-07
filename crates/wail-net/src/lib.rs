@@ -285,6 +285,10 @@ impl PeerMesh {
                 Ok(Some(MeshEvent::PeerLeft(remote_id)))
             }
 
+            SignalMessage::LogBroadcast { from, level, target, message, timestamp_us } => {
+                Ok(Some(MeshEvent::PeerLogBroadcast { from, level, target, message, timestamp_us }))
+            }
+
             SignalMessage::Signal { from, payload, .. } => {
                 match payload {
                     SignalPayload::Offer { sdp } => {
@@ -448,6 +452,19 @@ impl PeerMesh {
         });
     }
 
+    /// Send a structured log entry to the signaling server for broadcast to room peers.
+    pub fn send_log(&self, level: &str, target: &str, message: &str, timestamp_us: u64) {
+        if let Err(e) = self.signaling.outgoing_tx.send(SignalMessage::LogBroadcast {
+            from: String::new(), // server sets `from` on broadcast
+            level: level.to_string(),
+            target: target.to_string(),
+            message: message.to_string(),
+            timestamp_us,
+        }) {
+            tracing::warn!("failed to send log broadcast: {e}");
+        }
+    }
+
     pub fn connected_peers(&self) -> Vec<String> {
         self.peers.keys().cloned().collect()
     }
@@ -558,4 +575,12 @@ pub enum MeshEvent {
     /// A peer's WebRTC connection failed or disconnected.
     PeerFailed(String),
     SignalingProcessed,
+    /// A structured log entry broadcast by a remote peer.
+    PeerLogBroadcast {
+        from: String,
+        level: String,
+        target: String,
+        message: String,
+        timestamp_us: u64,
+    },
 }

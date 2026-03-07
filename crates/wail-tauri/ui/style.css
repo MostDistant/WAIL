@@ -577,6 +577,16 @@ summary {
   margin-right: 6px;
 }
 
+.log-peer {
+  color: var(--accent-bright);
+  margin-right: 4px;
+  font-style: italic;
+}
+
+.log-entry.peer-log {
+  opacity: 0.85;
+}
+
 /* Recording */
 .recording-section {
   margin-top: 12px;

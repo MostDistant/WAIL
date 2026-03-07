@@ -7,6 +7,7 @@ mod peers;
 mod plugin_install;
 mod recorder;
 mod session;
+pub mod wslog;
 
 use std::sync::Mutex;
 
@@ -22,6 +23,23 @@ pub fn emit_log(app: &tauri::AppHandle, level: &str, message: String) {
     let _ = app.emit("log:entry", LogEntry {
         level: level.to_string(),
         message,
+        peer_id: None,
+        peer_name: None,
+    });
+}
+
+pub fn emit_peer_log(
+    app: &tauri::AppHandle,
+    peer_id: &str,
+    peer_name: Option<String>,
+    level: &str,
+    message: String,
+) {
+    let _ = app.emit("log:entry", LogEntry {
+        level: level.to_string(),
+        message,
+        peer_id: Some(peer_id.to_string()),
+        peer_name,
     });
 }
 
@@ -35,10 +53,12 @@ pub fn run() {
 
     let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
     let (file_layer, telemetry_handle) = filelog::FileLogLayer::new();
+    let (ws_log_layer, ws_log_handle) = wslog::new();
 
     tracing_subscriber::registry()
         .with(fmt_layer)
         .with(file_layer)
+        .with(ws_log_layer)
         .init();
 
     let th = telemetry_handle.clone();
@@ -46,6 +66,7 @@ pub fn run() {
         .manage(SessionState::default())
         .manage(PluginInstallErrors(Mutex::new(Vec::new())))
         .manage(telemetry_handle)
+        .manage(ws_log_handle)
         .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
             if let Err(e) = th.set_log_dir(&data_dir.join("logs")) {
@@ -79,6 +100,7 @@ pub fn run() {
             commands::change_bpm,
             commands::set_test_tone,
             commands::set_telemetry,
+            commands::set_log_sharing,
             commands::list_public_rooms,
             commands::get_default_recording_dir,
             commands::cleanup_recordings,

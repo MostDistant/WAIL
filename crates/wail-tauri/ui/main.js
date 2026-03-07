@@ -20,6 +20,7 @@ const settingsCloseBtn = document.getElementById('settings-close-btn');
 const settingsForm = document.getElementById('settings-form');
 const settingsDisplayNameInput = document.getElementById('settings-display-name');
 const settingsTelemetryCheckbox = document.getElementById('settings-telemetry');
+const settingsLogSharingCheckbox = document.getElementById('settings-log-sharing');
 const settingsRememberCheckbox = document.getElementById('settings-remember');
 
 // Version label
@@ -51,6 +52,7 @@ let roomRefreshTimer = null;
 // --- Display Name Storage ---
 const DISPLAY_NAME_KEY = 'wail-display-name';
 const TELEMETRY_KEY = 'wail-telemetry';
+const LOG_SHARING_KEY = 'wail-log-sharing';
 const REMEMBER_KEY = 'wail-remember';
 
 function getDisplayName() {
@@ -68,6 +70,15 @@ function getTelemetryEnabled() {
 
 function saveTelemetryEnabled(enabled) {
   localStorage.setItem(TELEMETRY_KEY, enabled ? 'true' : 'false');
+}
+
+function getLogSharingEnabled() {
+  const val = localStorage.getItem(LOG_SHARING_KEY);
+  return val === 'true';
+}
+
+function saveLogSharingEnabled(enabled) {
+  localStorage.setItem(LOG_SHARING_KEY, enabled ? 'true' : 'false');
 }
 
 function getRememberEnabled() {
@@ -267,8 +278,9 @@ document.getElementById('browse-recording-dir').addEventListener('click', async 
   }
 });
 
-// Sync telemetry state on load (from settings)
+// Sync telemetry and log sharing state on load
 invoke('set_telemetry', { enabled: getTelemetryEnabled() }).catch(() => {});
+invoke('set_log_sharing', { enabled: getLogSharingEnabled() }).catch(() => {});
 
 // Populate default recording dir on load
 invoke('get_default_recording_dir').then(dir => {
@@ -281,6 +293,7 @@ settingsBtn.addEventListener('click', () => {
   // Populate settings panel with current values
   settingsDisplayNameInput.value = getDisplayName();
   settingsTelemetryCheckbox.checked = getTelemetryEnabled();
+  settingsLogSharingCheckbox.checked = getLogSharingEnabled();
   settingsRememberCheckbox.checked = getRememberEnabled();
   settingsPanel.style.display = 'flex';
 });
@@ -305,6 +318,10 @@ settingsForm.addEventListener('submit', (e) => {
   const telemetryEnabled = settingsTelemetryCheckbox.checked;
   saveTelemetryEnabled(telemetryEnabled);
   invoke('set_telemetry', { enabled: telemetryEnabled }).catch(() => {});
+  // Save log sharing setting
+  const logSharingEnabled = settingsLogSharingCheckbox.checked;
+  saveLogSharingEnabled(logSharingEnabled);
+  invoke('set_log_sharing', { enabled: logSharingEnabled }).catch(() => {});
   // Save remember setting
   const rememberEnabled = settingsRememberCheckbox.checked;
   saveRememberEnabled(rememberEnabled);
@@ -517,7 +534,8 @@ async function setupListeners() {
   }));
 
   unlisten.push(await listen('log:entry', (event) => {
-    addLogEntry(event.payload.level, event.payload.message);
+    const p = event.payload;
+    addLogEntry(p.level, p.message, p.peer_name || p.peer_id || null);
   }));
 }
 
@@ -525,7 +543,7 @@ async function setupListeners() {
 let logEntries = [];
 const MAX_LOG_ENTRIES = 200;
 
-function addLogEntry(level, message) {
+function addLogEntry(level, message, peerLabel) {
   const time = new Date().toLocaleTimeString();
   logEntries.push({ time, level, message });
   if (logEntries.length > MAX_LOG_ENTRIES) {
@@ -534,8 +552,9 @@ function addLogEntry(level, message) {
 
   const logList = document.getElementById('log-list');
   const entry = document.createElement('div');
-  entry.className = `log-entry ${level}`;
-  entry.innerHTML = `<span class="log-time">${time}</span>${escapeHtml(message)}`;
+  entry.className = `log-entry ${level}${peerLabel ? ' peer-log' : ''}`;
+  const peerPrefix = peerLabel ? `<span class="log-peer">[${escapeHtml(peerLabel)}]</span> ` : '';
+  entry.innerHTML = `<span class="log-time">${time}</span>${peerPrefix}${escapeHtml(message)}`;
   logList.appendChild(entry);
   logList.scrollTop = logList.scrollHeight;
 

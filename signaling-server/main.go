@@ -45,6 +45,11 @@ type clientMsg struct {
 	To            string          `json:"to,omitempty"`
 	From          string          `json:"from,omitempty"`
 	Payload       json.RawMessage `json:"payload,omitempty"`
+	// Log broadcast fields
+	Level       string `json:"level,omitempty"`
+	Target      string `json:"target,omitempty"`
+	Message     string `json:"message,omitempty"`
+	TimestampUs int64  `json:"timestamp_us,omitempty"`
 }
 
 // conn wraps a single WebSocket connection that has joined a room.
@@ -251,6 +256,34 @@ func (h *hub) signal(c *conn, msg clientMsg) {
 	}
 }
 
+func (h *hub) broadcastLog(c *conn, msg clientMsg) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if c.room == "" {
+		return
+	}
+	if roomConns, ok := h.rooms[c.room]; ok {
+		raw, _ := json.Marshal(map[string]any{
+			"type":         "log",
+			"from":         c.peerID,
+			"level":        msg.Level,
+			"target":       msg.Target,
+			"message":      msg.Message,
+			"timestamp_us": msg.TimestampUs,
+		})
+		for pid, rc := range roomConns {
+			if pid != c.peerID {
+				select {
+				case rc.send <- raw:
+				default:
+					log.Printf("warn: dropped log from %s to %s (send buffer full)", c.peerID, pid)
+				}
+			}
+		}
+	}
+}
+
 func (h *hub) leave(c *conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -371,6 +404,8 @@ func (c *conn) readPump(h *hub) {
 			h.join(c, msg)
 		case "signal":
 			h.signal(c, msg)
+		case "log":
+			h.broadcastLog(c, msg)
 		case "leave":
 			h.leave(c)
 		}
