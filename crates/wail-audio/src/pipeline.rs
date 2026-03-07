@@ -217,7 +217,79 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Test 5: Wire format preserves all fields through full pipeline
+    // Test 5: Sine wave round-trip characterizes crossfade quality
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sine_roundtrip_across_intervals() {
+        // Sends a continuous sine wave across 3 interval boundaries end-to-end
+        // (Opus encode → wire → decode) and verifies energy is consistent across
+        // boundaries. Catches crossfade regressions like phase-cancellation or clipping.
+        let mut sender = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+        let mut receiver = AudioBridge::new(SR, CH, BARS, Q, BITRATE);
+
+        let buf_size = 4096;
+        let silence = vec![0.0f32; buf_size];
+        let signal = sine_wave(440.0, buf_size / CH as usize, CH, SR);
+        let mut sender_out = vec![0.0f32; buf_size];
+        let mut recv_out = vec![0.0f32; buf_size];
+
+        // 16 beats per interval (4 bars × quantum 4), run through 3 boundaries
+        let beats_per_interval = (BARS as f64) * Q; // 16.0
+        let mut interval_outputs: Vec<Vec<f32>> = Vec::new();
+        let mut current_interval_samples: Vec<f32> = Vec::new();
+
+        for interval_idx in 0..4i64 {
+            let base_beat = interval_idx as f64 * beats_per_interval;
+            for sub_beat in [0.0, 4.0, 8.0, 12.0] {
+                let beat = base_beat + sub_beat;
+                let wire_msgs = sender.process(&signal, &mut sender_out, beat);
+                for msg in &wire_msgs {
+                    receiver.receive_wire("sender", msg);
+                }
+                receiver.process(&silence, &mut recv_out, beat);
+
+                if !wire_msgs.is_empty() && !current_interval_samples.is_empty() {
+                    interval_outputs.push(std::mem::take(&mut current_interval_samples));
+                }
+                current_interval_samples.extend_from_slice(&recv_out);
+            }
+        }
+
+        assert!(
+            interval_outputs.len() >= 2,
+            "Should have at least 2 decoded intervals, got {}",
+            interval_outputs.len()
+        );
+
+        // Opus adds ~26ms priming delay so interval 0 output may be low — skip it,
+        // check intervals 1+ have consistent non-zero energy.
+        let rms_values: Vec<f32> = interval_outputs.iter().map(|s| rms(s)).collect();
+        for (i, &r) in rms_values.iter().enumerate().skip(1) {
+            assert!(r > 0.01, "Interval {i} should have signal energy after round-trip, RMS={r}");
+        }
+
+        // Energy should be roughly consistent — allow 3× variation across intervals.
+        // A larger ratio would indicate the crossfade is phase-cancelling the signal.
+        let later: Vec<f32> = rms_values[1..].to_vec();
+        let max_rms = later.iter().cloned().fold(0.0f32, f32::max);
+        let min_rms = later.iter().cloned().fold(f32::MAX, f32::min);
+        assert!(
+            max_rms / min_rms < 3.0,
+            "RMS energy should be consistent across intervals (max/min={:.2}): {:?}",
+            max_rms / min_rms,
+            rms_values
+        );
+
+        // No clipping — crossfade should not sum beyond ±1.0.
+        for (i, interval) in interval_outputs.iter().enumerate() {
+            let max_amp = interval.iter().cloned().fold(0.0f32, f32::max);
+            assert!(max_amp <= 1.0, "Interval {i} clipped: max_amp={max_amp}");
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Test 6: Wire format preserves all fields through full pipeline
     // ---------------------------------------------------------------
 
     // ---------------------------------------------------------------
