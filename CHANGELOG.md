@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.1 (2026-03-07)
+
+### Fixes
+
+- revert Linux rust-lld linker change (#139)
+- add diagnostics and fix interval config reset behavior (#138)
+- Fix IntervalTracker::set_config to only reset interval tracking when bars or quantum actually change. Previously, receiving a redundant IntervalConfig message (same values) would reset the tracker, briefly re-activating the warmup guard and potentially dropping outgoing audio. Also adds diagnostic logging at interval boundary swaps to help diagnose audio gap issues.
+- Revert Linux rust-lld linker change that broke CI builds on Ubuntu runners.
+
 ## 1.8.0 (2026-03-07)
 
 ### Features
