@@ -256,7 +256,7 @@ async fn session_loop(
     };
 
     // Peer liveness tracking — detect silent disconnections
-    let mut liveness_interval = tokio::time::interval(Duration::from_secs(15));
+    let mut liveness_interval = tokio::time::interval(Duration::from_secs(5));
     const PEER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(30);
 
     // Peer reconnection channels
