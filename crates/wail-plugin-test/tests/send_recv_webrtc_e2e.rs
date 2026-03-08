@@ -241,30 +241,57 @@ fn send_and_recv_plugin_webrtc_e2e() {
     // Small delay for recv plugin's IPC thread to connect before driving audio.
     std::thread::sleep(Duration::from_millis(500));
 
-    // 7. Drive both plugins in an interleaved loop for 600 callbacks.
+    // 7. Drive both plugins in an interleaved loop for ~1 minute of audio playback.
     //
     //    Parameters:
     //      sample_rate = 48000, buf_size = 4096, BPM = 120, bars = 4, quantum = 4
-    //      samples_per_interval = bars * quantum * 60 / BPM * sample_rate
-    //                           = 4 * 4 * 60 / 120 * 48000 = 384,000
+    //      samples_per_interval = bars × quantum × 60 / BPM × sample_rate
+    //                           = 4 × 4 × 60 / 120 × 48000 = 384,000
     //      callbacks_per_interval = 384,000 / 4096 ≈ 94
-    //      600 callbacks ≈ 6 complete intervals on each side
     //
-    //    Both plugins use steady_time-based beat fallback (transport=None), which is
-    //    the path exercised by all existing plugin tests.
+    //    Because the test drives faster than real-time, the IPC→WebRTC→IPC pipeline
+    //    has a 2-interval warmup (vs. 1-interval in production where the DAW paces
+    //    callbacks at the audio clock rate). After the warmup, audio flows continuously
+    //    with zero gap at each interval boundary — the ring buffer's crossfade swap is
+    //    always ready because the previous interval's data arrived during the preceding
+    //    94-callback window.
     //
-    //    Network I/O happens concurrently in the tokio runtime's background threads.
-    //    No explicit yield/sleep is needed here: the IPC and WebRTC tasks make progress
-    //    on their own OS threads while this thread drives plugin processing.
+    //    Callback budget for 1 minute of audio playback:
+    //      - 2-interval pipeline warmup = 2 × 94 = 188 callbacks
+    //      - 60 seconds of output     = 60 × 48000 / 4096 ≈ 703 callbacks
+    //      - Total minimum            = 891 callbacks → use 950 for margin
+    //
+    //    Network I/O runs on tokio background threads concurrently with this loop.
 
     let buf_size: u32 = 4096;
-    let num_callbacks: u64 = 600;
+    let num_callbacks: u64 = 950;
     let mut non_silent_buffers: u32 = 0;
-    let mut last_interval = u64::MAX;
+
+    // Gap tracking: measure the longest run of consecutive silent buffers AFTER
+    // the first non-silent buffer appears. Zero gap means seamless interval transitions.
+    let mut in_audio_phase = false;
+    let mut current_gap: u32 = 0;
+    let mut max_gap: u32 = 0;
+
+    // Per-interval stats for diagnosing regressions.
+    let mut interval_stats: Vec<(u64, u32, u32)> = Vec::new(); // (index, non_silent, total)
+    let mut cur_interval = u64::MAX;
+    let mut cur_interval_non_silent: u32 = 0;
+    let mut cur_interval_total: u32 = 0;
 
     for i in 0..num_callbacks {
         let steady_time = i * buf_size as u64;
-        let interval_index = steady_time / 384_000; // approximate, for logging only
+        let interval_index = steady_time / 384_000;
+
+        if interval_index != cur_interval {
+            if cur_interval != u64::MAX {
+                interval_stats.push((cur_interval, cur_interval_non_silent, cur_interval_total));
+            }
+            cur_interval = interval_index;
+            cur_interval_non_silent = 0;
+            cur_interval_total = 0;
+        }
+        cur_interval_total += 1;
 
         drive_send(&mut send_proc, buf_size, steady_time);
         let out_l = drive_recv(&mut recv_proc, buf_size, steady_time);
@@ -272,35 +299,59 @@ fn send_and_recv_plugin_webrtc_e2e() {
         let energy = rms(&out_l);
         if energy > 0.001 {
             non_silent_buffers += 1;
-
-            if interval_index != last_interval {
-                eprintln!(
-                    "[test] Interval {interval_index}: recv output RMS={energy:.4} (callback {i})"
-                );
-                last_interval = interval_index;
+            cur_interval_non_silent += 1;
+            if in_audio_phase {
+                max_gap = max_gap.max(current_gap);
+                current_gap = 0;
             }
+            in_audio_phase = true;
+        } else if in_audio_phase {
+            current_gap += 1;
         }
     }
+    // Finalize last interval and trailing gap
+    if cur_interval != u64::MAX {
+        interval_stats.push((cur_interval, cur_interval_non_silent, cur_interval_total));
+    }
+    max_gap = max_gap.max(current_gap);
 
+    // Log per-interval breakdown
+    for (idx, non_silent, total) in &interval_stats {
+        let pct = *non_silent as f64 / *total as f64 * 100.0;
+        eprintln!("[test]   Interval {idx:2}: {non_silent:3}/{total:3} non-silent ({pct:.0}%)");
+    }
+
+    let max_gap_ms = max_gap as f64 * buf_size as f64 / 48000.0 * 1000.0;
     eprintln!(
-        "[test] Plugin-to-plugin WebRTC E2E: non_silent_buffers={non_silent_buffers}/{num_callbacks}"
+        "[test] Plugin-to-plugin WebRTC E2E: non_silent={non_silent_buffers}/{num_callbacks}, \
+         max_gap={max_gap} buffers ({max_gap_ms:.0}ms)"
     );
 
-    // 8. Assert at least 3 intervals worth of non-silent output.
-    //    Each interval is ~94 callbacks (384,000 samples / 4096). With 6 intervals driven
-    //    and 1-interval pipeline latency (NINJAM design), we expect ~5 intervals to play
-    //    back. A threshold of 100 buffers allows for IPC/network variance without being
-    //    so low that it accepts a fundamentally broken pipeline.
+    // 8. Assert ≥1 minute of contiguous non-silent output with no audible gaps.
+    //
+    //    After the 2-interval warmup (~188 callbacks), audio should flow continuously
+    //    until the test ends. Expected non-silent: 950 - 188 ≈ 762 callbacks ≈ 65s.
+    //    Threshold of 700 (≈60s) gives headroom for timing variance on slow CI machines.
+    //
+    //    max_gap ≤ 2 buffers (≤ 170ms) verifies that interval-boundary transitions are
+    //    seamless — the ring buffer crossfade swap is ready at each boundary with no
+    //    audible dropout between musicians' audio streams.
     assert!(
-        non_silent_buffers >= 100,
-        "Recv plugin should output ≥100 non-silent buffers (≈3 intervals) via the full \
-         Send→WebRTC→Recv path, got {non_silent_buffers}/600. \
+        non_silent_buffers >= 700,
+        "Expected ≥700 non-silent buffers (≈60s of audio) via the full \
+         Send→WebRTC→Recv path, got {non_silent_buffers}/{num_callbacks}. \
          Check IPC connection, WebRTC establishment, Opus codec, and ring buffer timing."
+    );
+    assert!(
+        max_gap <= 2,
+        "Detected a gap of {max_gap} consecutive silent buffers ({max_gap_ms:.0}ms) after \
+         audio started — interval-boundary transitions should be seamless (gap ≤ 2 buffers). \
+         Check ring buffer swap timing and pending_remote delivery."
     );
 
     eprintln!(
         "[test] PASSED — real Send plugin → WebRTC → real Recv plugin, \
-         {non_silent_buffers} non-silent buffers confirmed."
+         {non_silent_buffers} non-silent buffers, max_gap={max_gap} ({max_gap_ms:.0}ms)."
     );
 
     // 9. Stop and deactivate (order matters: stop_processing before deactivate)
