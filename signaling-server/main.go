@@ -195,6 +195,19 @@ func (h *hub) join(c *conn, msg clientMsg) {
 		ON CONFLICT(room, peer_id) DO UPDATE SET display_name=excluded.display_name, stream_count=excluded.stream_count, last_seen=excluded.last_seen`,
 		room, peerID, displayName, streamCount, time.Now().Unix())
 
+	// If this peer_id already has an active connection in the room, evict it.
+	// Clear its room/peerID so the old readPump's deferred h.leave(c) becomes
+	// a no-op and doesn't accidentally remove the NEW connection from the room.
+	if roomConns, ok := h.rooms[room]; ok {
+		if old, exists := roomConns[peerID]; exists && old != c {
+			log.Printf("peer %s reconnecting in room %s — evicting old connection", peerID, room)
+			delete(roomConns, peerID)
+			old.room = ""
+			old.peerID = ""
+			close(old.send) // terminates writePump, which closes the WebSocket
+		}
+	}
+
 	// Build peer list + display names from in-memory connections
 	peers := []string{}
 	peerDisplayNames := map[string]*string{}
@@ -333,6 +346,7 @@ func (h *hub) leaveUnlocked(c *conn) {
 // ---------------------------------------------------------------------------
 
 func (c *conn) sendJSON(v any) {
+	defer func() { recover() }() // send may be closed if connection was evicted
 	raw, err := json.Marshal(v)
 	if err != nil {
 		log.Printf("warn: sendJSON marshal error for peer %s: %v", c.peerID, err)
@@ -375,7 +389,12 @@ func (c *conn) writePump() {
 func (c *conn) readPump(h *hub) {
 	defer func() {
 		h.leave(c)
-		close(c.send)
+		// send may already be closed if this connection was evicted by a
+		// reconnecting peer. Recover from the double-close panic.
+		func() {
+			defer func() { recover() }()
+			close(c.send)
+		}()
 		c.ws.Close()
 	}()
 

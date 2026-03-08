@@ -504,7 +504,9 @@ async fn run_reconnect_as_initiator(
     // Fetch fresh ICE servers
     let fresh_ice = fetch_metered_ice_servers().await.unwrap_or_else(|_| metered_stun_fallback());
 
-    // Reconnect signaling
+    // Reconnect signaling — this also initiates WebRTC connections for peers
+    // in the room that aren't in our mesh (which includes remote_peer_id since
+    // we called remove_peer above). No separate re_initiate needed.
     let reconnect_start = Instant::now();
     mesh.reconnect_signaling(
         server_url,
@@ -516,10 +518,6 @@ async fn run_reconnect_as_initiator(
     .await?;
     let reconnect_elapsed = reconnect_start.elapsed();
     info!(elapsed = ?reconnect_elapsed, "Signaling reconnected");
-
-    // The remote peer should still be in the room. re_initiate will create a new offer.
-    println!("Re-initiating WebRTC to {remote_peer_id}...");
-    mesh.re_initiate(remote_peer_id).await?;
 
     // Wait for DataChannels to reopen
     println!("Waiting for DataChannels to reopen...");
