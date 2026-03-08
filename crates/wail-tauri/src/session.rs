@@ -216,11 +216,17 @@ async fn session_loop(
     // IPC: listen for plugin connections.
     // Use TcpSocket builder to set SO_REUSEADDR before binding, so that reconnecting
     // quickly after a disconnect doesn't fail with WSAEADDRINUSE (os error 10048) on Windows.
+    // In test mode, bind to port 0 (OS-assigned) to avoid conflicts — no plugins will connect.
     let tcp_socket = tokio::net::TcpSocket::new_v4()?;
     tcp_socket.set_reuseaddr(true)?;
-    tcp_socket.bind(std::net::SocketAddr::from(([127, 0, 0, 1], ipc_port)))?;
+    let bind_port = if test_mode { 0 } else { ipc_port };
+    tcp_socket.bind(std::net::SocketAddr::from(([127, 0, 0, 1], bind_port)))?;
     let ipc_listener = tcp_socket.listen(128)?;
-    ui_info!(&app, "IPC listening on port {ipc_port}");
+    if test_mode {
+        ui_info!(&app, "IPC skipped in test mode (bound to ephemeral port)");
+    } else {
+        ui_info!(&app, "IPC listening on port {ipc_port}");
+    }
 
     let mut ipc_pool = IpcWriterPool::new();
     let mut next_conn_id: usize = 0;
