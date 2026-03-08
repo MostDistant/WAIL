@@ -139,7 +139,6 @@ Each section lists test scenarios in a table with four fields:
 
 | Scenario | Status | Technique | Notes |
 |----------|--------|-----------|-------|
-| First `StateSnapshot` triggers `ForceBeat` and lifts `AudioSendGate` | missing | Integration | Join room with existing peer, receive one StateSnapshot, assert `beat_synced = true` and gate is open |
 | `ForceBeat` snaps local beat position to remote value | missing | Integration | Verify Link state after `ForceBeat(10.0)` reports beat ≈ 10.0 |
 | Subsequent StateSnapshots do not re-snap beat | missing | Integration | After initial sync, receive 5 more snapshots; assert `ForceBeat` called only once |
 | BPM drift detected from StateSnapshot and corrected | missing | Integration | StateSnapshot arrives with BPM 5.0 BPM different from `last_broadcast_bpm`; assert `SetTempo` called |
@@ -156,18 +155,7 @@ Each section lists test scenarios in a table with four fields:
 
 ## 5. Audio Pipeline
 
-### 5.1 AudioSendGate
-
-| Scenario | Status | Technique | Notes |
-|----------|--------|-----------|-------|
-| New peer (first in room) is not gated | covered | Unit | `first_peer_not_gated` |
-| Joiner is gated until StateSnapshot received | covered | Unit | `second_peer_gated_then_unlocked` |
-| Reconnect re-gates | covered | Unit | `reconnect_regates_until_beat_sync` |
-| First-in-room reconnect to empty room clears gate | covered | Unit | `first_peer_reconnects_to_empty_room` |
-| Gate actually suppresses `broadcast_audio` | missing | Integration | With gate active, call `broadcast_audio`; verify remote peer receives nothing. This is only unit tested today |
-| "All peers join simultaneously" — all receive StateSnapshot, all lift gate | missing | Integration | Two peers join with < 100ms gap, both see `n=1` in PeerList; verify both eventually lift their gate after exchanging StateSnapshots |
-
-### 5.2 Wire Format and Codec
+### 5.1 Wire Format and Codec
 
 | Scenario | Status | Technique | Notes |
 |----------|--------|-----------|-------|

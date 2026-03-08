@@ -1146,7 +1146,6 @@ async fn session_loop(
                         audio_bytes_recv,
                         audio_dc_open: dc_open,
                         plugin_connected: !ipc_pool.is_empty() || test_mode,
-                        audio_send_gated: false,
                         recording: recorder.is_some(),
                         recording_size_bytes: recorder.as_ref().map_or(0, |r| r.bytes_written()),
                     });
