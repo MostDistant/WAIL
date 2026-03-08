@@ -233,15 +233,20 @@ impl Plugin for WailSendPlugin {
     }
 
     fn reset(&mut self) {
-        self.cumulative_samples = 0;
-        self.frame_buffer.clear();
-        self.streaming_interval_index = None;
-        self.streaming_frame_number = 0;
-        if let Ok(mut bridge) = self.bridge.lock() {
-            if let Some(ref mut b) = *bridge {
-                b.reset();
+        // reset() is called inside assert_no_alloc (via start_processing → process_wrapper).
+        // AudioBridge::reset() drops RemoteIntervals/peer_identity_map Strings and
+        // recreates the Opus encoder/decoder — wrap in permit_alloc.
+        permit_alloc(|| {
+            self.cumulative_samples = 0;
+            self.frame_buffer.clear();
+            self.streaming_interval_index = None;
+            self.streaming_frame_number = 0;
+            if let Ok(mut bridge) = self.bridge.lock() {
+                if let Some(ref mut b) = *bridge {
+                    b.reset();
+                }
             }
-        }
+        });
     }
 
     fn process(

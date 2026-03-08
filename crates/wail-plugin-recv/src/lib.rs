@@ -263,16 +263,21 @@ impl Plugin for WailRecvPlugin {
     }
 
     fn reset(&mut self) {
-        self.cumulative_samples = 0;
-        self.pending_names.clear();
-        for name in &mut self.applied_slot_names {
-            *name = None;
-        }
-        if let Ok(mut bridge) = self.bridge.lock() {
-            if let Some(ref mut b) = *bridge {
-                b.reset();
+        // reset() is called inside assert_no_alloc (via start_processing → process_wrapper).
+        // Dropping Strings (pending_names, applied_slot_names, RemoteInterval, peer_identity_map)
+        // and recreating the Opus encoder/decoder all require allocation — wrap in permit_alloc.
+        permit_alloc(|| {
+            self.cumulative_samples = 0;
+            self.pending_names.clear();
+            for name in &mut self.applied_slot_names {
+                *name = None;
             }
-        }
+            if let Ok(mut bridge) = self.bridge.lock() {
+                if let Some(ref mut b) = *bridge {
+                    b.reset();
+                }
+            }
+        });
     }
 
     fn process(

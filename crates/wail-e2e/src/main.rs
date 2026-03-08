@@ -72,18 +72,20 @@ async fn main() -> Result<()> {
 
     let room = args.room.unwrap_or_else(|| format!("e2e-{}", &Uuid::new_v4().to_string()[..8]));
     let peer_id = format!("e2e-{}", &Uuid::new_v4().to_string()[..8]);
+    let identity = Uuid::new_v4().to_string();
     let global_timeout = Duration::from_secs(args.timeout);
 
     println!("=== WAIL E2E Test ===");
     println!("Room:       {room}");
     println!("Peer ID:    {peer_id}");
+    println!("Identity:   {identity}");
     println!("Server:     {}", args.server);
     println!("Intervals:  {}", args.intervals);
     println!("Burst:      {}", args.burst_intervals);
     println!("Timeout:    {global_timeout:.0?}");
     println!();
 
-    match timeout(global_timeout, run_test(&args.server, &room, &peer_id, args.intervals, args.burst_intervals)).await {
+    match timeout(global_timeout, run_test(&args.server, &room, &peer_id, &identity, args.intervals, args.burst_intervals)).await {
         Ok(Ok(())) => {
             println!("\n=== ALL TESTS PASSED ===");
             Ok(())
@@ -99,7 +101,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_test(server_url: &str, room: &str, peer_id: &str, num_intervals: u32, burst_intervals: u32) -> Result<()> {
+async fn run_test(server_url: &str, room: &str, peer_id: &str, identity: &str, num_intervals: u32, burst_intervals: u32) -> Result<()> {
     let mut results: Vec<TestResult> = Vec::new();
 
     // --- Phase 1: ICE servers ---
@@ -186,7 +188,7 @@ async fn run_test(server_url: &str, room: &str, peer_id: &str, num_intervals: u3
 
     // --- Phase 5: Sync message exchange (Hello + Ping/Pong) ---
     let t = Instant::now();
-    let rtt_ms = run_sync_exchange(&mut mesh, &mut sync_rx, peer_id).await?;
+    let rtt_ms = run_sync_exchange(&mut mesh, &mut sync_rx, peer_id, identity).await?;
     results.push(TestResult::pass(
         "Sync",
         format!("Hello exchanged, RTT={rtt_ms:.1}ms"),
@@ -226,12 +228,12 @@ async fn run_test(server_url: &str, room: &str, peer_id: &str, num_intervals: u3
     let detail = if we_reconnect {
         run_reconnect_as_initiator(
             &mut mesh, &mut sync_rx, &mut audio_rx,
-            server_url, room, peer_id, &remote_peer_id,
+            server_url, room, peer_id, identity, &remote_peer_id,
         ).await?
     } else {
         run_reconnect_as_waiter(
             &mut mesh, &mut sync_rx, &mut audio_rx,
-            peer_id, &remote_peer_id,
+            peer_id, identity, &remote_peer_id,
         ).await?
     };
     results.push(TestResult::pass("Reconnect", detail, t.elapsed()));
@@ -311,12 +313,13 @@ async fn run_sync_exchange(
     mesh: &mut PeerMesh,
     sync_rx: &mut mpsc::UnboundedReceiver<(String, SyncMessage)>,
     peer_id: &str,
+    identity: &str,
 ) -> Result<f64> {
-    // Send Hello
+    // Send Hello with a real identity (same as Tauri app does)
     mesh.broadcast(&SyncMessage::Hello {
         peer_id: peer_id.to_string(),
         display_name: Some("e2e-test".into()),
-        identity: None,
+        identity: Some(identity.to_string()),
     })
     .await;
 
@@ -325,6 +328,7 @@ async fn run_sync_exchange(
     mesh.broadcast(&SyncMessage::Ping { id: 1, sent_at_us: ping_sent }).await;
 
     let mut got_hello = false;
+    let mut hello_had_identity = false;
     let mut rtt_us: Option<i64> = None;
 
     let result = timeout(Duration::from_secs(10), async {
@@ -332,7 +336,10 @@ async fn run_sync_exchange(
             tokio::select! {
                 Some((from, msg)) = sync_rx.recv() => {
                     match msg {
-                        SyncMessage::Hello { .. } => { got_hello = true; }
+                        SyncMessage::Hello { identity: ref id, .. } => {
+                            got_hello = true;
+                            hello_had_identity = id.is_some();
+                        }
                         SyncMessage::Ping { id, sent_at_us } => {
                             mesh.send_to(&from, &SyncMessage::Pong {
                                 id,
@@ -357,7 +364,12 @@ async fn run_sync_exchange(
     .await;
 
     match result {
-        Ok(Ok(())) => Ok(rtt_us.unwrap_or(0) as f64 / 1000.0),
+        Ok(Ok(())) => {
+            if !hello_had_identity {
+                warn!("Remote Hello arrived without identity — slot assignment will be skipped on Tauri side");
+            }
+            Ok(rtt_us.unwrap_or(0) as f64 / 1000.0)
+        }
         Ok(Err(e)) => bail!("Sync exchange failed: {e}"),
         Err(_) => {
             let detail = if !got_hello { "no Hello received" } else { "Hello OK but no Pong" };
@@ -565,6 +577,7 @@ async fn run_reconnect_as_initiator(
     server_url: &str,
     room: &str,
     peer_id: &str,
+    identity: &str,
     remote_peer_id: &str,
 ) -> Result<String> {
     println!("Closing WebRTC connection...");
@@ -609,7 +622,7 @@ async fn run_reconnect_as_initiator(
 
     // Verify sync
     println!("Verifying sync after reconnect...");
-    let rtt_ms = run_sync_exchange(mesh, sync_rx, peer_id).await?;
+    let rtt_ms = run_sync_exchange(mesh, sync_rx, peer_id, identity).await?;
     info!(rtt_ms, "Post-reconnect sync OK");
 
     // Verify audio
@@ -632,6 +645,7 @@ async fn run_reconnect_as_waiter(
     sync_rx: &mut mpsc::UnboundedReceiver<(String, SyncMessage)>,
     audio_rx: &mut mpsc::Receiver<(String, Vec<u8>)>,
     peer_id: &str,
+    identity: &str,
     remote_peer_id: &str,
 ) -> Result<String> {
     println!("Waiting for remote peer to disconnect and reconnect...");
@@ -713,7 +727,7 @@ async fn run_reconnect_as_waiter(
 
     // Verify sync
     println!("Verifying sync after reconnect...");
-    let rtt_ms = run_sync_exchange(mesh, sync_rx, peer_id).await?;
+    let rtt_ms = run_sync_exchange(mesh, sync_rx, peer_id, identity).await?;
     info!(rtt_ms, "Post-reconnect sync OK");
 
     // Verify audio
