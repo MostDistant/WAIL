@@ -163,13 +163,7 @@ These are blocked by one or more items in Part 1. Build the relevant gap first.
 - [ ] `IntervalBoundary` from peer ahead → `interval.sync_to(index)` called; local tracker catches up
 - [ ] `IntervalConfig` mid-session → `interval.beats_per_interval()` changes to reflect new bars/quantum
 
-### §5.1 AudioSendGate Integration
-*Requires: session-level test harness*
-
-- [ ] Gate active → `broadcast_audio` call reaches no remote peer
-- [ ] Simultaneous join (both peers see `n = 1`) → both exchange StateSnapshots and both lift gate
-
-### §5.3 Slot Assignment (Session Level)
+### §5.2 Slot Assignment (Session Level)
 *Requires: session-level test harness*
 *(Note: ring.rs already covers slot logic at the ring buffer level; these verify session-level wiring.)*
 
@@ -179,14 +173,14 @@ These are blocked by one or more items in Part 1. Build the relevant gap first.
 - [ ] 32nd peer when all slots full → no slot assigned, no panic
 - [ ] `slot_affinity` preserved across a signaling reconnect
 
-### §5.4 Channel Backpressure
+### §5.3 Channel Backpressure
 *Requires: session-level test harness*
 
 - [ ] `audio_tx` at capacity 64 → next frame dropped, debug log emitted
 - [ ] Dropped frames are not counted in `audio_intervals_received`
 - [ ] `ipc_from_plugin_tx` at capacity → drop logged, no panic
 
-### §6.3 Signaling Reconnection
+### §6.2 Signaling Reconnection
 *Requires: `evict_peer` + session-level test harness*
 
 - [ ] Signaling channel close (eviction) → session enters reconnect loop
@@ -214,7 +208,6 @@ These are blocked by one or more items in Part 1. Build the relevant gap first.
 - [ ] Status transitions logged as `"old → new"` via `ui_info!`
 - [ ] At least two `status:update` events emitted within 5 s
 - [ ] `StatusUpdate.audio_dc_open` is `false` before connection, `true` after
-- [ ] `StatusUpdate.audio_send_gated` is `true` while gated, `false` after beat sync
 - [ ] `PeerInfo.rtt_ms` is `Some` and `> 0` after a Ping/Pong exchange
 
 ---

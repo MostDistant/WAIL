@@ -16,9 +16,8 @@ This document describes the complete networking stack in WAIL — from the momen
 8. [Audio Pipeline](#8-audio-pipeline)
 9. [Failure Detection and Reconnection](#9-failure-detection-and-reconnection)
 10. [Peer Status State Machine](#10-peer-status-state-machine)
-11. [AudioSendGate](#11-audioSendGate)
-12. [Clock Synchronization](#12-clock-synchronization)
-13. [Known Edge Cases and Issues](#13-known-edge-cases-and-issues)
+11. [Clock Synchronization](#11-clock-synchronization)
+12. [Known Edge Cases and Issues](#12-known-edge-cases-and-issues)
 
 ---
 
@@ -352,9 +351,6 @@ DAW → [WAIL Send plugin] → TCP IPC → session_loop
                                          │
                               ipc_from_plugin_rx
                                          │
-                              AudioSendGate.is_gated()?
-                                   yes → drop
-                                   no  ↓
                               mesh.broadcast_audio(wire_data)
                                          │
                               PeerConnection.send_audio()
@@ -540,36 +536,7 @@ Status derivation is centralized in `PeerRegistry::derive_status()`, which takes
 
 ---
 
-## 11. AudioSendGate
-
-The AudioSendGate prevents audio transmission until the new peer is beat-synchronized with the session. Without this, a late-joining peer would transmit audio that is misaligned with the interval boundaries the other peers are using.
-
-```
-State: gated = false
-
-on_peer_list(n):
-  if n > 0 → gated = true   (joining a room that has peers)
-  if n = 0 → gated = false  (first peer, nothing to sync to)
-
-on_beat_synced():
-  gated = false              (first StateSnapshot received → beat aligned)
-
-on_reconnect():
-  gated = true               (signaling reconnect → must re-sync)
-
-is_gated():
-  if gated → drop all outgoing audio intervals
-```
-
-The gate only applies to the **local → remote** direction. Incoming audio from peers is always accepted regardless of gate state.
-
-**Edge case:** The gate is lifted by the first `StateSnapshot` received. If all peers in the room are also newly joined (e.g., simultaneous join), none of them will have sent a StateSnapshot yet. In this case, all peers will be gated forever — no one sends audio.
-
-The gate is never lifted unless a StateSnapshot arrives. A workaround exists: if you join an empty room (`n = 0`), the gate is not set, so the first peer starts sending. But if two peers join simultaneously and both see `n = 0` in the PeerList (race condition possible if join requests are processed simultaneously by the server), neither will be gated either.
-
----
-
-## 12. Clock Synchronization
+## 11. Clock Synchronization
 
 WAIL uses an NTP-style algorithm for peer RTT measurement:
 
@@ -589,7 +556,7 @@ Pings are broadcast to all peers every 2 seconds (`PING_INTERVAL_MS = 2000`). Po
 
 ---
 
-## 13. Known Edge Cases and Issues
+## 12. Known Edge Cases and Issues
 
 ### A. Duplicate PeerFailed signals
 
@@ -617,15 +584,7 @@ Signaling reconnection is implemented as a non-blocking state machine (`Signalin
 
 The `mesh.poll_signaling()` arm is guarded with `if signaling_reconnect.is_none()` so the dead mesh is not polled during reconnection.
 
-### F. Audio send gate "all peers join simultaneously" deadlock
-
-Described in section 11. Two peers joining simultaneously both see `PeerList { peers: [] }` (empty), so neither is gated. They exchange StateSnapshots and both lift the gate. This works correctly.
-
-The problematic case is if two peers join nearly simultaneously and both see `n = 1` (the other peer is in the list). Both will be gated and wait for a StateSnapshot. But StateSnapshots are sent by the Link poller (every ~200ms via `LinkEvent::StateUpdate`). These events happen regardless of the gate — the gate only blocks outgoing **audio**, not outgoing StateSnapshots. So both peers will lift their gate once they receive the other peer's StateSnapshot. This works correctly.
-
-The only real deadlock is if a peer joins a room where all existing peers are gated and not sending StateSnapshots. But StateSnapshots are sent by the Link state poller unconditionally — they are not gated.
-
-### G. TURN credential expiry mid-session
+### F. TURN credential expiry mid-session
 
 TURN credentials are fetched once at session start. If the session outlasts the credential TTL and a peer fails mid-session, `re_initiate()` will use the stale credentials. The credentials are not refreshed on reconnect.
 
@@ -638,16 +597,16 @@ let ice = match wail_net::fetch_metered_ice_servers().await {
 ```
 But individual peer reconnections (PeerFailed → re_initiate) do not. The mesh holds its `ice_servers` from construction time.
 
-### H. WebSocket signaling throughput
+### G. WebSocket signaling throughput
 
 With the WebSocket signaling server, signals are delivered instantly (no polling delay). This eliminates the previous bottleneck where at most 5 outgoing signals were processed per 5-second poll tick.
 
-### I. Liveness watchdog peer seeding (fixed)
+### H. Liveness watchdog peer seeding (fixed)
 
 `peer_last_seen` is updated on both sync and audio messages. Previously, peers that appeared in the mesh (via `PeerJoined` or `PeerListReceived`) but never sent a single message were invisible to the watchdog and could sit in "connecting" state forever.
 
 Now fixed: `peer_last_seen` is seeded with `Instant::now()` when a peer first appears — on `PeerJoined`, on `PeerListReceived` (for initial peers), and after `re_initiate` (for reconnecting peers). A peer that connects but stalls will be timed out by the watchdog after 30 seconds.
 
-### J. Audio channel drop with no feedback
+### I. Audio channel drop with no feedback
 
 When the audio bounded channel (capacity 64) is full, frames are dropped with a `debug!` log. This is invisible to the UI — `audio_intervals_received` is only incremented when a frame reaches the `audio_rx.recv()` call in the session loop, which happens after the drop point. The UI cannot distinguish "received 100 intervals" from "received 100, dropped 20."
