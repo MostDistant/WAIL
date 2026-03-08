@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.12.2 (2026-03-08)
+
+### Fixes
+
+- improve peer list layout alignment in Tauri UI (#161)
+- Fix peer list alignment: separate slot label and peer name into distinct flex items so they are evenly distributed alongside the status badge and RTT display.
+
 ## 1.12.1 (2026-03-08)
 
 ### Fixes
