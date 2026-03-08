@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, error, info, warn};
 
 /// Max payload per DataChannel message.  Keep each chunk small enough
@@ -61,16 +62,18 @@ fn make_audio_handler(
                     let complete = std::mem::take(&mut state.buffer);
                     *guard = None;
                     debug!("[DC AUDIO IN] reassembled chunked {} bytes", complete.len());
-                    if tx.try_send(complete).is_err() {
+                    if let Err(TrySendError::Full(_)) = tx.try_send(complete) {
                         warn!("[DC AUDIO IN] channel full — dropping reassembled frame");
                     }
+                    // TrySendError::Closed: receiver gone (disconnecting) — silently discard
                 }
             } else {
                 // Non-chunked message (small enough to fit in one DC message)
                 debug!("[DC AUDIO IN] non-chunked {} bytes", data.len());
-                if tx.try_send(data).is_err() {
+                if let Err(TrySendError::Full(_)) = tx.try_send(data) {
                     warn!("[DC AUDIO IN] channel full — dropping frame");
                 }
+                // TrySendError::Closed: receiver gone (disconnecting) — silently discard
             }
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
     };
