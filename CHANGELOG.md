@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.10.1 (2026-03-08)
+
+### Fixes
+
+- remove AudioSendGate that permanently blocked audio after reconnect (#153)
+- Remove AudioSendGate that could permanently block audio after signaling reconnect. Add INFO/WARN logging for audio transmission milestones and frame drops.
+
 ## 1.10.0 (2026-03-08)
 
 ### Features
