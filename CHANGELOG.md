@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.11.0 (2026-03-08)
+
+### Features
+
+- two-machine e2e tests and signaling reconnection fixes (#155)
+
 ## 1.10.1 (2026-03-08)
 
 ### Fixes
