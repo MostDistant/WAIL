@@ -459,7 +459,7 @@ impl PeerConnection {
             Some(dc) if dc.ready_state() == RTCDataChannelState::Open => {
                 if data.len() <= CHUNK_MAX {
                     // Fits in a single message — send as-is (no header)
-                    info!(peer = %self.remote_peer_id, bytes = data.len(), "[DC AUDIO OUT] sending single message");
+                    debug!(peer = %self.remote_peer_id, bytes = data.len(), "[DC AUDIO OUT] sending single message");
                     dc.send(&Bytes::copy_from_slice(data)).await?;
                 } else {
                     // Chunk it: each chunk = [WACH][total_len u32 LE][payload]

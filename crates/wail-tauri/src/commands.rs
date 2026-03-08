@@ -65,6 +65,7 @@ pub fn join_room(
     recording_stems: Option<bool>,
     recording_retention_days: Option<u32>,
     stream_count: Option<u16>,
+    test_mode: Option<bool>,
 ) -> Result<JoinResult, String> {
     let mut session = state.lock().map_err(|e| e.to_string())?;
     if session.is_some() {
@@ -94,6 +95,7 @@ pub fn join_room(
             None
         },
         stream_count: stream_count.unwrap_or(1),
+        test_mode: test_mode.unwrap_or(false),
     };
 
     let handle = crate::session::spawn_session(app, config).map_err(|e| e.to_string())?;
@@ -163,6 +165,18 @@ pub async fn cleanup_recordings(directory: String, retention_days: u32) -> Resul
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn get_active_session(state: State<'_, SessionState>) -> Option<JoinResult> {
+    let session = state.lock()
+        .map_err(|e| tracing::warn!("SessionState mutex poisoned: {e}"))
+        .ok()?;
+    session.as_ref().map(|h| JoinResult {
+        peer_id: h.peer_id.clone(),
+        room: h.room.clone(),
+        bpm: 120.0,
+    })
 }
 
 #[tauri::command]
