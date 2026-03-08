@@ -102,6 +102,9 @@ func openDB() *sql.DB {
 	// Clean stale peers from previous run
 	cutoff := time.Now().Unix() - stalePeerSec
 	db.Exec("DELETE FROM peers WHERE last_seen < ?", cutoff)
+	// Remove rooms whose peers were all stale/crashed — prevents a public ghost room
+	// from persisting across a restart and blocking private re-creation of the same name.
+	db.Exec("DELETE FROM rooms WHERE room NOT IN (SELECT DISTINCT room FROM peers)")
 	return db
 }
 
