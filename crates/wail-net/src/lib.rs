@@ -547,6 +547,11 @@ impl PeerMesh {
             server_url, room, &self.peer_id, password, self.stream_count, display_name,
         ).await?;
 
+        // Suppress the automatic `leave` on the old WebSocket — we're reconnecting,
+        // not departing. Without this, the server broadcasts PeerLeft to all remote
+        // peers, causing them to permanently remove us.
+        self.signaling.suppress_leave_on_close();
+
         // Replace signaling BEFORE processing the PeerList so that
         // initiate_connection() sends SDP offers via the new WebSocket.
         self.ice_servers = new_ice_servers;

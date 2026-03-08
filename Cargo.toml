@@ -4,6 +4,7 @@ members = [
     "crates/wail-core",
     "crates/wail-audio",
     "crates/wail-net",
+    "crates/wail-e2e",
     "crates/wail-plugin-send",
     "crates/wail-plugin-recv",
     "crates/wail-plugin-test",

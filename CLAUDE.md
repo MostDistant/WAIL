@@ -7,7 +7,7 @@ WAIL synchronizes Ableton Link sessions across the internet using WebRTC DataCha
 ## Project Structure
 
 ```
-Cargo workspace with 7 crates:
+Cargo workspace with 8 crates:
 
 crates/
 ├── wail-core/           Core sync library (no networking)
@@ -28,6 +28,8 @@ crates/
 │   ├── lib.rs            PeerMesh + ICE server config (Metered TURN)
 │   ├── signaling.rs      WebSocket signaling client
 │   └── peer.rs           WebRTC peer with "sync" + "audio" DataChannels
+├── wail-e2e/            Two-machine end-to-end test binary
+│   └── main.rs           8-phase test: ICE → Signaling → Discovery → WebRTC → Sync → Audio → Sustained → Reconnect
 ├── wail-tauri/          Tauri desktop app (session orchestration)
 │   ├── main.rs           App entry point
 │   ├── lib.rs            Tauri setup and plugin registration

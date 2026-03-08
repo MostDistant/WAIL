@@ -13,6 +13,19 @@ use wail_core::protocol::SignalMessage;
 pub struct SignalingClient {
     pub incoming_rx: mpsc::UnboundedReceiver<SignalMessage>,
     pub outgoing_tx: mpsc::UnboundedSender<SignalMessage>,
+    /// When set, the write task suppresses the automatic `leave` message on close.
+    /// Used by `reconnect_signaling` to avoid broadcasting PeerLeft to remote peers.
+    suppress_leave_tx: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+impl SignalingClient {
+    /// Suppress the automatic `leave` message when this client is dropped.
+    /// Call this before replacing the client during signaling reconnection.
+    pub fn suppress_leave_on_close(&self) {
+        if let Some(ref tx) = self.suppress_leave_tx {
+            let _ = tx.send(true);
+        }
+    }
 }
 
 /// A public room returned by the signaling server's list endpoint.
@@ -193,6 +206,7 @@ impl SignalingClient {
 
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<SignalMessage>();
+        let (suppress_leave_tx, suppress_leave_rx) = tokio::sync::watch::channel(false);
 
         // Push PeerList so PeerMesh sees existing peers
         if incoming_tx
@@ -306,13 +320,18 @@ impl SignalingClient {
                     return;
                 }
             }
-            // Outgoing channel closed — send leave
-            info!("Outgoing channel closed, sending leave");
-            let _ = ws_write
-                .send(Message::Text(
-                    serde_json::json!({"type": "leave"}).to_string(),
-                ))
-                .await;
+            // Outgoing channel closed — only send leave if not suppressed
+            // (suppressed during signaling reconnect to avoid broadcasting PeerLeft)
+            if *suppress_leave_rx.borrow() {
+                info!("Outgoing channel closed, leave suppressed (reconnecting)");
+            } else {
+                info!("Outgoing channel closed, sending leave");
+                let _ = ws_write
+                    .send(Message::Text(
+                        serde_json::json!({"type": "leave"}).to_string(),
+                    ))
+                    .await;
+            }
             let _ = ws_write.close().await;
         });
 
@@ -320,6 +339,7 @@ impl SignalingClient {
             Self {
                 incoming_rx,
                 outgoing_tx,
+                suppress_leave_tx: Some(suppress_leave_tx),
             },
             initial_peer_names,
         ))

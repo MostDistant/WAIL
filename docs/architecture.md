@@ -59,6 +59,11 @@ wail-plugin-test (integration test harness for Send/Recv plugins)
 ├── wail-audio
 └── wail-core
 
+wail-e2e (two-machine end-to-end test binary)
+├── wail-core
+├── wail-audio
+└── wail-net
+
 signaling-server/ (Go WebSocket signaling server, deployed to fly.io)
 ```
 
