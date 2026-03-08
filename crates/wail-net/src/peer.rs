@@ -62,14 +62,14 @@ fn make_audio_handler(
                     *guard = None;
                     debug!("[DC AUDIO IN] reassembled chunked {} bytes", complete.len());
                     if tx.try_send(complete).is_err() {
-                        debug!("[DC AUDIO IN] channel full — dropping reassembled frame");
+                        warn!("[DC AUDIO IN] channel full — dropping reassembled frame");
                     }
                 }
             } else {
                 // Non-chunked message (small enough to fit in one DC message)
                 debug!("[DC AUDIO IN] non-chunked {} bytes", data.len());
                 if tx.try_send(data).is_err() {
-                    debug!("[DC AUDIO IN] channel full — dropping frame");
+                    warn!("[DC AUDIO IN] channel full — dropping frame");
                 }
             }
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
@@ -173,7 +173,7 @@ impl PeerConnection {
 
         let pc = Arc::new(api.new_peer_connection(config).await?);
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let (audio_tx, audio_rx) = mpsc::channel(64);
+        let (audio_tx, audio_rx) = mpsc::channel(256);
 
         // Monitor connection state — notify failure channel on Failed/Disconnected
         let rpid = remote_peer_id.clone();

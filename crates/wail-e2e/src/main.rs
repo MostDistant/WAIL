@@ -30,6 +30,10 @@ struct Args {
     #[arg(long, default_value = "10")]
     intervals: u32,
 
+    /// Number of intervals for the burst (zero-delay) audio overflow test
+    #[arg(long, default_value = "32")]
+    burst_intervals: u32,
+
     /// Enable debug-level tracing
     #[arg(long)]
     verbose: bool,
@@ -75,10 +79,11 @@ async fn main() -> Result<()> {
     println!("Peer ID:    {peer_id}");
     println!("Server:     {}", args.server);
     println!("Intervals:  {}", args.intervals);
+    println!("Burst:      {}", args.burst_intervals);
     println!("Timeout:    {global_timeout:.0?}");
     println!();
 
-    match timeout(global_timeout, run_test(&args.server, &room, &peer_id, args.intervals)).await {
+    match timeout(global_timeout, run_test(&args.server, &room, &peer_id, args.intervals, args.burst_intervals)).await {
         Ok(Ok(())) => {
             println!("\n=== ALL TESTS PASSED ===");
             Ok(())
@@ -94,7 +99,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run_test(server_url: &str, room: &str, peer_id: &str, num_intervals: u32) -> Result<()> {
+async fn run_test(server_url: &str, room: &str, peer_id: &str, num_intervals: u32, burst_intervals: u32) -> Result<()> {
     let mut results: Vec<TestResult> = Vec::new();
 
     // --- Phase 1: ICE servers ---
@@ -203,6 +208,14 @@ async fn run_test(server_url: &str, room: &str, peer_id: &str, num_intervals: u3
     results.push(TestResult::pass("Sustained", detail, t.elapsed()));
     print_result(results.last().unwrap());
 
+    // --- Phase 7b: Burst audio (zero-delay flood to validate buffer headroom) ---
+    let t = Instant::now();
+    let detail = run_burst_audio(
+        &mut mesh, &mut audio_rx, &mut sync_rx, burst_intervals,
+    ).await?;
+    results.push(TestResult::pass("Burst", detail, t.elapsed()));
+    print_result(results.last().unwrap());
+
     // --- Phase 8: Reconnection ---
     // Lower peer ID reconnects, higher peer ID waits.
     let we_reconnect = peer_id < remote_peer_id.as_str();
@@ -249,18 +262,15 @@ async fn wait_for_peer(mesh: &mut PeerMesh) -> Result<String> {
                 info!(peer = %rid, name = ?display_name, "Peer joined");
                 return Ok(rid);
             }
-            Ok(Ok(Some(MeshEvent::PeerListReceived(count)))) => {
-                if count > 0 {
-                    let peers = mesh.connected_peers();
-                    if let Some(rid) = peers.into_iter().next() {
-                        return Ok(rid);
-                    }
-                }
-            }
             Ok(Ok(Some(_))) => {}
             Ok(Ok(None)) => bail!("Signaling channel closed"),
             Ok(Err(e)) => bail!("Signaling error: {e}"),
             Err(_) => {} // 1s poll timeout
+        }
+        // Responder case: the offer arrives as SignalingProcessed (not PeerJoined),
+        // which inserts the peer into the mesh map. Check after every event.
+        if let Some(rid) = mesh.connected_peers().into_iter().next() {
+            return Ok(rid);
         }
     }
 }
@@ -467,6 +477,83 @@ async fn run_sustained_audio(
         "{received}/{num_intervals} intervals, {total_bytes_recv} bytes, \
          {throughput_kbps:.1} kbps, avg_gap={avg_gap:.1?}, max_gap={max_gap:.1?}, \
          send={send_elapsed:.1?}, recv={recv_elapsed:.1?}"
+    ))
+}
+
+/// Phase 7b: Send N intervals with no delay between sends, validate all arrive.
+///
+/// This stresses the receive-side channel (capacity 256) to confirm there is
+/// enough buffer headroom for bursty traffic and that no frames are silently
+/// dropped.
+async fn run_burst_audio(
+    mesh: &mut PeerMesh,
+    audio_rx: &mut mpsc::Receiver<(String, Vec<u8>)>,
+    sync_rx: &mut mpsc::UnboundedReceiver<(String, SyncMessage)>,
+    num_intervals: u32,
+) -> Result<String> {
+    println!("\nBurst audio: sending {num_intervals} intervals with no delay...");
+
+    let send_start = Instant::now();
+    let mut total_bytes_sent: usize = 0;
+
+    for i in 0..num_intervals {
+        let freq = if i % 2 == 0 { 440.0 } else { 880.0 };
+        let wire_bytes = encode_test_interval(1000 + i as i64, freq, 120.0, 4, 4.0)?;
+        total_bytes_sent += wire_bytes.len();
+        mesh.broadcast_audio(&wire_bytes).await;
+        // yield to the runtime between sends so the receiver can make progress
+        tokio::task::yield_now().await;
+    }
+
+    let send_elapsed = send_start.elapsed();
+    info!(
+        intervals = num_intervals,
+        bytes = total_bytes_sent,
+        elapsed = ?send_elapsed,
+        "Burst send complete"
+    );
+
+    // Receive all intervals; fail if any are missing within the timeout.
+    let recv_start = Instant::now();
+    let mut received: u32 = 0;
+    let mut total_bytes_recv: usize = 0;
+
+    let recv_timeout = Duration::from_secs(30);
+    let result = timeout(recv_timeout, async {
+        while received < num_intervals {
+            tokio::select! {
+                Some((_from, data)) = audio_rx.recv() => {
+                    total_bytes_recv += data.len();
+                    received += 1;
+                }
+                Some((from, msg)) = sync_rx.recv() => {
+                    handle_sync_passthrough(mesh, &from, &msg).await;
+                }
+                result = mesh.poll_signaling() => { result?; }
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => bail!("Burst audio failed: {e}"),
+        Err(_) => bail!(
+            "Burst audio timed out: received {received}/{num_intervals} in {recv_timeout:.0?}"
+        ),
+    }
+
+    let recv_elapsed = recv_start.elapsed();
+    let throughput_kbps = if recv_elapsed.as_secs_f64() > 0.0 {
+        (total_bytes_recv as f64 * 8.0 / 1000.0) / recv_elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+
+    Ok(format!(
+        "{received}/{num_intervals} intervals, {total_bytes_recv} bytes, \
+         {throughput_kbps:.1} kbps, send={send_elapsed:.1?}, recv={recv_elapsed:.1?}"
     ))
 }
 
