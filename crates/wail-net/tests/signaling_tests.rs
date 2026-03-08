@@ -8,6 +8,7 @@ mod common;
 use std::time::Duration;
 
 use common::{start_configured_signaling_server, TestServerConfig};
+use wail_net::signaling::list_public_rooms;
 use wail_net::PeerMesh;
 
 // ---------------------------------------------------------------
@@ -253,6 +254,49 @@ async fn room_recreatable_after_last_peer_leaves() {
     )
     .await;
     assert!(result.is_ok(), "New peer should create room with new password");
+}
+
+/// Private (password-protected) rooms are excluded from the public room list.
+/// Public rooms are included.
+#[tokio::test(flavor = "multi_thread")]
+async fn private_room_not_in_public_list() {
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+
+    let server = start_configured_signaling_server(TestServerConfig::default()).await;
+    let ice = wail_net::default_ice_servers();
+
+    // peer-a joins a private room with a password
+    let (_mesh_private, _, _) = PeerMesh::connect_full(
+        &server.url, "secret-room", "peer-a", Some("hunter2"),
+        ice.clone(), false, 1, None,
+    )
+    .await
+    .expect("peer-a should join secret-room with password");
+
+    // peer-b joins a public room without a password
+    let (_mesh_public, _, _) = PeerMesh::connect_with_ice(
+        &server.url, "open-room", "peer-b", None, ice,
+    )
+    .await
+    .expect("peer-b should join open-room");
+
+    // Give the server a moment to register both rooms
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let rooms = list_public_rooms(&server.url)
+        .await
+        .expect("list_public_rooms should succeed");
+
+    let room_names: Vec<&str> = rooms.iter().map(|r| r.room.as_str()).collect();
+
+    assert!(
+        room_names.contains(&"open-room"),
+        "open-room should appear in the public list, got: {room_names:?}"
+    );
+    assert!(
+        !room_names.contains(&"secret-room"),
+        "secret-room should NOT appear in the public list, got: {room_names:?}"
+    );
 }
 
 /// `stream_count > 1` consumes multiple capacity slots.

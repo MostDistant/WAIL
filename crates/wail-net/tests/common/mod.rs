@@ -44,6 +44,9 @@ struct SignalingState {
     peer_senders: HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
     /// "room:peer_id" keys scheduled to receive `evicted` on next message
     evicted_peers: HashSet<String>,
+    /// Per-room passwords (plaintext) set when the room was first created with a password.
+    /// A room in this map is considered private and excluded from the public /rooms list.
+    room_passwords: HashMap<String, String>,
     config: TestServerConfig,
 }
 
@@ -219,7 +222,7 @@ async fn handle_join_phase(
             }
         }
 
-        // Password check
+        // Global password check (applies to all rooms when config.password is set)
         if let Some(required) = &s.config.password.clone() {
             let sent = password.as_deref().unwrap_or("");
             if sent != required {
@@ -234,6 +237,36 @@ async fn handle_join_phase(
                     .await;
                 let _ = socket.close().await;
                 return None;
+            }
+        }
+
+        // Per-room password check (mirrors Go server behaviour: room is private if
+        // the first peer created it with a password; subsequent joiners must match it).
+        if s.config.password.is_none() {
+            let room_is_new = !s.rooms.contains_key(&room);
+            if let Some(stored) = s.room_passwords.get(&room) {
+                // Room exists and is private — enforce the password.
+                let sent = password.as_deref().unwrap_or("");
+                if sent != stored.as_str() {
+                    let _ = socket
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "type": "join_error",
+                                "code": "unauthorized"
+                            })
+                            .to_string(),
+                        ))
+                        .await;
+                    let _ = socket.close().await;
+                    return None;
+                }
+            } else if room_is_new {
+                // Room is brand new — if the joining peer provides a password, mark it private.
+                if let Some(pw) = &password {
+                    if !pw.is_empty() {
+                        s.room_passwords.insert(room.clone(), pw.clone());
+                    }
+                }
             }
         }
 
@@ -374,6 +407,7 @@ async fn cleanup_peer(state: &SharedState, room: &str, peer_id: &str) {
         peers.retain(|p| p != peer_id);
         if peers.is_empty() {
             s.rooms.remove(room);
+            s.room_passwords.remove(room);
         }
     }
     s.peer_slots.remove(&format!("{room}:{peer_id}"));
@@ -406,9 +440,28 @@ async fn cleanup_peer(state: &SharedState, room: &str, peer_id: &str) {
 // Server startup
 // ---------------------------------------------------------------------------
 
+async fn handle_rooms(State(state): State<SharedState>) -> impl IntoResponse {
+    let s = state.lock().await;
+    let rooms: Vec<serde_json::Value> = s
+        .rooms
+        .iter()
+        .filter(|(name, _)| !s.room_passwords.contains_key(*name))
+        .map(|(name, peers)| {
+            serde_json::json!({
+                "room": name,
+                "peer_count": peers.len(),
+                "display_names": [],
+                "created_at": 0_i64,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "rooms": rooms }))
+}
+
 fn build_app(state: SharedState) -> Router {
     Router::new()
         .route("/ws", get(handle_ws))
+        .route("/rooms", get(handle_rooms))
         .with_state(state)
 }
 
