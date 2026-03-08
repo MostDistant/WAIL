@@ -195,11 +195,11 @@ async fn session_loop(
     let mut audio_gate = AudioSendGate::new();
 
     // Link peer count — updated every status tick; used to gate audio when Link is not running
-    let mut link_peers: u64 = 0;
 
     // Audio stats
     let mut audio_intervals_received: u64 = 0;
     let mut audio_bytes_sent: u64 = 0;
+    let mut audio_intervals_sent: u64 = 0;
     let mut audio_bytes_recv: u64 = 0;
 
     // IPC: listen for plugin connections.
@@ -388,13 +388,16 @@ async fn session_loop(
                 // Streaming audio frames (20ms Opus chunks, tag 0x05)
                 if let Some(wire_data) = IpcMessage::decode_audio_frame(&frame) {
                     if interval.current_index() <= Some(0) {
+                        debug!("audio dropped — interval not started yet (idx={:?})", interval.current_index());
                         continue;
                     }
-                    if audio_gate.is_gated() || link_peers == 0 {
+                    if audio_gate.is_gated() {
+                        debug!("audio dropped — send gate is closed");
                         continue;
                     }
                     let failed_peers = mesh.broadcast_audio(&wire_data).await;
                     audio_bytes_sent += wire_data.len() as u64;
+                    audio_intervals_sent += 1;
                     if !failed_peers.is_empty() {
                         // Don't retry individual frames — next frame will arrive in 20ms
                         debug!("Frame send failed for {} peers", failed_peers.len());
@@ -877,11 +880,9 @@ async fn session_loop(
                 for dead_id in dead_peers {
                     let name = peers.get(&dead_id).and_then(|p| p.display_name.as_deref()).unwrap_or(&dead_id).to_string();
                     ui_warn!(&app, "Peer {name} timed out (no messages for {PEER_LIVENESS_TIMEOUT:?})");
-                    // Bump last_seen to prevent re-detection before the PeerFailed event arrives
-                    if let Some(peer) = peers.get_mut(&dead_id) {
-                        peer.last_seen = Instant::now();
-                    }
-                    mesh.close_peer(&dead_id).await;
+                    remove_peer_fully(&mut peers, &mut ipc_pool, &dead_id).await;
+                    mesh.remove_peer(&dead_id).await;
+                    let _ = app.emit("peer:left", PeerLeftEvent { peer_id: dead_id });
                 }
             }
 
@@ -996,8 +997,6 @@ async fn session_loop(
 
                     // Update snapshots for next tick
                     peers.flush_audio_recv_prev();
-                    link_peers = state.num_peers;
-
                     let _ = app.emit("status:update", StatusUpdate {
                         bpm: state.bpm,
                         beat: state.beat,
@@ -1006,7 +1005,7 @@ async fn session_loop(
                         peers: peer_infos,
                         slots: slot_infos,
                         interval_bars: interval.bars(),
-                        audio_sent: 0,
+                        audio_sent: audio_intervals_sent,
                         audio_recv: audio_intervals_received,
                         audio_bytes_sent,
                         audio_bytes_recv,
@@ -1020,7 +1019,7 @@ async fn session_loop(
                     // Broadcast audio pipeline status to remote peers
                     let status_msg = SyncMessage::AudioStatus {
                         audio_dc_open: dc_open,
-                        intervals_sent: 0,
+                        intervals_sent: audio_intervals_sent,
                         intervals_received: audio_intervals_received,
                         plugin_connected: !ipc_pool.is_empty(),
                     };
