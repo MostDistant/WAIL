@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.10.0 (2026-03-08)
+
+### Features
+
+- add real Send→WebRTC→Recv plugin e2e test (#149)
+- Add real plugin-to-plugin WebRTC E2E test that loads both the Send and Recv CLAP plugins and validates audio flowing through the full stack: Send plugin → IPC → WebRTC DataChannel → IPC → Recv plugin.
+
+### Fixes
+
+- exclude private rooms from public server list after restart (#151)
+- interval sync and peer liveness watchdog race conditions (#152)
+- Fix new peer's outbound audio being silently dropped for up to one full interval (~8 seconds at 120 BPM, 4 bars) after joining a room. When a peer joins, their interval tracker starts at index 0 from a fresh Link session. The audio-send guard (`interval.current_index() <= Some(0)`) blocked all outbound audio until the next natural interval boundary fired. Now the existing peer immediately broadcasts its current interval index to the new peer on join (queued if the sync DataChannel isn't open yet), so the guard clears as soon as the first sync message is delivered rather than waiting up to 8 seconds.
+- Fix liveness watchdog incorrectly removing peers whose ICE connection never completed. Previously, the 30s watchdog would fire at the same time as the WebRTC ICE failure event, removing the peer from the mesh before `PeerFailed` could trigger reconnection. The watchdog now only applies to peers that have previously communicated; pre-connect failures are handled by the existing reconnection path (up to 5 attempts with exponential backoff). A 60s safety net handles the rare case where ICE hangs indefinitely without firing a Failed state.
+- Private (password-protected) rooms no longer appear in the public server list after a server restart.
+
 ## 1.9.2 (2026-03-08)
 
 ### Fixes
