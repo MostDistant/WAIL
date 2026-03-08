@@ -44,6 +44,159 @@ document.getElementById('plugin-error-ok-btn').addEventListener('click', () => {
   document.getElementById('plugin-error-modal').style.display = 'none';
 });
 
+// --- Room Name Generator ---
+// Dictionary 1: synthesis techniques, sound qualities, processing descriptors
+const ROOM_MODIFIERS = [
+  // Synthesis methods
+  "Analog", "Digital", "Modular", "Granular", "Wavetable", "Spectral",
+  "FM", "Additive", "Subtractive", "Physical", "Hybrid", "Generative",
+  "Algorithmic", "Euclidean", "Stochastic", "Polyrhythmic", "Microtonal",
+  "Bitcrushed", "Saturated", "Filtered",
+  // Sound texture
+  "Resonant", "Distorted", "Lush", "Bright", "Dark", "Warm", "Muted",
+  "Punchy", "Dense", "Sparse", "Rich", "Thick", "Heavy", "Massive",
+  "Delicate", "Hollow", "Crisp", "Tight", "Deep", "Raw",
+  // Material texture
+  "Fuzzy", "Gritty", "Silky", "Airy", "Glassy", "Crystalline", "Murky",
+  "Grainy", "Polished", "Rough", "Smooth", "Sharp", "Jagged", "Fractured",
+  "Porous", "Metallic", "Wooden", "Translucent", "Sheer", "Brittle",
+  // Musical character
+  "Harmonic", "Dissonant", "Chromatic", "Pentatonic", "Melodic", "Rhythmic",
+  "Syncopated", "Percussive", "Polyphonic", "Monophonic", "Atmospheric",
+  "Ambient", "Cinematic", "Minimal", "Chaotic", "Ethereal", "Dynamic",
+  "Textural", "Orchestral", "Improvised",
+  // FX and processing
+  "Compressed", "Reverberant", "Delayed", "Modulated", "Phased", "Flanged",
+  "Chorused", "Trembling", "Chopped", "Detuned", "Looped", "Sampled",
+  "Processed", "Quantized", "Shuffled", "Swung", "Glitchy", "Warped",
+  "Folded", "Stretched",
+  // Motion and energy
+  "Driving", "Pulsing", "Swirling", "Drifting", "Floating", "Swelling",
+  "Soaring", "Rising", "Fading", "Cascading", "Spiraling", "Flowing",
+  "Streaming", "Weaving", "Twisting", "Spinning", "Rolling", "Rumbling",
+  "Surging", "Plunging",
+  // Sonic texture
+  "Crackling", "Humming", "Buzzing", "Droning", "Shimmering", "Ringing",
+  "Echoing", "Chiming", "Hissing", "Growling", "Thundering", "Whispering",
+  "Roaring", "Murmuring", "Sizzling", "Howling", "Tolling", "Clicking",
+  "Snapping", "Sputtering",
+  // Elemental and environmental
+  "Liquid", "Frozen", "Glowing", "Burning", "Electric", "Acoustic",
+  "Industrial", "Celestial", "Subterranean", "Volcanic", "Arctic", "Tropical",
+  "Cosmic", "Galactic", "Lunar", "Solar", "Oceanic", "Glacial", "Abyssal",
+  "Prismatic",
+  // Vibe and mood
+  "Serene", "Hypnotic", "Turbulent", "Aggressive", "Progressive",
+  "Experimental", "Retro", "Vintage", "Futuristic", "Adaptive", "Radiant",
+  "Shadowed", "Vibrant", "Fragile", "Robust", "Fluid", "Piercing", "Subtle",
+  "Stark", "Tender",
+  // Structural and abstract
+  "Fractal", "Recursive", "Divergent", "Convergent", "Parallel", "Inverted",
+  "Mirrored", "Nested", "Branching", "Tangled", "Cyclic", "Iterative",
+  "Stacked", "Scattered", "Clustered", "Dispersed", "Morphing", "Evolving",
+  "Unraveling", "Awakening",
+];
+// Dictionary 2: instruments, sound sources, and audio components
+const ROOM_ELEMENTS = [
+  // Synth voices and concepts
+  "Synth", "Bass", "Arp", "Pad", "Lead", "Drone", "Pulse", "Chord",
+  "Riff", "Patch", "Oscillator", "Filter", "Resonance", "LFO", "Envelope",
+  "Sequencer", "Arpeggio", "Waveform", "Feedback", "Glitch",
+  // String instruments
+  "Guitar", "Piano", "Violin", "Cello", "Harp", "Lute", "Mandolin",
+  "Banjo", "Sitar", "Koto", "Dulcimer", "Zither", "Ukulele", "Balalaika",
+  "Bouzouki", "Oud", "Shamisen", "Erhu", "Guqin", "Theorbo",
+  // Keys and organ family
+  "Organ", "Harpsichord", "Clavichord", "Rhodes", "Wurlitzer", "Clavinet",
+  "Mellotron", "Ondes", "Cristal", "Celesta",
+  // Wind instruments
+  "Flute", "Piccolo", "Oboe", "Clarinet", "Bassoon", "Saxophone", "Trumpet",
+  "Trombone", "Tuba", "Flugelhorn", "Cornet", "Horn", "Recorder", "Ocarina",
+  "Harmonica", "Accordion", "Bagpipes", "Didgeridoo", "Duduk", "Shakuhachi",
+  // Tuned percussion
+  "Marimba", "Vibraphone", "Xylophone", "Glockenspiel", "Theremin",
+  "Kalimba", "Mbira", "Balafon", "Handpan", "Steeldrum",
+  // Drums and untuned percussion
+  "Kick", "Snare", "Hat", "Tom", "Clap", "Cymbal", "Cowbell", "Bongo",
+  "Conga", "Tabla", "Djembe", "Cajon", "Maracas", "Tambourine", "Gong",
+  "Woodblock", "Triangle", "Clave", "Rimshot", "Shaker",
+  // FX units and processors
+  "Reverb", "Delay", "Chorus", "Flanger", "Phaser", "Distortion",
+  "Overdrive", "Bitcrusher", "Ringmod", "Waveshaper", "Limiter",
+  "Compressor", "Clipper", "Saturator", "Expander", "Vocoder", "Sampler",
+  "Transient", "Preamp", "Sidechain",
+  // Modular and studio gear
+  "VCO", "VCF", "VCA", "Mixer", "Attenuator", "Quantizer", "Module",
+  "Rack", "Trigger", "Clock", "MIDI", "Keyboard", "Fader", "Crossfader",
+  "Interface", "Controller", "Patchbay", "Bus", "Matrix", "Oscilloscope",
+  // Vocal and choral
+  "Voice", "Choir", "Vox", "Whisper", "Breath", "Scat", "Beatbox",
+  "Chant", "Hymn", "Yodel", "Canon", "Fugue", "Round", "Ballad",
+  "Lullaby", "Dirge", "Shanty", "Spiritual", "Mantra", "Call",
+  // Sound and signal concepts
+  "Noise", "Signal", "Frequency", "Amplitude", "Spectrum", "Overtone",
+  "Undertone", "Resonator", "Transducer", "Exciter",
+  // Music theory
+  "Tone", "Note", "Pitch", "Timbre", "Scale", "Mode", "Harmony", "Melody",
+  "Rhythm", "Cadence", "Phrase", "Motif", "Theme", "Ostinato", "Groove",
+  "Beat", "Loop", "Sample", "Measure", "Tempo",
+  // Acoustic and natural sound sources
+  "Bell", "Chime", "Reed", "Bow", "Membrane", "Mallet", "Bowl", "Spring",
+  "Wire", "Fork",
+];
+// Dictionary 3: venues, events, states, and places
+const ROOM_VENUES = [
+  // Music venues and events
+  "Jam", "Session", "Lounge", "Studio", "Stage", "Gig", "Show",
+  "Concert", "Festival", "Showcase", "Performance", "Exhibition", "Revue",
+  "Recital", "Rehearsal", "Residency", "Soundcheck", "Opener", "Encore", "Set",
+  // Abstract spaces and structures
+  "Chamber", "Vault", "Nexus", "Temple", "Asylum", "Haven", "Forge",
+  "Portal", "Labyrinth", "Sanctum", "Vortex", "Core", "Hub", "Crypt",
+  "Tower", "Keep", "Spire", "Nave", "Atrium", "Rotunda",
+  // Celestial and cosmic
+  "Orbit", "Eclipse", "Nebula", "Cosmos", "Horizon", "Zenith", "Meridian",
+  "Solstice", "Equinox", "Singularity", "Nova", "Pulsar", "Quasar",
+  "Galaxy", "Aphelion", "Perihelion", "Transit", "Conjunction", "Nadir", "Apex",
+  // Earthly geography and nature
+  "Canyon", "Cavern", "Grotto", "Forest", "Meadow", "Tundra", "Delta",
+  "Reef", "Glacier", "Volcano", "Mesa", "Basin", "Archipelago", "Fjord",
+  "Estuary", "Bayou", "Savanna", "Plateau", "Atoll", "Peninsula",
+  // Architectural
+  "Cathedral", "Arena", "Amphitheater", "Citadel", "Fortress", "Monastery",
+  "Abbey", "Basilica", "Pavilion", "Gallery", "Cloister", "Colonnade",
+  "Arcade", "Stronghold", "Rampart", "Bastion", "Outpost", "Station",
+  "Terminal", "Junction",
+  // Mythological and fantastical
+  "Realm", "Domain", "Lair", "Refuge", "Hideout", "Threshold", "Passage",
+  "Gateway", "Crossroads", "Waypoint", "Dimension", "Plane", "Stratum",
+  "Sector", "Territory", "Province", "Circuit", "Ring", "Spiral", "Field",
+  // Water and flow
+  "Ocean", "Sea", "Lake", "River", "Spring", "Harbor", "Cove", "Lagoon",
+  "Gulf", "Strait", "Surge", "Tide", "Ebb", "Flux", "Current",
+  "Stream", "Channel", "Pool", "Cascade", "Torrent",
+  // Temporal states and phases
+  "Dawn", "Dusk", "Twilight", "Midnight", "Genesis", "Origin", "Terminus",
+  "Coda", "Finale", "Prologue", "Epilogue", "Interlude", "Overture",
+  "Climax", "Resolution", "Summit", "Drift", "Epoch", "Aeon", "Vesper",
+  // Atmosphere and light
+  "Aurora", "Prism", "Haze", "Fog", "Mist", "Shadow", "Glow", "Gleam",
+  "Shimmer", "Glare", "Blaze", "Flare", "Spark", "Ember", "Ash",
+  "Smoke", "Storm", "Thunder", "Lightning", "Rainbow",
+  // Institutions and places of learning
+  "Legacy", "Vision", "Quest", "Odyssey", "Workshop", "Laboratory",
+  "Academy", "Archive", "Conservatory", "Observatory", "Auditorium",
+  "Colosseum", "Scriptorium", "Atelier", "Foundry", "Greenhouse",
+  "Salon", "Parlor", "Ballroom", "Planetarium",
+];
+function generateRoomName() {
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+  return pick(ROOM_MODIFIERS) + pick(ROOM_ELEMENTS) + pick(ROOM_VENUES);
+}
+document.getElementById('generate-room-btn').addEventListener('click', () => {
+  document.getElementById('room').value = generateRoomName();
+});
+
 // State
 let unlisten = [];
 let testToneEnabled = false;
