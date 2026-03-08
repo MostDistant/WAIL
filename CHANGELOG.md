@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.10.0 (2026-03-08)
+
+### Features
+
+- add real Send→WebRTC→Recv plugin e2e test (#149)
+- Add real plugin-to-plugin WebRTC E2E test that loads both the Send and Recv CLAP plugins and validates audio flowing through the full stack: Send plugin → IPC → WebRTC DataChannel → IPC → Recv plugin.
+
 ## 1.9.2 (2026-03-08)
 
 ### Fixes
