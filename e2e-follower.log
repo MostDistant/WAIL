@@ -1,0 +1,17 @@
+    Finished `release` profile [optimized] target(s) in 0.21s
+     Running `target/release/wail-e2e --room e2e-34dc7c33 --server 'ws://192.168.7.141:8080' --verbose`
+=== WAIL E2E Test ===
+Room:       e2e-34dc7c33
+Peer ID:    e2e-a11d3644
+Server:     ws://192.168.7.141:8080
+Intervals:  10
+Timeout:    180s
+
+[2m2026-03-08T18:06:33.381405Z[0m [34mDEBUG[0m starting new connection: https://wail.metered.live/
+[2m2026-03-08T18:06:33.387154Z[0m [34mDEBUG[0m connecting to 13.107.253.70:443
+[2m2026-03-08T18:06:33.393266Z[0m [34mDEBUG[0m connected to 13.107.253.70:443
+[2m2026-03-08T18:06:33.432494Z[0m [34mDEBUG[0m pooling idle connection for ("https", wail.metered.live)
+[PASS] ICE: fetched 5 servers from Metered (56.3ms)
+[FAIL] Signaling: IO error: No route to host (os error 65) (364.2µs)
+
+=== TEST FAILED: Signaling connection failed: IO error: No route to host (os error 65) ===
