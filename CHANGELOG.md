@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.12.1 (2026-03-08)
+
+### Fixes
+
+- add burst audio test and validate buffer headroom (#159)
+
+#### Increase peer audio DataChannel receive buffer from 64 to 256 frames and upgrade
+
+silent drop logging from debug to warn. Add burst (zero-delay) audio phase to e2e
+test to validate buffer headroom under high-frequency packet sends.
+
 ## 1.12.0 (2026-03-08)
 
 ### Features
