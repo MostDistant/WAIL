@@ -169,7 +169,9 @@ pub async fn cleanup_recordings(directory: String, retention_days: u32) -> Resul
 
 #[tauri::command]
 pub fn get_active_session(state: State<'_, SessionState>) -> Option<JoinResult> {
-    let session = state.lock().ok()?;
+    let session = state.lock()
+        .map_err(|e| tracing::warn!("SessionState mutex poisoned: {e}"))
+        .ok()?;
     session.as_ref().map(|h| JoinResult {
         peer_id: h.peer_id.clone(),
         room: h.room.clone(),

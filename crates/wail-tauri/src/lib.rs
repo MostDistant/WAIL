@@ -130,10 +130,15 @@ pub fn run(test_args: Option<TestModeArgs>) {
                     test_mode: true,
                 };
 
-                let handle = session::spawn_session(app.handle().clone(), config)
-                    .expect("failed to spawn test session");
-                let state = app.state::<SessionState>();
-                let _ = state.lock().map(|mut s| *s = Some(handle));
+                match session::spawn_session(app.handle().clone(), config) {
+                    Ok(handle) => {
+                        let state = app.state::<SessionState>();
+                        let _ = state.lock().map(|mut s| *s = Some(handle));
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to spawn test session: {e}");
+                    }
+                }
             }
 
             Ok(())
