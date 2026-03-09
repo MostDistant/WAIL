@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.14.0 (2026-03-09)
+
+### Features
+
+- Added a simple editor UI to the WAIL Send and WAIL Recv plugins showing the plugin name, version number, and a clickable link to the GitHub project.
+
+### Fixes
+
+- add missing libx11-xcb-dev dependency for Linux build (#173)
+- Fix Linux CI build failure caused by missing `libx11-xcb-dev` system dependency.
+- Suppress noisy third-party crate logs (e.g. webrtc-rs ICE messages) from the UI log panel. Only WARN+ events from non-wail crates are forwarded to the frontend.
+
 ## 1.13.1 (2026-03-09)
 
 ### Fixes
