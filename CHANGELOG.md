@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.14.7 (2026-03-09)
+
+### Fixes
+
+- revert auto-merge of release PRs, restore manual gate (#192)
+
 ## 1.14.6 (2026-03-09)
 
 ### Fixes
