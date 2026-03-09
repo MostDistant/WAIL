@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.14.2 (2026-03-09)
+
+### Fixes
+
+- return KeepAlive from plugin process() to prevent DAW sleep (#179)
+- Fix plugins going inactive in Bitwig by returning `ProcessStatus::KeepAlive` instead of `ProcessStatus::Normal`. Both send and recv plugins must stay active at all times to maintain IPC communication with wail-app, even when outputting silence.
+
 ## 1.14.1 (2026-03-09)
 
 ### Fixes
