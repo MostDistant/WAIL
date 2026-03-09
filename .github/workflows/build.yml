@@ -29,7 +29,6 @@ jobs:
             ~/.cargo/git
             ~/.cargo/bin/cargo-binstall
             ~/.cargo/bin/cargo-nih-plug
-            ~/.cargo/bin/cargo-tauri
             target
           key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: macos-cargo-
@@ -43,45 +42,11 @@ jobs:
       - name: Install cargo-nih-plug
         run: which cargo-nih-plug || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 
-      - name: Install tauri-cli
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          which cargo-tauri && exit 0
-          TAURI_TAG=$(gh api repos/tauri-apps/tauri/releases --jq '[.[] | select(.tag_name | startswith("tauri-cli-v"))][0].tag_name')
-          gh release download "$TAURI_TAG" --repo tauri-apps/tauri --pattern "cargo-tauri-aarch64-apple-darwin.zip" --dir /tmp
-          unzip -o /tmp/cargo-tauri-aarch64-apple-darwin.zip -d ~/.cargo/bin/
-
       - name: Build plugin
         run: cargo xtask build-plugin
 
-      - name: Create opus.dll placeholder for cross-platform resources
-        run: mkdir -p target/bundled && touch target/bundled/opus.dll
-
-      - name: Clean stale Tauri bundles
-        run: rm -rf target/release/bundle/
-
-      - name: Build Tauri app
-        run: cargo tauri build
-
-      - name: List bundle output
-        run: find target/release/bundle -type d -maxdepth 3 2>/dev/null || echo "No bundle directory found"
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p dist
-          cp -r target/bundled/wail-plugin-send.clap dist/
-          cp -r target/bundled/wail-plugin-send.vst3 dist/
-          cp -r target/bundled/wail-plugin-recv.clap dist/
-          cp -r target/bundled/wail-plugin-recv.vst3 dist/
-          APP=$(find target/release/bundle -name "*.app" -maxdepth 3 2>/dev/null | head -1)
-          if [ -n "$APP" ]; then cp -r "$APP" dist/; else echo "Warning: no .app bundle found"; fi
-          cp target/release/bundle/dmg/*.dmg dist/ || true
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wail-macos
-          path: dist/
+      - name: Build workspace
+        run: cargo build --workspace
 
   build-windows:
     runs-on: windows-latest
