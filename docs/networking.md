@@ -404,7 +404,7 @@ Opus data length: u32 LE (4 bytes) [not present in wire — inferred]
 
 ### Slot assignment
 
-When audio arrives from a peer with a new `(peer_id, stream_id)` pair, the session assigns it a **slot** (0–30, matching `MAX_REMOTE_PEERS`). The recv plugin uses this slot to route audio to the correct output bus.
+When audio arrives from a peer with a new `(peer_id, stream_id)` pair, the session assigns it a **slot** (0–14, matching `MAX_REMOTE_PEERS`). The recv plugin uses this slot to route audio to the correct output bus.
 
 Slot assignment logic (mirrored in both the session and the recv plugin):
 1. Check `SlotAllocator::affinity` for `(identity, stream_id)` — if the peer has connected before with the same persistent identity, reuse their old slot.

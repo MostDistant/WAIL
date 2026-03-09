@@ -174,7 +174,7 @@ Each section lists test scenarios in a table with four fields:
 | Peer leaves, slot freed | missing | Integration | Peer 1 leaves; verify `slot_occupied[slot]` is false |
 | Peer with same identity gets same slot on rejoin (affinity) | missing | Integration | Peer leaves (slot freed, affinity stored), then rejoins with same identity; verify same slot assigned |
 | Slot affinity preserved across signaling reconnection | missing | Integration | Simulate signaling reconnect; verify `slot_affinity` not cleared |
-| All slots full → new peer cannot get slot | missing | Integration | Fill 31 slots (MAX_REMOTE_PEERS), add 32nd peer; assert no slot assigned, no panic |
+| All slots full → new peer cannot get slot | missing | Integration | Fill 15 slots (MAX_REMOTE_PEERS), add 16th peer; assert no slot assigned, no panic |
 | Multi-stream: stream_id > 0 gets its own slot | missing | Integration | Peer sends audio with `stream_id = 1`; verify separate slot from stream_id 0 |
 
 ### 5.4 Channel Backpressure and Drops

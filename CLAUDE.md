@@ -96,7 +96,7 @@ NINJAM-style double-buffer pattern with two separate plugins:
 1. **WAIL Send** plugin captures DAW audio into record slot for current interval
 2. At interval boundary: record slot → Opus encode → IPC → wail-app → WebRTC DataChannel
 3. **WAIL Recv** plugin receives remote intervals via IPC, decoded and mixed into playback slot
-4. Playback slot feeds audio output to DAW (main bus + up to 31 per-slot aux outputs)
+4. Playback slot feeds audio output to DAW (main bus + up to 15 per-slot aux outputs)
 5. Latency = exactly 1 interval (by design, like NINJAM)
 
 Two WebRTC DataChannels per peer:
