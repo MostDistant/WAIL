@@ -6,6 +6,7 @@ use std::time::Duration;
 use assert_no_alloc::permit_alloc;
 use crossbeam_channel::Sender;
 use nih_plug::prelude::*;
+use nih_plug_egui::{create_egui_editor, egui, EguiState};
 
 mod params;
 
@@ -69,6 +70,7 @@ pub struct WailSendPlugin {
     streaming_frame_number: u32,
     /// Opus frame size in samples per channel (set during initialize)
     opus_frame_size: usize,
+    editor_state: Arc<EguiState>,
 }
 
 impl Default for WailSendPlugin {
@@ -86,6 +88,7 @@ impl Default for WailSendPlugin {
             streaming_interval_index: None,
             streaming_frame_number: 0,
             opus_frame_size: 960, // 20ms at 48kHz, updated in initialize
+            editor_state: EguiState::from_size(300, 130),
         }
     }
 }
@@ -160,6 +163,27 @@ impl Plugin for WailSendPlugin {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        create_egui_editor(
+            self.editor_state.clone(),
+            (),
+            |_, _| {},
+            |egui_ctx, _setter, _state| {
+                egui::CentralPanel::default().show(egui_ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.heading("WAIL Send");
+                        ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
+                        ui.add_space(8.0);
+                        ui.hyperlink_to(
+                            "github.com/MostDistant/WAIL",
+                            "https://github.com/MostDistant/WAIL",
+                        );
+                    });
+                });
+            },
+        )
     }
 
     fn initialize(

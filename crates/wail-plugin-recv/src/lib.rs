@@ -8,6 +8,7 @@ use std::time::Duration;
 use assert_no_alloc::permit_alloc;
 use crossbeam_channel::Receiver;
 use nih_plug::prelude::*;
+use nih_plug_egui::{create_egui_editor, egui, EguiState};
 
 mod params;
 
@@ -61,6 +62,7 @@ pub struct WailRecvPlugin {
     /// The name most recently applied to each slot (indexed by slot).
     /// Used to avoid redundant `rescan_audio_port_names()` calls.
     applied_slot_names: Vec<Option<String>>,
+    editor_state: Arc<EguiState>,
 }
 
 impl Default for WailRecvPlugin {
@@ -78,6 +80,7 @@ impl Default for WailRecvPlugin {
             beat_fallback_warned: false,
             pending_names: HashMap::new(),
             applied_slot_names: vec![None; wail_audio::MAX_REMOTE_PEERS],
+            editor_state: EguiState::from_size(300, 130),
         }
     }
 }
@@ -185,6 +188,27 @@ impl Plugin for WailRecvPlugin {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        create_egui_editor(
+            self.editor_state.clone(),
+            (),
+            |_, _| {},
+            |egui_ctx, _setter, _state| {
+                egui::CentralPanel::default().show(egui_ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.heading("WAIL Recv");
+                        ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
+                        ui.add_space(8.0);
+                        ui.hyperlink_to(
+                            "github.com/MostDistant/WAIL",
+                            "https://github.com/MostDistant/WAIL",
+                        );
+                    });
+                });
+            },
+        )
     }
 
     fn initialize(

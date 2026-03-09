@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 wail-audio = { path = "../wail-audio" }
 nih_plug = { git = "https://github.com/MostDistant/nih-plug.git", branch = "feat/dynamic-audio-port-names", features = ["assert_process_allocs"] }
+nih_plug_egui = { git = "https://github.com/MostDistant/nih-plug.git", branch = "feat/dynamic-audio-port-names" }
 assert_no_alloc = { git = "https://github.com/robbert-vdh/rust-assert-no-alloc.git", branch = "feature/nested-permit-forbid" }
 crossbeam-channel = "0.5"
 tracing.workspace = true
