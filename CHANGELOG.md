@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.15.0 (2026-03-09)
+
+### Features
+
+- visual refresh of Tauri UI — clean minimal design (Linear/Raycast inspired) (#198)
+- Replace Windows NSIS installer with a Chocolatey package. Users install via `choco install wail --source <release-url>` with optional `--params "'/VST3Dir:path /CLAPDir:path'"` for custom plugin directories.
+
+### Fixes
+
+- create opus.dll placeholder on non-Windows to prevent tauri_build panic (#197)
+
 ## 1.14.7 (2026-03-09)
 
 ### Fixes
