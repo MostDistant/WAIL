@@ -49,78 +49,6 @@ jobs:
             wail-*-src.tar.gz
             wail-*-src.tar.gz.sha256
 
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-          submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/cargo-binstall
-            ~/.cargo/bin/cargo-nih-plug
-            ~/.cargo/bin/cargo-tauri
-            target
-          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: macos-cargo-
-
-      - name: Install opus
-        run: brew install opus
-
-      - name: Install cargo-binstall
-        run: which cargo-binstall || curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-
-      - name: Install cargo-nih-plug
-        run: which cargo-nih-plug || cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
-
-      - name: Install tauri-cli
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          which cargo-tauri && exit 0
-          TAURI_TAG=$(gh api repos/tauri-apps/tauri/releases --jq '[.[] | select(.tag_name | startswith("tauri-cli-v"))][0].tag_name')
-          gh release download "$TAURI_TAG" --repo tauri-apps/tauri --pattern "cargo-tauri-aarch64-apple-darwin.zip" --dir /tmp
-          unzip -o /tmp/cargo-tauri-aarch64-apple-darwin.zip -d ~/.cargo/bin/
-
-      - name: Build plugin
-        run: cargo xtask build-plugin
-
-      - name: Create opus.dll placeholder for cross-platform resources
-        run: mkdir -p target/bundled && touch target/bundled/opus.dll
-
-      - name: Clean stale Tauri bundles
-        run: rm -rf target/release/bundle/
-
-      - name: Build Tauri app
-        run: cargo tauri build --bundles dmg
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p dist
-          cp -r target/bundled/wail-plugin-send.clap dist/
-          cp -r target/bundled/wail-plugin-send.vst3 dist/
-          cp -r target/bundled/wail-plugin-recv.clap dist/
-          cp -r target/bundled/wail-plugin-recv.vst3 dist/
-          cp target/release/bundle/dmg/*.dmg dist/ || true
-
-      - name: Create .pkg installer
-        run: cargo xtask package-plugin --no-build
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wail-release-macos
-          path: |
-            dist/
-            target/wail-plugin-*-macos.pkg
-
   build-windows:
     runs-on: windows-latest
     steps:
@@ -304,7 +232,7 @@ jobs:
           path: dist/
 
   create-release:
-    needs: [build-macos, build-windows, build-linux, build-homebrew-tarball]
+    needs: [build-windows, build-linux, build-homebrew-tarball]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -330,15 +258,12 @@ jobs:
 
       - name: Zip platform artifacts
         run: |
-          cd wail-release-macos/dist && zip -r ../../wail-macos-x64.zip . && cd ../..
           cd wail-release-windows && zip -r ../wail-windows-x64.zip . && cd ..
           cd wail-release-linux && zip -r ../wail-linux-x64.zip . && cd ..
 
       - name: Find individual installers
         id: files
         run: |
-          echo "pkg=$(ls wail-release-macos/target/wail-plugin-*-macos.pkg 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
-          echo "dmg=$(ls wail-release-macos/dist/*.dmg 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
           echo "nsis=$(ls wail-release-windows/WAIL*.exe 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "msi=$(ls wail-release-windows/*.msi 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "appimage=$(ls wail-release-linux/*.AppImage 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
@@ -349,11 +274,8 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: |
-            wail-macos-x64.zip
             wail-windows-x64.zip
             wail-linux-x64.zip
-            ${{ steps.files.outputs.pkg }}
-            ${{ steps.files.outputs.dmg }}
             ${{ steps.files.outputs.nsis }}
             ${{ steps.files.outputs.msi }}
             ${{ steps.files.outputs.appimage }}
