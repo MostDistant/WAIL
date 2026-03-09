@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.14.3 (2026-03-09)
+
+### Fixes
+
+- log panel scrolls independently; top interface always visible (#181)
+- Fix log panel scrolling behavior to prevent entire page from scrolling. The log panel now scrolls independently within a fixed height, keeping the interface at the top always visible.
+
 ## 1.14.2 (2026-03-09)
 
 ### Fixes
