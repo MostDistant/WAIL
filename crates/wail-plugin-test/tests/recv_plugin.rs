@@ -35,8 +35,8 @@ fn load_recv_plugin() -> ClapTestHost {
 }
 
 /// Number of output ports matching the recv plugin's default layout:
-/// 1 main stereo + 31 aux stereo (per-peer/stream) = 32 total.
-const NUM_OUTPUT_PORTS: usize = 32;
+/// 1 main stereo + 15 aux stereo (per-peer/stream) = 16 total.
+const NUM_OUTPUT_PORTS: usize = 16;
 
 fn process_one_buffer(
     processor: &mut StartedPluginAudioProcessor<TestHost>,

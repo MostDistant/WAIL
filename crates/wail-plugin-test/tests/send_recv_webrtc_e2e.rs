@@ -26,8 +26,8 @@ use wail_plugin_test::{find_plugin_bundle, rms, sine_wave, ClapTestHost};
 const SEND_CLAP_ID: &str = "com.wail.send";
 const RECV_CLAP_ID: &str = "com.wail.recv";
 
-/// Number of output ports for the recv plugin: 1 main + 31 aux stereo.
-const NUM_OUTPUT_PORTS: usize = 32;
+/// Number of output ports for the recv plugin: 1 main + 15 aux stereo.
+const NUM_OUTPUT_PORTS: usize = 16;
 
 fn load_send() -> ClapTestHost {
     let path = find_plugin_bundle("wail-plugin-send");
