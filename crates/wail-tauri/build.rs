@@ -14,6 +14,17 @@ fn main() {
         }
     }
 
+    // On non-Windows, opus.dll doesn't exist but is declared in tauri.conf.json
+    // (needed for Windows bundles). Create an empty placeholder so tauri_build
+    // doesn't fail during `cargo tauri dev`.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let opus_dll = bundled.join("opus.dll");
+        if !opus_dll.exists() {
+            std::fs::write(&opus_dll, []).ok();
+        }
+    }
+
     // Clean stale tauri_build resource output. CI caches the target/ directory
     // which includes OUT_DIR; if the resource mapping in tauri.conf.json changed,
     // stale file/directory entries cause conflicts (EEXIST, EISDIR).
