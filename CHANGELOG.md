@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.15.1 (2026-03-10)
+
+### Fixes
+
+- replace --bundles none with --no-bundle for tauri-cli v2 (#199)
+- audio playback during NINJAM intervals (#201)
+- Fix peers hearing partial/compressed audio in NINJAM intervals. The outgoing audio guard incorrectly blocked all frames during interval index 0, and the Opus decoder crashed on missing frames instead of using Packet Loss Concealment.
+
 ## 1.15.0 (2026-03-09)
 
 ### Features
