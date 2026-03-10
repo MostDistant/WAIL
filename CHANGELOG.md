@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.15.3 (2026-03-10)
+
+### Fixes
+
+- update nuspec schema namespace for Chocolatey v2 compatibility (#204)
+
 ## 1.15.2 (2026-03-10)
 
 ### Fixes
