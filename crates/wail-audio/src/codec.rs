@@ -351,7 +351,7 @@ mod tests {
             .collect();
 
         let frame0 = encoder.encode_frame(&samples).unwrap();
-        let frame1 = encoder.encode_frame(&samples).unwrap();
+        let _frame1 = encoder.encode_frame(&samples).unwrap();
         let frame2 = encoder.encode_frame(&samples).unwrap();
 
         // Build interval blob with a gap at frame index 1 (zero-length entry)
