@@ -604,6 +604,7 @@ summary:hover {
 .peer-name {
   font-weight: 600;
   font-size: 12px;
+  flex: 1;
 }
 
 .peer-slot {
