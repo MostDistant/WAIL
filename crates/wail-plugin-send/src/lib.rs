@@ -331,7 +331,9 @@ impl Plugin for WailSendPlugin {
                     if let Some(ref tx) = self.buf_return_tx {
                         for mut ci in completed {
                             ci.samples.clear();
-                            let _ = tx.try_send(ci.samples);
+                            if tx.try_send(ci.samples).is_err() {
+                                nih_warn!("Send plugin: buffer return channel full — zero-alloc guarantee broken (capacity=8)");
+                            }
                         }
                     }
                 });
@@ -362,7 +364,7 @@ impl Plugin for WailSendPlugin {
                                 } else {
                                     self.streaming_frame_number + 1
                                 };
-                                let _ = ftx.try_send(RawFrame {
+                                if ftx.try_send(RawFrame {
                                     samples,
                                     interval_index: prev_idx,
                                     stream_id,
@@ -374,7 +376,9 @@ impl Plugin for WailSendPlugin {
                                     bpm: bpm_snap,
                                     quantum: q,
                                     bars: b,
-                                });
+                                }).is_err() {
+                                    nih_warn!("Send plugin: frame channel full at boundary — dropping audio frame (capacity=512)");
+                                }
                                 self.streaming_frame_number = 0;
                             }
                         }
@@ -387,7 +391,7 @@ impl Plugin for WailSendPlugin {
                         while self.frame_buffer.len() >= frame_samples {
                             let rest = self.frame_buffer.split_off(frame_samples);
                             let samples = std::mem::replace(&mut self.frame_buffer, rest);
-                            let _ = ftx.try_send(RawFrame {
+                            if ftx.try_send(RawFrame {
                                 samples,
                                 interval_index: interval_idx,
                                 stream_id,
@@ -399,7 +403,9 @@ impl Plugin for WailSendPlugin {
                                 bpm: bpm_snap,
                                 quantum: q,
                                 bars: b,
-                            });
+                            }).is_err() {
+                                nih_warn!("Send plugin: frame channel full — dropping audio frame (capacity=512)");
+                            }
                             self.streaming_frame_number += 1;
                         }
                     }

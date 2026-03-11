@@ -249,6 +249,14 @@ impl IntervalRing {
     /// Multiple peers' audio is summed together. Each unique `(peer_id, stream_id)`
     /// pair gets its own isolated slot for per-stream DAW routing.
     pub fn feed_remote(&mut self, peer_id: String, stream_id: u16, interval_index: i64, samples: Vec<f32>) {
+        // Accumulate into existing entry for the same (peer_id, stream_id, interval_index)
+        // to support incremental per-frame decode without creating hundreds of entries.
+        if let Some(existing) = self.pending_remote.iter_mut().find(|r| {
+            r.peer_id == peer_id && r.stream_id == stream_id && r.index == interval_index
+        }) {
+            existing.samples.extend_from_slice(&samples);
+            return;
+        }
         self.pending_remote.push(RemoteInterval {
             index: interval_index,
             peer_id,
@@ -1761,5 +1769,37 @@ mod tests {
         assert_eq!(slot_before, slot_after,
             "Slot should be re-keyed, not duplicated");
         assert_eq!(active.len(), 1, "Only one active slot should exist");
+    }
+
+    // --- Test: feed_remote accumulation ---
+
+    #[test]
+    fn feed_remote_accumulates_same_peer_stream_interval() {
+        let mut ring = make_ring();
+
+        // Feed three chunks for the same (peer, stream, interval)
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.1f32; 100]);
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.2f32; 200]);
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.3f32; 50]);
+
+        // Should produce exactly 1 pending entry, not 3
+        assert_eq!(ring.pending_remote_count(), 1);
+    }
+
+    #[test]
+    fn feed_remote_different_keys_stay_separate() {
+        let mut ring = make_ring();
+
+        // Different peer
+        ring.feed_remote("peer-a".into(), 0, 1, vec![0.1f32; 100]);
+        ring.feed_remote("peer-b".into(), 0, 1, vec![0.2f32; 100]);
+
+        // Different stream_id
+        ring.feed_remote("peer-a".into(), 1, 1, vec![0.3f32; 100]);
+
+        // Different interval_index
+        ring.feed_remote("peer-a".into(), 0, 2, vec![0.4f32; 100]);
+
+        assert_eq!(ring.pending_remote_count(), 4);
     }
 }

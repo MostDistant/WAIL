@@ -289,8 +289,397 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Test 6: Wire format preserves all fields through full pipeline
+    // Test 6: Incremental frame decode prevents boundary dropout
     // ---------------------------------------------------------------
+
+    /// Simulates the WAIF streaming decode pattern: individual 20ms Opus
+    /// frames are decoded and fed to the ring buffer incrementally throughout
+    /// an interval. Verifies that playback audio is immediately available at
+    /// the boundary — the bug that incremental decode fixes.
+    ///
+    /// Contrasts with the old FrameAssembler pattern where all decoded audio
+    /// arrived in one bulk chunk after the boundary, causing a dropout.
+    #[test]
+    fn incremental_frame_decode_available_at_boundary() {
+        use crate::codec::{AudioEncoder, AudioDecoder};
+        use crate::ring::IntervalRing;
+
+        let mut ring = IntervalRing::new(SR, CH, BARS, Q);
+        let mut encoder = AudioEncoder::new(SR, CH, BITRATE).unwrap();
+        let mut decoder = AudioDecoder::new(SR, CH).unwrap();
+
+        let frame_size = encoder.frame_size(); // 960 samples per channel at 48kHz
+        let frame_samples = frame_size * CH as usize; // interleaved
+
+        // Generate a recognizable signal (one frame of sine wave)
+        let frame_signal: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / CH as usize) as f32 / SR as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+
+        let buf_size = 4096;
+        let input = vec![0.0f32; buf_size];
+        let mut output = vec![0.0f32; buf_size];
+
+        // Start interval 0
+        ring.process(&input, &mut output, 0.0);
+
+        // Simulate streaming: encode 10 frames and decode each one incrementally,
+        // feeding decoded PCM to the ring as it arrives (before the boundary).
+        for _frame_num in 0..10 {
+            let opus_bytes = encoder.encode_frame(&frame_signal).unwrap();
+            let decoded_pcm = decoder.decode_frame(&opus_bytes).unwrap();
+            ring.feed_remote("peer-a".into(), 0, 0, decoded_pcm);
+        }
+
+        // Verify: pending_remote has exactly 1 accumulated entry (not 10)
+        assert_eq!(ring.pending_remote_count(), 1,
+            "Incremental feeds should accumulate into one entry");
+
+        // Cross boundary into interval 1 — audio should be immediately available
+        ring.process(&input, &mut output, 16.0);
+
+        let energy: f32 = output.iter().map(|s| s * s).sum::<f32>() / output.len() as f32;
+        assert!(energy.sqrt() > 0.01,
+            "Playback should have audio immediately at boundary (incremental decode), RMS={}",
+            energy.sqrt());
+    }
+
+    /// Proves the failure mode of bulk decode: if all decoded audio arrives
+    /// AFTER the boundary swap, the receiver hears silence for that interval.
+    /// This is the exact bug that incremental decode fixes.
+    #[test]
+    fn bulk_decode_after_boundary_causes_silence() {
+        use crate::ring::IntervalRing;
+
+        let mut ring = IntervalRing::new(SR, CH, BARS, Q);
+
+        let buf_size = 4096;
+        let input = vec![0.0f32; buf_size];
+        let mut output = vec![0.0f32; buf_size];
+
+        // Start interval 0
+        ring.process(&input, &mut output, 0.0);
+
+        // Cross boundary into interval 1 — NO remote audio fed yet
+        // (simulates old pattern: FrameAssembler hasn't finished)
+        ring.process(&input, &mut output, 16.0);
+
+        // Verify: silence at the boundary
+        let energy: f32 = output.iter().map(|s| s * s).sum::<f32>() / output.len() as f32;
+        assert!(energy.sqrt() < 0.001,
+            "Should be silence when no audio was fed before boundary, RMS={}",
+            energy.sqrt());
+
+        // NOW the bulk-decoded audio arrives (too late for interval 1 playback)
+        ring.feed_remote("peer-a".into(), 0, 0, vec![0.5f32; buf_size]);
+
+        // It sits in pending_remote, won't play until the NEXT boundary swap.
+        // Process more within interval 1 — still silence from the missed swap.
+        ring.process(&input, &mut output, 20.0);
+        let energy2: f32 = output.iter().map(|s| s * s).sum::<f32>() / output.len() as f32;
+        assert!(energy2.sqrt() < 0.001,
+            "Late-arriving audio should NOT play mid-interval, RMS={}",
+            energy2.sqrt());
+
+        // Only at the NEXT boundary (interval 2) does it finally play
+        ring.process(&input, &mut output, 32.0);
+        let energy3: f32 = output.iter().map(|s| s * s).sum::<f32>() / output.len() as f32;
+        assert!(energy3.sqrt() > 0.01,
+            "Audio should finally play at the next boundary, RMS={}",
+            energy3.sqrt());
+    }
+
+    // ---------------------------------------------------------------
+    // Test 6b: Realistic imperfection scenarios
+    // ---------------------------------------------------------------
+
+    /// Simulates partial late arrival: 90% of frames arrive before the
+    /// boundary, 10% arrive just after. With incremental decode, the
+    /// receiver still gets 90% of the audio at the boundary — no dropout.
+    /// The late 10% arrives before the next boundary and accumulates.
+    #[test]
+    fn partial_late_arrival_still_plays_at_boundary() {
+        use crate::codec::{AudioEncoder, AudioDecoder};
+        use crate::ring::IntervalRing;
+
+        let mut ring = IntervalRing::new(SR, CH, BARS, Q);
+        let mut encoder = AudioEncoder::new(SR, CH, BITRATE).unwrap();
+        let mut decoder = AudioDecoder::new(SR, CH).unwrap();
+
+        let frame_size = encoder.frame_size();
+        let frame_samples = frame_size * CH as usize;
+
+        let frame_signal: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / CH as usize) as f32 / SR as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+
+        let total_frames = 50; // ~1 second of audio at 20ms/frame
+        let on_time = (total_frames * 9) / 10; // 90% arrive before boundary
+        let _late = total_frames - on_time; // 10% arrive after
+
+        // Encode all frames up front (sender encodes during interval)
+        let mut encoded_frames: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..total_frames {
+            encoded_frames.push(encoder.encode_frame(&frame_signal).unwrap());
+        }
+
+        let buf_size = 4096;
+        let input = vec![0.0f32; buf_size];
+        let mut output = vec![0.0f32; buf_size];
+
+        // Start interval 0
+        ring.process(&input, &mut output, 0.0);
+
+        // 90% of frames arrive before boundary (incremental decode)
+        for opus_bytes in &encoded_frames[..on_time] {
+            let decoded_pcm = decoder.decode_frame(opus_bytes).unwrap();
+            ring.feed_remote("peer-a".into(), 0, 0, decoded_pcm);
+        }
+
+        // Cross boundary — should have substantial audio
+        ring.process(&input, &mut output, 16.0);
+
+        let rms_at_boundary: f32 = (output.iter().map(|s| s * s).sum::<f32>() / output.len() as f32).sqrt();
+        assert!(rms_at_boundary > 0.01,
+            "90% of frames arrived before boundary — should have audio, RMS={rms_at_boundary}");
+
+        // Late 10% arrives now (after boundary, during interval 1)
+        // These go to pending_remote for interval 0 — but since interval 0
+        // is already in the playback slot, they accumulate for the NEXT swap.
+        // In real usage, these would carry the next interval's index.
+        // Here we verify the ring doesn't break when late data arrives.
+        for opus_bytes in &encoded_frames[on_time..] {
+            let decoded_pcm = decoder.decode_frame(opus_bytes).unwrap();
+            // In practice, late frames would carry interval_index=1 (next interval).
+            // But even if they carry index 0, feed_remote handles it gracefully.
+            ring.feed_remote("peer-a".into(), 0, 1, decoded_pcm);
+        }
+
+        // Continue through interval 1 — no crash, no corruption
+        ring.process(&input, &mut output, 20.0);
+    }
+
+    /// Two peers with staggered frame arrival: peer A's frames interleave
+    /// with peer B's. Both should accumulate correctly and play at boundary.
+    #[test]
+    fn two_peers_interleaved_frame_arrival() {
+        use crate::codec::{AudioEncoder, AudioDecoder};
+        use crate::ring::IntervalRing;
+
+        let mut ring = IntervalRing::new(SR, CH, BARS, Q);
+        let mut enc_a = AudioEncoder::new(SR, CH, BITRATE).unwrap();
+        let mut enc_b = AudioEncoder::new(SR, CH, BITRATE).unwrap();
+        let mut dec_a = AudioDecoder::new(SR, CH).unwrap();
+        let mut dec_b = AudioDecoder::new(SR, CH).unwrap();
+
+        let frame_size = enc_a.frame_size();
+        let frame_samples = frame_size * CH as usize;
+
+        // Peer A: 440Hz, Peer B: 880Hz (different signals)
+        let signal_a: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / CH as usize) as f32 / SR as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.3
+            })
+            .collect();
+        let signal_b: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / CH as usize) as f32 / SR as f32;
+                (t * 880.0 * 2.0 * std::f32::consts::PI).sin() * 0.4
+            })
+            .collect();
+
+        let buf_size = 4096;
+        let input = vec![0.0f32; buf_size];
+        let mut output = vec![0.0f32; buf_size];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Simulate interleaved arrival: A, B, A, B, A, B...
+        // Like TCP packets arriving from two different peers
+        for _ in 0..20 {
+            let opus_a = enc_a.encode_frame(&signal_a).unwrap();
+            let pcm_a = dec_a.decode_frame(&opus_a).unwrap();
+            ring.feed_remote("peer-a".into(), 0, 0, pcm_a);
+
+            let opus_b = enc_b.encode_frame(&signal_b).unwrap();
+            let pcm_b = dec_b.decode_frame(&opus_b).unwrap();
+            ring.feed_remote("peer-b".into(), 0, 0, pcm_b);
+        }
+
+        // Should have exactly 2 pending entries (one per peer), not 40
+        assert_eq!(ring.pending_remote_count(), 2,
+            "Two peers should accumulate into 2 entries, not 40");
+
+        // Cross boundary — both peers should be mixed
+        ring.process(&input, &mut output, 16.0);
+
+        let rms_mixed: f32 = (output.iter().map(|s| s * s).sum::<f32>() / output.len() as f32).sqrt();
+        assert!(rms_mixed > 0.01,
+            "Mixed output from two interleaved peers should have energy, RMS={rms_mixed}");
+
+        // Verify per-peer isolation: both peers should have independent slots
+        let active = ring.active_peer_slots();
+        assert_eq!(active.len(), 2, "Should have 2 active peer slots");
+
+        let (a_idx, _, _) = active.iter().find(|(_, pid, _)| pid == "peer-a").unwrap();
+        let (b_idx, _, _) = active.iter().find(|(_, pid, _)| pid == "peer-b").unwrap();
+
+        let mut slot_a = vec![0.0f32; buf_size];
+        let mut slot_b = vec![0.0f32; buf_size];
+        ring.read_peer_playback(*a_idx, &mut slot_a);
+        ring.read_peer_playback(*b_idx, &mut slot_b);
+
+        let rms_a: f32 = (slot_a.iter().map(|s| s * s).sum::<f32>() / slot_a.len() as f32).sqrt();
+        let rms_b: f32 = (slot_b.iter().map(|s| s * s).sum::<f32>() / slot_b.len() as f32).sqrt();
+        assert!(rms_a > 0.001, "Peer A slot should have energy, RMS={rms_a}");
+        assert!(rms_b > 0.001, "Peer B slot should have energy, RMS={rms_b}");
+    }
+
+    /// Simulates frame loss: some frames never arrive (WebRTC DataChannel
+    /// can drop packets under congestion). The decoder uses PLC to fill
+    /// gaps, and audio still plays without crashing.
+    #[test]
+    fn frame_loss_with_plc_still_plays() {
+        use crate::codec::{AudioEncoder, AudioDecoder};
+        use crate::ring::IntervalRing;
+
+        let mut ring = IntervalRing::new(SR, CH, BARS, Q);
+        let mut encoder = AudioEncoder::new(SR, CH, BITRATE).unwrap();
+        let mut decoder = AudioDecoder::new(SR, CH).unwrap();
+
+        let frame_size = encoder.frame_size();
+        let frame_samples = frame_size * CH as usize;
+
+        let frame_signal: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / CH as usize) as f32 / SR as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+
+        let buf_size = 4096;
+        let input = vec![0.0f32; buf_size];
+        let mut output = vec![0.0f32; buf_size];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // Send 30 frames, but drop every 5th one (simulating 20% packet loss)
+        for frame_num in 0..30 {
+            let opus_bytes = encoder.encode_frame(&frame_signal).unwrap();
+
+            if frame_num % 5 == 3 {
+                // Frame lost — use PLC (empty decode)
+                let plc_pcm = decoder.decode_frame(&[]).unwrap();
+                ring.feed_remote("peer-a".into(), 0, 0, plc_pcm);
+            } else {
+                let decoded_pcm = decoder.decode_frame(&opus_bytes).unwrap();
+                ring.feed_remote("peer-a".into(), 0, 0, decoded_pcm);
+            }
+        }
+
+        assert_eq!(ring.pending_remote_count(), 1,
+            "All frames (including PLC) should accumulate into one entry");
+
+        // Cross boundary — audio should play despite losses
+        ring.process(&input, &mut output, 16.0);
+
+        let rms_val: f32 = (output.iter().map(|s| s * s).sum::<f32>() / output.len() as f32).sqrt();
+        assert!(rms_val > 0.005,
+            "Audio should play despite 20% frame loss (PLC fills gaps), RMS={rms_val}");
+    }
+
+    /// Simulates boundary skew: receiver's boundary is slightly ahead of
+    /// the sender's. The sender's final few frames arrive just after the
+    /// receiver's swap. With incremental decode, the vast majority of
+    /// audio is already accumulated — only a tiny tail is missed.
+    /// Across multiple intervals, every interval after the first has audio.
+    #[test]
+    fn boundary_skew_incremental_survives_across_intervals() {
+        use crate::codec::{AudioEncoder, AudioDecoder};
+        use crate::ring::IntervalRing;
+
+        let mut sender_ring = IntervalRing::new(SR, CH, BARS, Q);
+        let mut recv_ring = IntervalRing::new(SR, CH, BARS, Q);
+        let mut encoder = AudioEncoder::new(SR, CH, BITRATE).unwrap();
+        let mut decoder = AudioDecoder::new(SR, CH).unwrap();
+
+        let frame_size = encoder.frame_size();
+        let frame_samples = frame_size * CH as usize;
+
+        let frame_signal: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / CH as usize) as f32 / SR as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+
+        let buf_size = 512;
+        let silence = vec![0.0f32; buf_size];
+        let mut sender_out = vec![0.0f32; buf_size];
+        let mut recv_out = vec![0.0f32; buf_size];
+
+        let frames_per_interval = 50;
+        let beats_per_interval = (BARS as f64) * Q; // 16.0
+
+        let mut recv_rms_per_interval: Vec<f32> = Vec::new();
+
+        for interval_idx in 0..4i64 {
+            let base_beat = interval_idx as f64 * beats_per_interval;
+
+            // Sender processes through the interval, encoding frames
+            sender_ring.process(&frame_signal[..buf_size.min(frame_signal.len())], &mut sender_out, base_beat);
+
+            // Encode and deliver 95% of frames before receiver's boundary
+            let early_count = (frames_per_interval * 95) / 100;
+            for _ in 0..early_count {
+                let opus = encoder.encode_frame(&frame_signal).unwrap();
+                let pcm = decoder.decode_frame(&opus).unwrap();
+                recv_ring.feed_remote("sender".into(), 0, interval_idx, pcm);
+            }
+
+            // Receiver crosses boundary slightly BEFORE the sender's last frames
+            recv_ring.process(&silence, &mut recv_out, base_beat + beats_per_interval);
+
+            let rms_val: f32 = (recv_out.iter().map(|s| s * s).sum::<f32>() / recv_out.len() as f32).sqrt();
+            recv_rms_per_interval.push(rms_val);
+
+            // Late 5% arrives after receiver's boundary (goes to next interval)
+            for _ in early_count..frames_per_interval {
+                let opus = encoder.encode_frame(&frame_signal).unwrap();
+                let pcm = decoder.decode_frame(&opus).unwrap();
+                recv_ring.feed_remote("sender".into(), 0, interval_idx + 1, pcm);
+            }
+
+            // Sender also crosses boundary
+            sender_ring.process(&frame_signal[..buf_size.min(frame_signal.len())], &mut sender_out, base_beat + beats_per_interval);
+        }
+
+        // Interval 0 may have lower energy (Opus priming + first boundary).
+        // Intervals 1+ should all have audio (incremental decode ensures this).
+        for (i, &rms_val) in recv_rms_per_interval.iter().enumerate().skip(1) {
+            assert!(rms_val > 0.005,
+                "Interval {i} should have audio despite 5% boundary skew, RMS={rms_val}");
+        }
+
+        // Verify consistency: later intervals shouldn't vary wildly
+        let later_rms: Vec<f32> = recv_rms_per_interval[1..].to_vec();
+        if later_rms.len() >= 2 {
+            let max_r = later_rms.iter().cloned().fold(0.0f32, f32::max);
+            let min_r = later_rms.iter().cloned().fold(f32::MAX, f32::min);
+            if min_r > 0.0 {
+                assert!(max_r / min_r < 5.0,
+                    "RMS should be roughly consistent across intervals (max/min={:.2}): {:?}",
+                    max_r / min_r, recv_rms_per_interval);
+            }
+        }
+    }
 
     // ---------------------------------------------------------------
     // WAN NINJAM Tests: Prove two internet peers hear each other's

@@ -14,7 +14,7 @@ mod params;
 
 use params::WailRecvParams;
 use wail_audio::{
-    nearest_opus_rate, AudioBridge, AudioDecoder, AudioFrameWire, FrameAssembler,
+    nearest_opus_rate, AudioBridge, AudioDecoder, AudioFrameWire,
     IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV, IPC_TAG_AUDIO_PUB,
     IPC_TAG_PEER_JOINED_PUB, IPC_TAG_PEER_LEFT_PUB, IPC_TAG_PEER_NAME_PUB,
 };
@@ -248,7 +248,7 @@ impl Plugin for WailRecvPlugin {
             flag.store(true, Ordering::Relaxed);
         }
 
-        let (in_tx, in_rx) = crossbeam_channel::bounded::<(String, u16, i64, Vec<f32>)>(64);
+        let (in_tx, in_rx) = crossbeam_channel::bounded::<(String, u16, i64, Vec<f32>)>(512);
         self.ipc_incoming_rx = Some(in_rx);
 
         let (peer_tx, peer_rx) = crossbeam_channel::bounded::<PeerEvent>(32);
@@ -468,8 +468,6 @@ fn ipc_thread_recv(
 
     let mut decoders: HashMap<(String, u16), AudioDecoder> = HashMap::new();
 
-    let mut assembler = FrameAssembler::new();
-
     loop {
         if shutdown.load(Ordering::Relaxed) {
             tracing::info!("WAIL Recv IPC thread: shutdown requested, exiting");
@@ -518,36 +516,40 @@ fn ipc_thread_recv(
                                     if wire_data.starts_with(b"WAIF") {
                                         match AudioFrameWire::decode(&wire_data) {
                                             Ok(frame) => {
-                                                if frame.is_final {
-                                                    assembler.evict_stale(frame.interval_index);
-                                                }
-                                                if let Some(assembled) = assembler.insert(&peer_id, &frame) {
-                                                    let dec_key = (assembled.peer_id.clone(), assembled.stream_id);
-                                                    let dec = decoders.entry(dec_key).or_insert_with(|| {
-                                                        let rate = nearest_opus_rate(assembled.sample_rate);
-                                                        match AudioDecoder::new(rate, assembled.channels) {
-                                                            Ok(d) => d,
-                                                            Err(e) => {
-                                                                tracing::warn!(error = %e, "IPC recv: failed to create decoder, using fallback");
-                                                                AudioDecoder::new(opus_rate, channels).expect("fallback opus decoder at known-good params")
-                                                            }
-                                                        }
-                                                    });
-                                                    match dec.decode_interval(&assembled.opus_data) {
-                                                        Ok(samples) => {
-                                                            let _ = incoming_tx.try_send((
-                                                                assembled.peer_id,
-                                                                assembled.stream_id,
-                                                                assembled.interval_index,
-                                                                samples,
-                                                            ));
-                                                        }
+                                                // Decode each frame incrementally instead of
+                                                // buffering all frames and bulk-decoding when
+                                                // the final frame arrives. This ensures decoded
+                                                // PCM reaches the audio thread continuously,
+                                                // avoiding dropout at interval boundaries.
+                                                let dec_key = (peer_id.clone(), frame.stream_id);
+                                                let dec = decoders.entry(dec_key).or_insert_with(|| {
+                                                    match AudioDecoder::new(opus_rate, channels) {
+                                                        Ok(d) => d,
                                                         Err(e) => {
+                                                            tracing::warn!(error = %e, "IPC recv: failed to create decoder, using fallback");
+                                                            AudioDecoder::new(48000, channels).expect("fallback opus decoder at known-good params")
+                                                        }
+                                                    }
+                                                });
+                                                match dec.decode_frame(&frame.opus_data) {
+                                                    Ok(samples) => {
+                                                        if let Err(e) = incoming_tx.try_send((
+                                                            peer_id.clone(),
+                                                            frame.stream_id,
+                                                            frame.interval_index,
+                                                            samples,
+                                                        )) {
                                                             tracing::warn!(
                                                                 error = %e,
-                                                                "IPC recv: failed to decode assembled Opus audio"
+                                                                "IPC recv: failed to send decoded frame to audio thread (channel full)"
                                                             );
                                                         }
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                            error = %e,
+                                                            "IPC recv: failed to decode Opus frame"
+                                                        );
                                                     }
                                                 }
                                             }

@@ -228,6 +228,28 @@ impl AudioDecoder {
         Ok(output)
     }
 
+    /// Decode a single Opus packet into interleaved f32 samples.
+    ///
+    /// Pass an empty slice to trigger Opus Packet Loss Concealment (PLC),
+    /// which synthesizes a replacement frame from decoder state.
+    /// Returns one frame (frame_size * channels) of decoded audio.
+    pub fn decode_frame(&mut self, opus_data: &[u8]) -> Result<Vec<f32>> {
+        let ch = self.channels as usize;
+        let frame_samples = self.frame_size * ch;
+        let mut decode_buf = vec![0f32; frame_samples];
+
+        if opus_data.is_empty() {
+            let mut_signals = MutSignals::try_from(decode_buf.as_mut_slice())?;
+            let decoded = self.decoder.decode_float(None, mut_signals, false)?;
+            Ok(decode_buf[..decoded * ch].to_vec())
+        } else {
+            let opus_packet = Packet::try_from(opus_data)?;
+            let mut_signals = MutSignals::try_from(decode_buf.as_mut_slice())?;
+            let decoded = self.decoder.decode_float(Some(opus_packet), mut_signals, false)?;
+            Ok(decode_buf[..decoded * ch].to_vec())
+        }
+    }
+
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
@@ -370,6 +392,40 @@ mod tests {
         let decoded = decoder.decode_interval(&blob).unwrap();
         // Should produce 3 frames worth of samples (960 * 2 = 1920 per frame)
         assert_eq!(decoded.len(), 3 * frame_samples);
+    }
+
+    #[test]
+    fn decode_frame_roundtrip() {
+        let sample_rate = 48000;
+        let channels = 2;
+        let mut encoder = AudioEncoder::new(sample_rate, channels, 128).unwrap();
+        let mut decoder = AudioDecoder::new(sample_rate, channels).unwrap();
+
+        let frame_size = encoder.frame_size(); // 960 for 48kHz
+        let frame_samples = frame_size * channels as usize;
+
+        // Generate one 20ms frame of sine wave
+        let samples: Vec<f32> = (0..frame_samples)
+            .map(|i| {
+                let t = (i / channels as usize) as f32 / sample_rate as f32;
+                (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5
+            })
+            .collect();
+
+        let opus_bytes = encoder.encode_frame(&samples).unwrap();
+        let decoded = decoder.decode_frame(&opus_bytes).unwrap();
+
+        assert_eq!(decoded.len(), frame_samples);
+        let energy: f32 = decoded.iter().map(|s| s * s).sum();
+        assert!(energy > 0.0, "Decoded frame should have non-zero energy");
+    }
+
+    #[test]
+    fn decode_frame_plc_on_empty_input() {
+        let mut decoder = AudioDecoder::new(48000, 2).unwrap();
+        let decoded = decoder.decode_frame(&[]).unwrap();
+        // PLC should produce one frame worth of samples
+        assert_eq!(decoded.len(), 960 * 2);
     }
 
     #[test]
