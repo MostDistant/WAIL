@@ -147,18 +147,20 @@ Managed by [knope](https://github.com/knope-dev/knope) via `knope.toml`. All cra
 
 ### Recording changes
 
-When making a user-facing change (feature, fix, breaking change), create a changeset file:
+Conventional commit messages (`feat:`, `fix:`, `feat!:`) are the **sole** mechanism for changelog entries. Knope's `PrepareRelease` step processes **both** conventional commits and changeset files independently — using both for the same change produces duplicate changelog entries.
+
+**Do NOT create a changeset file for changes that already use a conventional commit prefix.** Changeset files are a fallback only for `chore:` commits (infrastructure, CI, docs) that need a changelog entry but won't be picked up by conventional commit parsing.
+
+If you need a changeset for a `chore:` commit:
 
 ```sh
 knope document-change
 ```
 
-This creates a markdown file in `.changeset/` describing what changed and the bump type (major/minor/patch). Commit the changeset file with your PR. Conventional commit messages (`feat:`, `fix:`, `feat!:`) also work and are picked up automatically.
-
-**Changeset frontmatter format:** The YAML frontmatter must use `default: <type>` (e.g., `default: minor`). Do NOT use `type: <type>` or package names — knope silently ignores unrecognized package keys. Example:
+**Changeset frontmatter format:** The YAML frontmatter must use `default: <type>` (e.g., `default: patch`). Do NOT use `type: <type>` or package names — knope silently ignores unrecognized package keys. Example:
 ```markdown
 ---
-default: minor
+default: patch
 ---
 
 Description of the change.
@@ -168,13 +170,13 @@ Description of the change.
 
 Releases are fully automated — no manual `knope` commands needed:
 
-1. **Push to `main`** → `auto-release.yml` runs `knope prepare-release`, which consumes `.changeset/` files + conventional commits, bumps versions, updates `CHANGELOG.md`, and opens/updates a PR from the `release` branch → `main`.
+1. **Push to `main`** → `auto-release.yml` runs `knope prepare-release`, which consumes conventional commits (and `.changeset/` files if present as a fallback), bumps versions, updates `CHANGELOG.md`, and opens/updates a PR from the `release` branch → `main`.
 2. **Merge the release PR** → `release-on-merge.yml` runs `knope release` (creates GitHub release + git tag) and dispatches artifact builds.
 3. **`release.yml`** builds platform artifacts (macOS, Windows, Linux — plugins + Tauri app installers) and uploads them to the GitHub release.
 
 ### Rules for agents
 
-- **Always create a changeset** for user-facing work. Run `knope document-change` or manually create a `.changeset/<short-name>.md` file.
+- **Use conventional commits for user-facing work** (`feat:`, `fix:`, `feat!:`). Do NOT also create a changeset file — knope processes both sources and this creates duplicate changelog entries.
 - **Never manually edit version numbers** in `Cargo.toml` or `tauri.conf.json` — knope handles this.
 - **Never manually create git tags** for releases — GitHub Actions handles tagging.
 - **Never run `knope release` or `knope prepare-release` locally** — GitHub Actions runs both automatically.

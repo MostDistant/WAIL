@@ -6,8 +6,6 @@
 
 - add peer chat to session view (#209)
 - show own stereo pair sends in session view (#212)
-- Add peer chat for WAIL session view. Musicians can now send text messages to other peers during jam sessions via a collapsible chat panel. Messages are sent over the existing WebRTC sync DataChannel and appear immediately on all connected peers with sender names and timestamps.
-- Session view now shows your own stereo pair sends (WAIL Send plugin connections), so you can see whether your audio is connected and actively sending.
 - Windows release now ships as a plain zip file (WAIL.exe + plugins + opus.dll) instead of a Chocolatey installer.
 
 ### Fixes
@@ -15,8 +13,6 @@
 - prevent audio dropout at interval boundaries and add channel overflow logging (#207)
 - isolate Opus decoder per interval to prevent state leak at boundaries (#210)
 - align connected badges in peer list (#211)
-- Fix Opus decoder state leak across interval boundaries in recv plugin.
-- Fix audio dropout at interval boundaries by decoding WAIF frames incrementally instead of waiting for full interval assembly.
 
 ## 1.15.3 (2026-03-10)
 
@@ -36,7 +32,6 @@
 
 - replace --bundles none with --no-bundle for tauri-cli v2 (#199)
 - audio playback during NINJAM intervals (#201)
-- Fix peers hearing partial/compressed audio in NINJAM intervals. The outgoing audio guard incorrectly blocked all frames during interval index 0, and the Opus decoder crashed on missing frames instead of using Packet Loss Concealment.
 
 ## 1.15.0 (2026-03-09)
 
@@ -61,8 +56,6 @@
 
 - compensate for network latency when syncing beat at join time (#189)
 - wire buffer return channel in wail-plugin-send (#190)
-- Compensate for one-way network latency when snapping beat at join time. The `forceBeatAtTime` call now adds `RTT/2 * BPM/60` beats to account for the transit time of the first `StateSnapshot`, reducing join-time beat offset at higher latencies.
-- Eliminate audio-thread allocation in wail-plugin-send by wiring the buffer return channel. After 2-3 interval warmup, `spare_record` is replenished from returned buffers instead of `Vec::with_capacity()`.
 
 ## 1.14.5 (2026-03-09)
 
@@ -71,7 +64,6 @@
 - add libx11-xcb-dev to Linux CI system dependencies (#186)
 - remove incompatible --delete-branch flag from merge queue workflow (#187)
 - Windows VST3 plugin discovery and installer setup failures (#183)
-- Fix Windows plugin installation: NSIS installer now correctly bundles and copies both VST3 and CLAP plugins, and opus.dll is placed alongside plugin binaries so DAW hosts can load them.
 
 ## 1.14.4 (2026-03-09)
 
@@ -86,21 +78,18 @@
 ### Fixes
 
 - log panel scrolls independently; top interface always visible (#181)
-- Fix log panel scrolling behavior to prevent entire page from scrolling. The log panel now scrolls independently within a fixed height, keeping the interface at the top always visible.
 
 ## 1.14.2 (2026-03-09)
 
 ### Fixes
 
 - return KeepAlive from plugin process() to prevent DAW sleep (#179)
-- Fix plugins going inactive in Bitwig by returning `ProcessStatus::KeepAlive` instead of `ProcessStatus::Normal`. Both send and recv plugins must stay active at all times to maintain IPC communication with wail-app, even when outputting silence.
 
 ## 1.14.1 (2026-03-09)
 
 ### Fixes
 
 - suppress third-party crate logs from peer broadcast (#177)
-- Filter out third-party crate log warnings (tao, webrtc) from peer log broadcast so remote peers only see WAIL-specific messages.
 
 #### Auto-retry Hello handshake for peers stuck without slot assignment.
 
@@ -115,7 +104,6 @@ When ICE connects but the Hello exchange on the sync DataChannel fails (e.g. due
 ### Fixes
 
 - add missing libx11-xcb-dev dependency for Linux build (#173)
-- Fix Linux CI build failure caused by missing `libx11-xcb-dev` system dependency.
 - Suppress noisy third-party crate logs (e.g. webrtc-rs ICE messages) from the UI log panel. Only WARN+ events from non-wail crates are forwarded to the frontend.
 
 ## 1.13.1 (2026-03-09)
@@ -123,7 +111,6 @@ When ICE connects but the Hello exchange on the sync DataChannel fails (e.g. due
 ### Fixes
 
 - prevent infinite pre-connect watchdog loop when ICE fails (#171)
-- Fix infinite "stuck in pre-connect" reconnection loop when ICE fails. Previously, the liveness watchdog called `close_peer` which transitions WebRTC state to `Closed` (not `Failed`), so the failure callback never fired — `last_seen` was never updated and the watchdog fired every 5 seconds indefinitely. Now `close_peer` always signals failure directly, and the watchdog skips peers already being reconnected.
 
 ## 1.13.0 (2026-03-08)
 
@@ -131,14 +118,11 @@ When ICE connects but the Hello exchange on the sync DataChannel fails (e.g. due
 
 - add auto-generate button for music-themed room names (#165)
 - add plugin installation page to Windows NSIS setup.exe (#167)
-- Add "Generate" button to auto-create fun music-themed room names from three word dictionaries (synthesis modifiers, sound elements, jam venues).
-- On Windows, plugin (VST3 and CLAP) installation is now handled by the setup.exe installer instead of a runtime auto-install step that required admin privileges. The installer shows a plugin options page with checkboxes to choose which plugins to install and directory inputs to customize install paths (defaulting to `%CommonProgramFiles%\VST3` and `%CommonProgramFiles%\CLAP`). Uninstalling WAIL via Windows Settings > Add & Remove Programs also removes the installed plugins.
 
 ### Fixes
 
 - suppress repeated peer status logs in UI (#166)
 - prevent crash and log spam on plugin reset and disconnect (#168)
-- Suppress repeated peer audio status logs in the UI. Previously, each peer's `AudioStatus` message was logged to the UI every 2 seconds even when nothing changed. Now the UI only shows a new line when `dc_open` or `plugin_connected` actually changes. Debug-level logging continues on every tick for file/console output.
 
 #### Fix crash when Bitwig (or other hosts) calls start_processing: plugin reset() was
 
@@ -151,18 +135,12 @@ used in process().
 ### Fixes
 
 - improve peer list layout alignment in Tauri UI (#161)
-- Fix peer list alignment: separate slot label and peer name into distinct flex items so they are evenly distributed alongside the status badge and RTT display.
 
 ## 1.12.1 (2026-03-08)
 
 ### Fixes
 
 - add burst audio test and validate buffer headroom (#159)
-
-#### Increase peer audio DataChannel receive buffer from 64 to 256 frames and upgrade
-
-silent drop logging from debug to warn. Add burst (zero-delay) audio phase to e2e
-test to validate buffer headroom under high-frequency packet sends.
 
 ## 1.12.0 (2026-03-08)
 
@@ -181,36 +159,29 @@ test to validate buffer headroom under high-frequency packet sends.
 ### Fixes
 
 - remove AudioSendGate that permanently blocked audio after reconnect (#153)
-- Remove AudioSendGate that could permanently block audio after signaling reconnect. Add INFO/WARN logging for audio transmission milestones and frame drops.
 
 ## 1.10.0 (2026-03-08)
 
 ### Features
 
 - add real Send→WebRTC→Recv plugin e2e test (#149)
-- Add real plugin-to-plugin WebRTC E2E test that loads both the Send and Recv CLAP plugins and validates audio flowing through the full stack: Send plugin → IPC → WebRTC DataChannel → IPC → Recv plugin.
 
 ### Fixes
 
 - exclude private rooms from public server list after restart (#151)
 - interval sync and peer liveness watchdog race conditions (#152)
-- Fix new peer's outbound audio being silently dropped for up to one full interval (~8 seconds at 120 BPM, 4 bars) after joining a room. When a peer joins, their interval tracker starts at index 0 from a fresh Link session. The audio-send guard (`interval.current_index() <= Some(0)`) blocked all outbound audio until the next natural interval boundary fired. Now the existing peer immediately broadcasts its current interval index to the new peer on join (queued if the sync DataChannel isn't open yet), so the guard clears as soon as the first sync message is delivered rather than waiting up to 8 seconds.
-- Fix liveness watchdog incorrectly removing peers whose ICE connection never completed. Previously, the 30s watchdog would fire at the same time as the WebRTC ICE failure event, removing the peer from the mesh before `PeerFailed` could trigger reconnection. The watchdog now only applies to peers that have previously communicated; pre-connect failures are handled by the existing reconnection path (up to 5 attempts with exponential backoff). A 60s safety net handles the rare case where ICE hangs indefinitely without firing a Failed state.
-- Private (password-protected) rooms no longer appear in the public server list after a server restart.
 
 ## 1.9.2 (2026-03-08)
 
 ### Fixes
 
 - remove link_peers audio guard, fix peer timeout spam, track intervals_sent (#148)
-- Fix audio frames silently dropped when Ableton Link has no LAN peers, fix timed-out peers reappearing in logs every 30 seconds, and fix `intervals_sent` always showing 0 in status logs.
 
 ## 1.9.1 (2026-03-07)
 
 ### Fixes
 
 - migrate send/recv plugins and app to WAIF streaming (#144)
-- Migrate send/recv plugins and recorder to WAIF streaming format. Send plugin now streams 20ms WAIF frames instead of full WAIL intervals. Recv plugin and recorder use shared FrameAssembler to reassemble frames into complete intervals. Fixed frame loss from undersized channel buffers and non-blocking sends.
 
 ## 1.9.0 (2026-03-07)
 
@@ -224,8 +195,6 @@ test to validate buffer headroom under high-frequency packet sends.
 
 - revert Linux rust-lld linker change (#139)
 - add diagnostics and fix interval config reset behavior (#138)
-- Fix IntervalTracker::set_config to only reset interval tracking when bars or quantum actually change. Previously, receiving a redundant IntervalConfig message (same values) would reset the tracker, briefly re-activating the warmup guard and potentially dropping outgoing audio. Also adds diagnostic logging at interval boundary swaps to help diagnose audio gap issues.
-- Revert Linux rust-lld linker change that broke CI builds on Ubuntu runners.
 
 ## 1.8.0 (2026-03-07)
 
@@ -248,14 +217,12 @@ test to validate buffer headroom under high-frequency packet sends.
 
 - resolve peers stuck "CONNECTING" when audio arrives before Hello (#130)
 - defer recv plugin slot name assignment until slots are active (#132)
-- Fix peers stuck in "CONNECTING" status when audio arrives before Hello (DataChannel ordering race).
 
 ## 1.7.1 (2026-03-07)
 
 ### Fixes
 
 - discard stale plugin-buffered intervals during session warmup (#126)
-- Fix interval-0 audio flood on session start/rejoin: stale plugin-buffered intervals no longer sent to peers.
 
 ## 1.7.0 (2026-03-07)
 
@@ -269,7 +236,6 @@ test to validate buffer headroom under high-frequency packet sends.
 
 - peer log streaming via signaling WebSocket (#120)
 - Dynamic DAW aux output port names via nih_plug fork. CLAP hosts now show peer display names (e.g. "Ringo") instead of static "Slot 1" labels when peers join a session. Adds PeerName IPC message to forward display names from the Tauri session to the recv plugin. VST3 hosts still show static names (no equivalent API).
-- Add peer log streaming. Clients can opt in via Settings to broadcast their structured tracing output (INFO and above) to other peers in the session via the signaling WebSocket. Peers with the toggle enabled see remote logs in the session log panel with a peer name prefix.
 
 ## 1.5.0 (2026-03-07)
 
@@ -282,17 +248,7 @@ test to validate buffer headroom under high-frequency packet sends.
 ### Fixes
 
 - add error logging for buffer return channel failures (#116)
-- Eliminate audio-thread buffer allocation via a return channel between the IPC encoding thread and IntervalRing. After warmup (2-3 intervals), the audio thread becomes completely allocation-free.
 - Add sine wave round-trip test across interval boundaries to characterize crossfade quality.
-
-#### Replace linear fade-in with equal-power crossfade at interval boundaries.
-
-Applies to all interval transitions (not just peer joins): saves the last 128
-samples per channel (256 interleaved, matching NINJAM's MAX_FADE constant) from
-each peer's outgoing interval and blends them into the head of the incoming
-interval using sin/cos weights (sin²+cos²=1), preserving constant energy
-throughout the transition. New peers and reconnecting peers retain fade-from-silence
-behaviour since their crossfade tail is zero-initialized.
 
 ## 1.4.3 (2026-03-07)
 
@@ -305,26 +261,12 @@ behaviour since their crossfade tail is zero-initialized.
 ### Fixes
 
 - auto-install plugins from Homebrew lib path, suppress dev-mode dialog (#110)
-- Auto-install plugins from Homebrew lib path; suppress false error dialog in dev mode.
 
 ## 1.4.1 (2026-03-06)
 
 ### Fixes
 
 - prevent duplicate PeerFailed events from cascading reconnects (#108)
-
-#### Fix stale peer list and broken audio after WebRTC peer disconnection.
-
-A single ICE failure was generating up to 6 concurrent failure signals (from
-Disconnected state, Failed state, DataChannel closes, and reader exits),
-instantly exhausting the 5-attempt reconnect budget and spawning multiple
-overlapping reconnect timers. Peers appeared stuck in the list while audio
-stopped flowing to reconnected peers.
-
-Now: Disconnected state no longer triggers failure signals (it's transient
-and may recover), reader exits no longer duplicate DataChannel close signals,
-and a `reconnect_pending` guard ensures only one reconnect timer runs per
-peer per failure.
 
 ## 1.4.0 (2026-03-06)
 
@@ -336,7 +278,6 @@ peer per failure.
 ### Fixes
 
 - suppress audio transmission and warn when Link has no peers (#104)
-- Suppress audio transmission and show a UI warning when Ableton Link has no peers (Link Peers = 0). Without Link running in a DAW, interval boundaries are unsynchronized and transmitting audio serves no purpose.
 
 ## 1.3.0 (2026-03-06)
 
@@ -345,23 +286,11 @@ peer per failure.
 - add passthrough parameter to WAIL Send plugin (#98)
 - Add first-launch screen for display name prompt and settings gear icon. The display name is now only asked on first launch and can be changed later via the settings panel. Telemetry and remember-settings checkboxes are moved to the settings panel for a cleaner join screen.
 - Consolidate peer state into `PeerRegistry` and `IpcWriterPool`, removing dead code (`ClockSync` offset computation, `IntervalPlayer`) and extending signaling integration tests.
-- Add passthrough parameter to WAIL Send plugin. When enabled, input audio passes through to the plugin output instead of being silenced.
 
 ### Fixes
 
 - homebrew install failing with ENOTDIR during plugin bundling (#96)
 - evict stale peer entries on reconnect to restore channel affinity (#99)
-
-#### Fix Homebrew install failing with "Not a directory (os error 20)" during plugin
-
-bundling. Pre-build plugin libraries with --locked before the xtask bundle
-assembly step to eliminate nested cargo calls in the Homebrew build sandbox.
-Also add --locked to xtask's internal cargo build calls and improve error
-context on all filesystem operations in bundle-plugin.
-
-#### Fix reconnecting peers being mapped to a different channel slot.
-
-When a peer crashed and reconnected with a new peer_id before the old connection was cleaned up, the old slot remained occupied, forcing the reconnecting peer onto a new slot. The session now evicts the stale peer_id when a Hello arrives with an identity that already belongs to a different tracked peer, freeing the slot for the reconnecting peer to reclaim via affinity.
 
 ## 1.2.0 (2026-03-06)
 
@@ -379,7 +308,6 @@ When a peer crashed and reconnected with a new peer_id before the old connection
 ### Fixes
 
 - add fade-in to prevent audio pops when peers join (#90)
-- Fix audio pops/clicks when peers join or reconnect by applying a 10ms fade-in to a peer's first audio interval.
 
 ## 1.0.0 (2026-03-05)
 
@@ -412,43 +340,16 @@ When a peer crashed and reconnected with a new peer_id before the old connection
 - call audio_gate.on_peer_list() for all peer counts, not just n > 0 (#82)
 - correct changeset frontmatter format for knope version bumping (#83)
 
-#### fix: gate audio sending until beat-locked when joining a room with existing peers
-
-When a peer joins a non-empty room, audio intervals are now held back until the first `StateSnapshot` message establishes beat sync with the room. This prevents unsynchronized audio from reaching remote peers outside interval boundaries. First peer and reconnection-to-empty-room cases remain ungated immediately. Gate state is also exposed in `StatusUpdate` for UI display.
-
-#### Local debug log
-
-The telemetry checkbox now saves logs to a local rotating flat file (`wail.log` in the app data directory, up to 10 × 50 MB archives) instead of streaming to Grafana Loki.
-
 ## 0.4.15 (2026-03-04)
 
 ### Features
 
 - add peer affinity slots for stable DAW aux routing (#71)
 
-#### Add peer affinity slots — when a peer drops and rejoins, they reclaim their original DAW aux output slot.
-
-Each WAIL installation now generates a persistent identity (UUID stored in app data) that survives restarts. This identity is exchanged in Hello messages and used by the recv plugin's IntervalRing to reserve slot assignments. When a peer disconnects, their slot is freed but an affinity reservation maps their identity to the old slot index. On reconnect (even with a new peer_id), the identity match reclaims the original slot.
-
-Also adds slot number labels to the status update events so the frontend can display "Peer 1 (Ringo)", "Peer 2 (Paul)", etc.
-
 ### Fixes
 
 - homebrew double-nested plugins and stale release artifacts (#68)
 - detect and recover from silent session disconnections (#72)
-
-#### Fixed
-
-- Fix Homebrew formula installing doubly-nested plugin bundles (e.g. `wail-plugin-send.clap/wail-plugin-send.clap/Contents/...`)
-- Fix release workflow uploading stale Tauri installer artifacts from cached `target` directory
-
-#### Fix silent disconnections in long sessions by detecting DataChannel failures and dead reader tasks.
-
-- Add `on_close` and `on_error` handlers to both sync and audio DataChannels (initiator and responder paths) so that DataChannel failures immediately signal peer failure via `failure_tx`
-- Signal peer failure when sync/audio reader tasks exit (previously exited silently with no notification)
-- Add peer liveness watchdog: track last message time per peer, close peers silent for >30 seconds
-- Emit `session:stale` event after 10 failed signaling reconnection attempts so the UI can warn users
-- Server-side eviction detection: signaling server now returns `evicted: true` when a deleted peer polls, and the client triggers reconnection instead of silently receiving empty responses
 
 ## 0.4.14 (2026-03-04)
 
@@ -465,7 +366,6 @@ Also adds slot number labels to the status update events so the frontend can dis
 ### Fixes
 
 - auto-install DAW plugins during brew install (#60)
-- Homebrew formula now automatically installs CLAP/VST3 plugins to ~/Library/Audio/Plug-Ins/ during `brew install`, removing the need for a separate `wail-install-plugins` command. The helper script is still available for manual reinstallation.
 
 ## 0.4.12 (2026-03-04)
 
@@ -524,10 +424,6 @@ Also adds slot number labels to the status update events so the frontend can dis
 
 - add local session recording with stems/mixed modes (#23) (#34)
 - integrate Metered TURN server credentials (#38)
-
-#### Automatic TURN server credentials via Metered
-
-WAIL now fetches TURN relay credentials automatically from Metered's REST API at session start. This replaces the manual TURN URL/username/credential configuration in the join-room UI. Credentials are short-lived (not stored in source), and the app falls back to STUN-only if the fetch fails.
 
 ### Fixes
 
