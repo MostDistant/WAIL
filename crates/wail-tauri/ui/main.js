@@ -493,23 +493,32 @@ settingsForm.addEventListener('submit', (e) => {
 
 // --- Session screen tab switching ---
 const sessionTabSessionBtn = document.getElementById('session-tab-session');
+const sessionTabChatBtn = document.getElementById('session-tab-chat');
+const sessionTabLogsBtn = document.getElementById('session-tab-logs');
 const sessionTabNetworkBtn = document.getElementById('session-tab-network');
 const sessionTabSessionContent = document.getElementById('session-tab-session-content');
+const sessionTabChatContent = document.getElementById('session-tab-chat-content');
+const sessionTabLogsContent = document.getElementById('session-tab-logs-content');
 const sessionTabNetworkContent = document.getElementById('session-tab-network-content');
 
-sessionTabSessionBtn.addEventListener('click', () => {
-  sessionTabSessionBtn.classList.add('active');
-  sessionTabNetworkBtn.classList.remove('active');
-  sessionTabSessionContent.style.display = '';
-  sessionTabNetworkContent.style.display = 'none';
-});
+const SESSION_TABS = [
+  { btn: sessionTabSessionBtn, content: sessionTabSessionContent },
+  { btn: sessionTabChatBtn,    content: sessionTabChatContent },
+  { btn: sessionTabLogsBtn,    content: sessionTabLogsContent },
+  { btn: sessionTabNetworkBtn, content: sessionTabNetworkContent },
+];
 
-sessionTabNetworkBtn.addEventListener('click', () => {
-  sessionTabNetworkBtn.classList.add('active');
-  sessionTabSessionBtn.classList.remove('active');
-  sessionTabSessionContent.style.display = 'none';
-  sessionTabNetworkContent.style.display = '';
-});
+function switchSessionTab(activeBtn) {
+  SESSION_TABS.forEach(({ btn, content }) => {
+    btn.classList.toggle('active', btn === activeBtn);
+    content.style.display = btn === activeBtn ? '' : 'none';
+  });
+}
+
+sessionTabSessionBtn.addEventListener('click', () => switchSessionTab(sessionTabSessionBtn));
+sessionTabChatBtn.addEventListener('click', () => switchSessionTab(sessionTabChatBtn));
+sessionTabLogsBtn.addEventListener('click', () => switchSessionTab(sessionTabLogsBtn));
+sessionTabNetworkBtn.addEventListener('click', () => switchSessionTab(sessionTabNetworkBtn));
 
 function showJoin() {
   firstLaunchScreen.style.display = 'none';
