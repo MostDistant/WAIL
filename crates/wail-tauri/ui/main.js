@@ -527,11 +527,7 @@ function showJoin() {
   joinError.style.display = 'none';
   joinBtn.disabled = false;
   joinBtn.textContent = 'Join Room';
-  // Reset session tabs to Session on leave
-  sessionTabSessionBtn.classList.add('active');
-  sessionTabNetworkBtn.classList.remove('active');
-  sessionTabSessionContent.style.display = '';
-  sessionTabNetworkContent.style.display = 'none';
+  switchSessionTab(sessionTabSessionBtn);
   cleanup();
 }
 
