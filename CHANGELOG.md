@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.17.2 (2026-03-17)
+
+### Fixes
+
+- session gear icon and tab bar visibility (#226)
+
 ## 1.17.1 (2026-03-17)
 
 ### Fixes
