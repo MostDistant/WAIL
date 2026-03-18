@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn, Instrument};
 
 use wail_audio::{ClientChannelMapping, IpcFramer, IpcMessage, IpcRecvBuffer, IPC_ROLE_RECV};
+use wail_core::protocol::{PeerFrameReport, SignalMessage};
 use wail_core::{ClockSync, IntervalTracker, LinkBridge, LinkCommand, LinkEvent, SyncMessage};
 use wail_net::PeerMesh;
 
@@ -1297,6 +1298,22 @@ async fn session_loop(
                         seq: audio_status_seq,
                     };
                     mesh.broadcast(&status_msg).await;
+
+                    // Send metrics report to signaling server (not relayed to peers).
+                    // Reports per-peer cumulative frame counts so the server can track drops.
+                    let mut per_peer = HashMap::new();
+                    for p in &connected {
+                        let ps = peers.get(p);
+                        per_peer.insert(p.clone(), PeerFrameReport {
+                            frames_expected: ps.map_or(0, |s| s.total_frames_expected),
+                            frames_received: ps.map_or(0, |s| s.total_frames_received),
+                        });
+                    }
+                    mesh.send_metrics_report(SignalMessage::MetricsReport {
+                        dc_open,
+                        plugin_connected: !ipc_pool.is_empty() || test_mode,
+                        per_peer,
+                    });
                 }
             }
         }

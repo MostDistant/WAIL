@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -27,6 +28,8 @@ const (
 	pongWait       = 20 * time.Second
 	writeWait      = 10 * time.Second
 	maxMessageSize = 64 * 1024
+	// Keep at most this many completed sessions per room in memory.
+	maxCompletedSessions = 50
 )
 
 // ---------------------------------------------------------------------------
@@ -50,6 +53,16 @@ type clientMsg struct {
 	Target      string `json:"target,omitempty"`
 	Message     string `json:"message,omitempty"`
 	TimestampUs int64  `json:"timestamp_us,omitempty"`
+	// Metrics report fields
+	DcOpen          *bool                      `json:"dc_open,omitempty"`
+	PluginConnected *bool                      `json:"plugin_connected,omitempty"`
+	PerPeer         map[string]peerFrameReport `json:"per_peer,omitempty"`
+}
+
+// peerFrameReport is what each client reports about a specific remote peer.
+type peerFrameReport struct {
+	FramesExpected uint64 `json:"frames_expected"`
+	FramesReceived uint64 `json:"frames_received"`
 }
 
 // conn wraps a single WebSocket connection that has joined a room.
@@ -60,11 +73,174 @@ type conn struct {
 	send   chan []byte
 }
 
+// ---------------------------------------------------------------------------
+// Session metrics
+// ---------------------------------------------------------------------------
+
+// directionKey uniquely identifies one direction of audio flow.
+type directionKey struct {
+	from string
+	to   string
+}
+
+// directionMetrics tracks frame drops for one direction in one phase.
+type directionMetrics struct {
+	FramesExpected uint64 `json:"frames_expected"`
+	FramesReceived uint64 `json:"frames_received"`
+	FramesDropped  uint64 `json:"frames_dropped"`
+}
+
+// peerStatus tracks the last-known state of a peer in a session.
+type peerStatus struct {
+	dcOpen          bool
+	pluginConnected bool
+	// Last cumulative values reported (for computing deltas at phase transition).
+	lastPerPeer map[string]peerFrameReport
+}
+
+// session tracks aggregate metrics for a multi-peer session in a room.
+type session struct {
+	ID        string                              `json:"id"`
+	Room      string                              `json:"room"`
+	StartedAt time.Time                           `json:"started_at"`
+	EndedAt   *time.Time                          `json:"ended_at,omitempty"`
+	Phase     string                              `json:"phase"` // "joining" or "playing"
+	Peers     []string                            `json:"peers"`
+	Joining   map[string]*directionMetrics        `json:"joining"`           // key: "from→to"
+	Playing   map[string]*directionMetrics        `json:"playing"`           // key: "from→to"
+	peerState map[string]*peerStatus              // not serialized
+	// Snapshot of cumulative values at the moment we transitioned to "playing".
+	transitionSnapshot map[directionKey]peerFrameReport
+}
+
+func newSession(room string, peers []string) *session {
+	id := fmt.Sprintf("%s-%d", room, time.Now().UnixMilli())
+	s := &session{
+		ID:                 id,
+		Room:               room,
+		StartedAt:          time.Now(),
+		Phase:              "joining",
+		Peers:              peers,
+		Joining:            make(map[string]*directionMetrics),
+		Playing:            make(map[string]*directionMetrics),
+		peerState:          make(map[string]*peerStatus),
+		transitionSnapshot: make(map[directionKey]peerFrameReport),
+	}
+	for _, p := range peers {
+		s.peerState[p] = &peerStatus{lastPerPeer: make(map[string]peerFrameReport)}
+	}
+	return s
+}
+
+func dirKey(from, to string) string {
+	return from + "→" + to
+}
+
+// updateMetrics processes a metrics_report from a peer and updates the session.
+func (s *session) updateMetrics(reporter string, dcOpen, pluginConnected bool, perPeer map[string]peerFrameReport) {
+	ps, ok := s.peerState[reporter]
+	if !ok {
+		ps = &peerStatus{lastPerPeer: make(map[string]peerFrameReport)}
+		s.peerState[reporter] = ps
+	}
+	ps.dcOpen = dcOpen
+	ps.pluginConnected = pluginConnected
+
+	// Update frame counts for the current phase.
+	// perPeer maps remote_peer_id → cumulative {frames_expected, frames_received}.
+	// The direction is remote→reporter (reporter is observing frames FROM remote).
+	target := s.Joining
+	if s.Phase == "playing" {
+		target = s.Playing
+	}
+
+	for remotePeer, report := range perPeer {
+		dk := dirKey(remotePeer, reporter)
+
+		if s.Phase == "playing" {
+			// Subtract the snapshot at transition to get playing-phase-only counts.
+			snap := s.transitionSnapshot[directionKey{from: remotePeer, to: reporter}]
+			expected := report.FramesExpected - snap.FramesExpected
+			received := report.FramesReceived - snap.FramesReceived
+			dm, exists := target[dk]
+			if !exists {
+				dm = &directionMetrics{}
+				target[dk] = dm
+			}
+			dm.FramesExpected = expected
+			dm.FramesReceived = received
+			if expected > received {
+				dm.FramesDropped = expected - received
+			} else {
+				dm.FramesDropped = 0
+			}
+		} else {
+			// Joining phase: use cumulative values directly.
+			dm, exists := target[dk]
+			if !exists {
+				dm = &directionMetrics{}
+				target[dk] = dm
+			}
+			dm.FramesExpected = report.FramesExpected
+			dm.FramesReceived = report.FramesReceived
+			if report.FramesExpected > report.FramesReceived {
+				dm.FramesDropped = report.FramesExpected - report.FramesReceived
+			} else {
+				dm.FramesDropped = 0
+			}
+		}
+
+		ps.lastPerPeer[remotePeer] = report
+	}
+
+	// Check phase transition: joining → playing when ALL peers have dc_open && plugin_connected.
+	if s.Phase == "joining" {
+		allReady := true
+		for _, peer := range s.Peers {
+			st, exists := s.peerState[peer]
+			if !exists || !st.dcOpen || !st.pluginConnected {
+				allReady = false
+				break
+			}
+		}
+		if allReady {
+			log.Printf("[metrics] session %s transitioning to playing", s.ID)
+			s.Phase = "playing"
+			// Snapshot current cumulative values so we can compute playing-only deltas.
+			for _, peer := range s.Peers {
+				st := s.peerState[peer]
+				if st == nil {
+					continue
+				}
+				for remotePeer, report := range st.lastPerPeer {
+					s.transitionSnapshot[directionKey{from: remotePeer, to: peer}] = report
+				}
+			}
+		}
+	}
+}
+
+// addPeer adds a peer to the session (for late joiners).
+func (s *session) addPeer(peerID string) {
+	for _, p := range s.Peers {
+		if p == peerID {
+			return
+		}
+	}
+	s.Peers = append(s.Peers, peerID)
+	if _, ok := s.peerState[peerID]; !ok {
+		s.peerState[peerID] = &peerStatus{lastPerPeer: make(map[string]peerFrameReport)}
+	}
+}
+
 // hub tracks all active connections, keyed by room → peer_id → conn.
 type hub struct {
 	mu    sync.Mutex
 	rooms map[string]map[string]*conn
 	db    *sql.DB
+	// Session metrics: one active session per room (nil if <2 peers).
+	activeSessions    map[string]*session   // room → session
+	completedSessions map[string][]*session // room → recent completed sessions
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +294,12 @@ func hashPassword(pw string) string {
 // ---------------------------------------------------------------------------
 
 func newHub(db *sql.DB) *hub {
-	return &hub{rooms: make(map[string]map[string]*conn), db: db}
+	return &hub{
+		rooms:             make(map[string]map[string]*conn),
+		db:                db,
+		activeSessions:    make(map[string]*session),
+		completedSessions: make(map[string][]*session),
+	}
 }
 
 func (h *hub) join(c *conn, msg clientMsg) {
@@ -242,6 +423,25 @@ func (h *hub) join(c *conn, msg clientMsg) {
 	c.room = room
 	c.peerID = peerID
 
+	// --- Session metrics: start or extend session ---
+	peerCountAfter := len(h.rooms[room])
+	if peerCountAfter >= 2 {
+		if s, ok := h.activeSessions[room]; ok {
+			// Session already active, add this peer.
+			s.addPeer(peerID)
+			log.Printf("[metrics] peer %s joined active session %s (now %d peers)", peerID, s.ID, peerCountAfter)
+		} else {
+			// New session: collect all current peer IDs.
+			allPeers := make([]string, 0, peerCountAfter)
+			for pid := range h.rooms[room] {
+				allPeers = append(allPeers, pid)
+			}
+			s := newSession(room, allPeers)
+			h.activeSessions[room] = s
+			log.Printf("[metrics] session %s started with %d peers", s.ID, peerCountAfter)
+		}
+	}
+
 	// Send join_ok
 	c.sendJSON(map[string]any{
 		"type":               "join_ok",
@@ -300,6 +500,31 @@ func (h *hub) broadcastLog(c *conn, msg clientMsg) {
 	}
 }
 
+func (h *hub) metricsReport(c *conn, msg clientMsg) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if c.room == "" {
+		return
+	}
+
+	s, ok := h.activeSessions[c.room]
+	if !ok {
+		return
+	}
+
+	dcOpen := false
+	if msg.DcOpen != nil {
+		dcOpen = *msg.DcOpen
+	}
+	pluginConnected := false
+	if msg.PluginConnected != nil {
+		pluginConnected = *msg.PluginConnected
+	}
+
+	s.updateMetrics(c.peerID, dcOpen, pluginConnected, msg.PerPeer)
+}
+
 func (h *hub) leave(c *conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -327,8 +552,25 @@ func (h *hub) leaveUnlocked(c *conn) {
 			})
 		}
 
+		// --- Session metrics: end session if <2 peers ---
+		peerCountAfter := len(roomConns)
+		if peerCountAfter < 2 {
+			if s, ok := h.activeSessions[room]; ok {
+				now := time.Now()
+				s.EndedAt = &now
+				log.Printf("[metrics] session %s ended (peer %s left, %d remaining)", s.ID, peerID, peerCountAfter)
+				// Archive to completed
+				h.completedSessions[room] = append(h.completedSessions[room], s)
+				// Trim old sessions
+				if len(h.completedSessions[room]) > maxCompletedSessions {
+					h.completedSessions[room] = h.completedSessions[room][len(h.completedSessions[room])-maxCompletedSessions:]
+				}
+				delete(h.activeSessions, room)
+			}
+		}
+
 		// If room is empty, clean up
-		if len(roomConns) == 0 {
+		if peerCountAfter == 0 {
 			delete(h.rooms, room)
 			h.db.Exec("DELETE FROM rooms WHERE room = ?", room)
 		}
@@ -430,6 +672,8 @@ func (c *conn) readPump(h *hub) {
 			h.broadcastLog(c, msg)
 		case "leave":
 			h.leave(c)
+		case "metrics_report":
+			h.metricsReport(c, msg)
 		}
 	}
 }
@@ -506,6 +750,266 @@ func handleRooms(h *hub, w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"rooms": result})
 }
 
+type sessionJSON struct {
+	ID        string                       `json:"id"`
+	Room      string                       `json:"room"`
+	StartedAt string                       `json:"started_at"`
+	EndedAt   *string                      `json:"ended_at,omitempty"`
+	Duration  string                       `json:"duration"`
+	Phase     string                       `json:"phase"`
+	Peers     []string                     `json:"peers"`
+	Joining   map[string]*directionMetrics `json:"joining"`
+	Playing   map[string]*directionMetrics `json:"playing"`
+}
+
+type metricsSnapshot struct {
+	Active    []sessionJSON `json:"active"`
+	Completed []sessionJSON `json:"completed"`
+}
+
+func sessionToJSON(s *session) sessionJSON {
+	sj := sessionJSON{
+		ID:        s.ID,
+		Room:      s.Room,
+		StartedAt: s.StartedAt.UTC().Format(time.RFC3339),
+		Phase:     s.Phase,
+		Peers:     s.Peers,
+		Joining:   s.Joining,
+		Playing:   s.Playing,
+	}
+	if s.EndedAt != nil {
+		t := s.EndedAt.UTC().Format(time.RFC3339)
+		sj.EndedAt = &t
+		sj.Duration = s.EndedAt.Sub(s.StartedAt).Round(time.Second).String()
+	} else {
+		sj.Duration = time.Since(s.StartedAt).Round(time.Second).String()
+	}
+	return sj
+}
+
+// snapshotMetrics returns a point-in-time snapshot. Caller must hold h.mu.
+func (h *hub) snapshotMetrics(roomFilter string) metricsSnapshot {
+	var active []sessionJSON
+	var completed []sessionJSON
+
+	for room, s := range h.activeSessions {
+		if roomFilter != "" && room != roomFilter {
+			continue
+		}
+		active = append(active, sessionToJSON(s))
+	}
+	for room, sessions := range h.completedSessions {
+		if roomFilter != "" && room != roomFilter {
+			continue
+		}
+		for _, s := range sessions {
+			completed = append(completed, sessionToJSON(s))
+		}
+	}
+
+	sort.Slice(completed, func(i, j int) bool {
+		return completed[i].StartedAt > completed[j].StartedAt
+	})
+
+	if active == nil {
+		active = []sessionJSON{}
+	}
+	if completed == nil {
+		completed = []sessionJSON{}
+	}
+
+	return metricsSnapshot{Active: active, Completed: completed}
+}
+
+func handleMetrics(h *hub, w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	snap := h.snapshotMetrics(r.URL.Query().Get("room"))
+	h.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(snap)
+}
+
+func handleMetricsWS(h *hub, w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("metrics ws upgrade: %v", err)
+		return
+	}
+	defer ws.Close()
+
+	roomFilter := r.URL.Query().Get("room")
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	// Send initial snapshot immediately.
+	h.mu.Lock()
+	snap := h.snapshotMetrics(roomFilter)
+	h.mu.Unlock()
+	if err := ws.WriteJSON(snap); err != nil {
+		return
+	}
+
+	// Read goroutine to detect client disconnect.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			h.mu.Lock()
+			snap := h.snapshotMetrics(roomFilter)
+			h.mu.Unlock()
+			ws.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := ws.WriteJSON(snap); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func handleDashboard(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(dashboardHTML))
+}
+
+const dashboardHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WAIL Session Metrics</title>
+<style>
+  :root { --bg: #0d1117; --fg: #c9d1d9; --card: #161b22; --border: #30363d; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --yellow: #d29922; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--fg); padding: 20px; }
+  h1 { color: var(--accent); margin-bottom: 4px; font-size: 1.4em; }
+  .status { font-size: 0.85em; color: #8b949e; margin-bottom: 20px; }
+  .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot.ok { background: var(--green); }
+  .dot.err { background: var(--red); }
+  .section-title { font-size: 1.1em; color: var(--accent); margin: 16px 0 8px; }
+  .empty { color: #8b949e; font-style: italic; padding: 12px 0; }
+  .session { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+  .session-header { display: flex; flex-wrap: wrap; gap: 16px; align-items: baseline; margin-bottom: 12px; }
+  .session-header .room { font-weight: 600; font-size: 1.1em; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: 500; }
+  .badge.joining { background: rgba(210,153,34,0.2); color: var(--yellow); }
+  .badge.playing { background: rgba(63,185,80,0.2); color: var(--green); }
+  .meta { font-size: 0.85em; color: #8b949e; }
+  .peers { font-size: 0.85em; color: #8b949e; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85em; margin-top: 4px; }
+  th { text-align: left; color: #8b949e; font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .phase-label { font-weight: 500; color: var(--fg); margin-top: 8px; margin-bottom: 2px; }
+  .drop-ok { color: var(--green); }
+  .drop-warn { color: var(--yellow); }
+  .drop-bad { color: var(--red); }
+  .no-data { color: #8b949e; font-size: 0.85em; }
+</style>
+</head>
+<body>
+<h1>WAIL Session Metrics</h1>
+<div class="status" id="status"><span class="dot err"></span>Connecting...</div>
+
+<div id="active-section">
+  <div class="section-title">Active Sessions</div>
+  <div id="active" class="empty">No active sessions</div>
+</div>
+
+<div id="completed-section">
+  <div class="section-title">Completed Sessions</div>
+  <div id="completed" class="empty">No completed sessions</div>
+</div>
+
+<script>
+const statusEl = document.getElementById('status');
+const activeEl = document.getElementById('active');
+const completedEl = document.getElementById('completed');
+
+function dropClass(expected, dropped) {
+  if (expected === 0) return 'no-data';
+  const pct = dropped / expected * 100;
+  if (pct <= 1) return 'drop-ok';
+  if (pct <= 5) return 'drop-warn';
+  return 'drop-bad';
+}
+
+function renderDirections(dirs) {
+  if (!dirs || Object.keys(dirs).length === 0) return '<span class="no-data">No data yet</span>';
+  let html = '<table><tr><th>Direction</th><th>Expected</th><th>Received</th><th>Dropped</th><th>Drop %</th></tr>';
+  for (const [dir, m] of Object.entries(dirs)) {
+    const pct = m.frames_expected > 0 ? (m.frames_dropped / m.frames_expected * 100).toFixed(1) : '—';
+    const cls = dropClass(m.frames_expected, m.frames_dropped);
+    html += '<tr><td>' + dir + '</td><td>' + m.frames_expected + '</td><td>' + m.frames_received +
+            '</td><td class="' + cls + '">' + m.frames_dropped + '</td><td class="' + cls + '">' + pct + (m.frames_expected > 0 ? '%' : '') + '</td></tr>';
+  }
+  html += '</table>';
+  return html;
+}
+
+function renderSession(s) {
+  const phaseClass = s.phase === 'playing' ? 'playing' : 'joining';
+  let html = '<div class="session">';
+  html += '<div class="session-header"><span class="room">' + s.room + '</span>';
+  html += '<span class="badge ' + phaseClass + '">' + s.phase + '</span>';
+  html += '<span class="meta">' + s.duration + '</span>';
+  if (s.ended_at) html += '<span class="meta">ended ' + new Date(s.ended_at).toLocaleTimeString() + '</span>';
+  html += '</div>';
+  html += '<div class="peers">Peers: ' + s.peers.join(', ') + '</div>';
+  html += '<div class="phase-label">Joining</div>' + renderDirections(s.joining);
+  html += '<div class="phase-label">Playing</div>' + renderDirections(s.playing);
+  html += '</div>';
+  return html;
+}
+
+function render(data) {
+  if (data.active && data.active.length > 0) {
+    activeEl.innerHTML = data.active.map(renderSession).join('');
+  } else {
+    activeEl.innerHTML = '<div class="empty">No active sessions</div>';
+  }
+  if (data.completed && data.completed.length > 0) {
+    completedEl.innerHTML = data.completed.map(renderSession).join('');
+  } else {
+    completedEl.innerHTML = '<div class="empty">No completed sessions</div>';
+  }
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const params = new URLSearchParams(location.search);
+  const room = params.get('room');
+  let wsUrl = proto + '//' + location.host + '/metrics/ws';
+  if (room) wsUrl += '?room=' + encodeURIComponent(room);
+  const ws = new WebSocket(wsUrl);
+  ws.onopen = () => {
+    statusEl.innerHTML = '<span class="dot ok"></span>Connected — streaming every 2s';
+  };
+  ws.onmessage = (e) => {
+    try { render(JSON.parse(e.data)); } catch(err) { console.error('parse error', err); }
+  };
+  ws.onclose = () => {
+    statusEl.innerHTML = '<span class="dot err"></span>Disconnected — reconnecting...';
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => { ws.close(); };
+}
+
+connect();
+</script>
+</body>
+</html>`
+
 // ---------------------------------------------------------------------------
 // Semver comparison
 // ---------------------------------------------------------------------------
@@ -538,6 +1042,15 @@ func main() {
 	})
 	http.HandleFunc("/rooms", func(w http.ResponseWriter, r *http.Request) {
 		handleRooms(h, w, r)
+	})
+	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		handleMetrics(h, w, r)
+	})
+	http.HandleFunc("/metrics/ws", func(w http.ResponseWriter, r *http.Request) {
+		handleMetricsWS(h, w, r)
+	})
+	http.HandleFunc("/metrics/dashboard", func(w http.ResponseWriter, r *http.Request) {
+		handleDashboard(w, r)
 	})
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)

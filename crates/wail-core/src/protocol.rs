@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Messages exchanged between peers over WebRTC DataChannels.
@@ -128,6 +130,21 @@ pub enum SignalMessage {
         message: String,
         timestamp_us: u64,
     },
+    /// Metrics report sent to the signaling server for session-level aggregation.
+    /// Not relayed to other peers — consumed server-side only.
+    MetricsReport {
+        dc_open: bool,
+        plugin_connected: bool,
+        /// Per remote peer: cumulative frames expected/received (direction = remote→self).
+        per_peer: HashMap<String, PeerFrameReport>,
+    },
+}
+
+/// Cumulative audio frame counts for one direction (remote → observer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerFrameReport {
+    pub frames_expected: u64,
+    pub frames_received: u64,
 }
 
 /// WebRTC signaling payloads relayed through the signaling server.

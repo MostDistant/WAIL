@@ -295,6 +295,14 @@ impl SignalingClient {
                             "timestamp_us": timestamp_us,
                         })
                     }
+                    SignalMessage::MetricsReport { dc_open, plugin_connected, per_peer } => {
+                        serde_json::json!({
+                            "type": "metrics_report",
+                            "dc_open": dc_open,
+                            "plugin_connected": plugin_connected,
+                            "per_peer": per_peer,
+                        })
+                    }
                     _ => serde_json::json!({
                     "type": "signal",
                     "to": match &msg {

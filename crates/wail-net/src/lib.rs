@@ -467,6 +467,13 @@ impl PeerMesh {
         }
     }
 
+    /// Send a metrics report to the signaling server (not relayed to peers).
+    pub fn send_metrics_report(&self, report: SignalMessage) {
+        if let Err(e) = self.signaling.outgoing_tx.send(report) {
+            tracing::warn!("failed to send metrics report: {e}");
+        }
+    }
+
     pub fn connected_peers(&self) -> Vec<String> {
         self.peers.keys().cloned().collect()
     }
