@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.21.0 (2026-03-19)
+
+### Features
+
+- add session metrics tracking, CLI, and live dashboard (#237)
+
 ## 1.20.0 (2026-03-18)
 
 ### Features
