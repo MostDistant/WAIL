@@ -7,6 +7,7 @@ pub mod ring;
 pub mod slot;
 pub mod wire;
 
+pub mod fft_analysis;
 pub mod test_tone;
 
 #[cfg(test)]
