@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.22.0 (2026-03-19)
+
+### Features
+
+- add transport state e2e tests for plugin audio pipeline (#239)
+
 ## 1.21.0 (2026-03-19)
 
 ### Features
