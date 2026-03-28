@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.1 (2026-03-28)
+
+### Fixes
+
+- respect CARGO_TARGET_DIR in xtask and fix broken tests (#245)
+
 ## 1.23.0 (2026-03-28)
 
 ### Features
