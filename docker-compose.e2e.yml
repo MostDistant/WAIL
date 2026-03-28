@@ -1,0 +1,106 @@
+networks:
+  net-a:
+    driver: bridge
+  net-b:
+    driver: bridge
+  net-infra:
+    driver: bridge
+
+services:
+  signaling:
+    build:
+      context: ./signaling-server
+      dockerfile: Dockerfile
+    environment:
+      PORT: "8080"
+    networks:
+      - net-infra
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: unless-stopped
+    command: >
+      -n
+      --log-file=stdout
+      --lt-cred-mech
+      --fingerprint
+      --realm=wail-test
+      --user=wail:wail
+      --listening-port=3478
+      --min-port=49152
+      --max-port=49252
+      --no-tls
+      --no-dtls
+    networks:
+      - net-infra
+
+  peer-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-client
+    depends_on:
+      signaling:
+        condition: service_healthy
+    cap_add:
+      - NET_ADMIN
+    environment:
+      WAN_DELAY: "${WAN_DELAY:-50ms}"
+      WAN_JITTER: "${WAN_JITTER:-10ms}"
+      WAN_LOSS: "${WAN_LOSS:-1%}"
+      NOTE_SCRIPT: "${PEER_A_NOTES:-}"
+      CHAOS_SCRIPT: "${PEER_A_CHAOS:-}"
+    command: >
+      --server ws://signaling:8080
+      --room ${ROOM_NAME:-e2e-test}
+      --name peer-a
+      --bpm 120
+      --bars 4
+      --quantum 4.0
+      --relay-only
+      --turn-url turn:coturn:3478
+      --turn-user wail
+      --turn-credential wail
+    networks:
+      net-a: {}
+      net-infra: {}
+
+  peer-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-client
+    depends_on:
+      signaling:
+        condition: service_healthy
+      peer-a:
+        condition: service_started
+    cap_add:
+      - NET_ADMIN
+    environment:
+      WAN_DELAY: "${WAN_DELAY:-50ms}"
+      WAN_JITTER: "${WAN_JITTER:-10ms}"
+      WAN_LOSS: "${WAN_LOSS:-1%}"
+      NOTE_SCRIPT: "${PEER_B_NOTES:-}"
+      EXPECT_NOTES: "${PEER_A_NOTES:-}"
+      CHAOS_SCRIPT: "${PEER_B_CHAOS:-}"
+    command: >
+      --server ws://signaling:8080
+      --room ${ROOM_NAME:-e2e-test}
+      --name peer-b
+      --bpm 120
+      --bars 4
+      --quantum 4.0
+      --relay-only
+      --turn-url turn:coturn:3478
+      --turn-user wail
+      --turn-credential wail
+      --validate
+      --validate-intervals ${VALIDATE_INTERVALS:-4}
+      --validate-timeout ${VALIDATE_TIMEOUT:-120}
+    networks:
+      net-b: {}
+      net-infra: {}

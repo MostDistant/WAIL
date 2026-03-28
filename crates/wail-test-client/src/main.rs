@@ -1,3 +1,7 @@
+mod chaos;
+mod note_script;
+pub use note_script::NoteScript;
+
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -11,10 +15,10 @@ use uuid::Uuid;
 
 use wail_audio::codec::AudioEncoder;
 use wail_audio::wire::AudioFrameWire;
-use wail_audio::AudioFrame;
-use wail_core::protocol::SyncMessage;
+use wail_audio::{AudioDecoder, AudioFrame, FrameAssembler};
+use wail_core::protocol::{PeerFrameReport, SyncMessage};
 use wail_core::IntervalTracker;
-use wail_net::{fetch_metered_ice_servers, metered_stun_fallback, MeshEvent, PeerMesh};
+use wail_net::{fetch_metered_ice_servers, ice_servers_with_turn, metered_stun_fallback, MeshEvent, PeerMesh};
 
 const SAMPLE_RATE: u32 = 48000;
 const CHANNELS: u16 = 2;
@@ -24,6 +28,7 @@ const FRAME_DURATION_MS: u64 = 20;
 const FRAME_SIZE: usize = 960;
 
 /// A minor pentatonic scale rooted at A3 (220 Hz).
+#[allow(dead_code)]
 const SCALE: [f32; 5] = [
     220.00, // A3
     261.63, // C4
@@ -91,6 +96,44 @@ struct Args {
     /// Enable debug-level logging
     #[arg(long)]
     verbose: bool,
+
+    /// Enable audio validation mode (FFT frequency check, dropout detection, seam quality)
+    #[arg(long)]
+    validate: bool,
+
+    /// Number of intervals to validate before exiting (default 4)
+    #[arg(long, default_value = "4")]
+    validate_intervals: u32,
+
+    /// Timeout in seconds for validation mode (default 120)
+    #[arg(long, default_value = "120")]
+    validate_timeout: u64,
+
+    /// TURN server URL (e.g. turn:coturn:3478). When set, skips Metered API fetch.
+    #[arg(long)]
+    turn_url: Option<String>,
+
+    /// TURN username
+    #[arg(long)]
+    turn_user: Option<String>,
+
+    /// TURN credential
+    #[arg(long)]
+    turn_credential: Option<String>,
+
+    /// Scripted note pattern: 'freq:bars,...' (e.g. '220:4,440:2,silence:1,330:4').
+    /// Replaces the default pentatonic scale. Loops when exhausted.
+    #[arg(long)]
+    note_script: Option<String>,
+
+    /// Expected note pattern from the sender for validation (same syntax as --note-script).
+    /// Defaults to the sender's --note-script or pentatonic if neither is set.
+    #[arg(long)]
+    expect_notes: Option<String>,
+
+    /// Chaos test script: 'stable:4,leave:5s,rejoin,stable:4,transport-stop:5s,resume,stable:4'
+    #[arg(long)]
+    chaos_script: Option<String>,
 }
 
 /// Generate one 20ms stereo-interleaved sine frame, advancing `phase` continuously.
@@ -126,6 +169,20 @@ fn beat_to_bar_in_interval(beat: f64, bars: u32, quantum: f64) -> u32 {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    let note_script = if let Some(ref script) = args.note_script {
+        NoteScript::parse(script)?
+    } else {
+        NoteScript::default_pentatonic()
+    };
+
+    let expect_script = if let Some(ref script) = args.expect_notes {
+        NoteScript::parse(script)?
+    } else if let Some(ref script) = args.note_script {
+        NoteScript::parse(script)?
+    } else {
+        NoteScript::default_pentatonic()
+    };
+
     let filter = if args.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -141,14 +198,22 @@ async fn main() -> Result<()> {
     println!("Server:     {}", args.server);
     println!("BPM:        {}", args.bpm);
     println!("Bars:       {} (quantum {})", args.bars, args.quantum);
-    println!(
-        "Scale:      {} ({:.0}%) {} ({:.0}%) {} ({:.0}%) {} ({:.0}%) {} ({:.0}%) (A minor pentatonic)",
-        NOTE_NAMES[0], NOTE_AMPLITUDES[0] * 100.0,
-        NOTE_NAMES[1], NOTE_AMPLITUDES[1] * 100.0,
-        NOTE_NAMES[2], NOTE_AMPLITUDES[2] * 100.0,
-        NOTE_NAMES[3], NOTE_AMPLITUDES[3] * 100.0,
-        NOTE_NAMES[4], NOTE_AMPLITUDES[4] * 100.0,
-    );
+    if args.note_script.is_some() {
+        println!(
+            "Notes:      custom script ({} steps, {} bars/cycle)",
+            note_script.steps().len(),
+            note_script.total_bars(),
+        );
+    } else {
+        println!(
+            "Scale:      {} ({:.0}%) {} ({:.0}%) {} ({:.0}%) {} ({:.0}%) {} ({:.0}%) (A minor pentatonic)",
+            NOTE_NAMES[0], NOTE_AMPLITUDES[0] * 100.0,
+            NOTE_NAMES[1], NOTE_AMPLITUDES[1] * 100.0,
+            NOTE_NAMES[2], NOTE_AMPLITUDES[2] * 100.0,
+            NOTE_NAMES[3], NOTE_AMPLITUDES[3] * 100.0,
+            NOTE_NAMES[4], NOTE_AMPLITUDES[4] * 100.0,
+        );
+    }
     println!("Amplitude:  {}", args.amplitude);
     if args.echo {
         println!("Streams:    0 = tone, 1 = echo (re-sends received audio)");
@@ -165,20 +230,27 @@ async fn main() -> Result<()> {
     println!("Ableton Link enabled at {} BPM", args.bpm);
 
     // --- ICE servers ---
-    let ice_servers = match fetch_metered_ice_servers().await {
-        Ok(servers) => {
-            info!(count = servers.len(), "Fetched ICE servers from Metered");
-            servers
-        }
-        Err(e) => {
-            warn!("Metered API failed ({e}), using STUN fallback");
-            metered_stun_fallback()
+    let ice_servers = if let (Some(url), Some(user), Some(cred)) =
+        (&args.turn_url, &args.turn_user, &args.turn_credential)
+    {
+        info!("Using local TURN server: {url}");
+        ice_servers_with_turn(url, user, cred)
+    } else {
+        match fetch_metered_ice_servers().await {
+            Ok(servers) => {
+                info!(count = servers.len(), "Fetched ICE servers from Metered");
+                servers
+            }
+            Err(e) => {
+                warn!("Metered API failed ({e}), using STUN fallback");
+                metered_stun_fallback()
+            }
         }
     };
 
     // --- Connect to signaling + WebRTC ---
     let password = args.password.as_deref();
-    let (mut mesh, mut sync_rx, mut audio_rx) = PeerMesh::connect_full(
+    let (mesh, sync_rx, audio_rx) = PeerMesh::connect_full(
         &args.server,
         &args.room,
         &peer_id,
@@ -189,24 +261,29 @@ async fn main() -> Result<()> {
         Some(&args.name),
     )
     .await?;
+    let mut mesh_opt: Option<PeerMesh> = Some(mesh);
+    let mut sync_rx_opt: Option<tokio::sync::mpsc::UnboundedReceiver<(String, SyncMessage)>> = Some(sync_rx);
+    let mut audio_rx_opt: Option<tokio::sync::mpsc::Receiver<(String, Vec<u8>)>> = Some(audio_rx);
     println!("Connected to signaling server.");
 
     // --- Wait for at least one peer ---
     println!("Waiting for a peer to join room \"{}\"...", args.room);
-    let remote_peer_id = wait_for_peer(&mut mesh).await?;
+    let remote_peer_id = wait_for_peer(mesh_opt.as_mut().unwrap()).await?;
     println!("Peer joined: {remote_peer_id}");
 
     // --- Wait for DataChannels to open ---
-    wait_for_datachannel(&mut mesh, Duration::from_secs(30)).await?;
+    wait_for_datachannel(mesh_opt.as_mut().unwrap(), Duration::from_secs(30)).await?;
     println!("DataChannels open. Starting audio stream.");
 
     // --- Send Hello ---
-    mesh.broadcast(&SyncMessage::Hello {
-        peer_id: peer_id.clone(),
-        display_name: Some(args.name.clone()),
-        identity: Some(identity.clone()),
-    })
-    .await;
+    if let Some(ref m) = mesh_opt {
+        m.broadcast(&SyncMessage::Hello {
+            peer_id: peer_id.clone(),
+            display_name: Some(args.name.clone()),
+            identity: Some(identity.clone()),
+        })
+        .await;
+    }
 
     // --- Opus encoder ---
     let mut encoder = AudioEncoder::new(SAMPLE_RATE, CHANNELS, OPUS_BITRATE_KBPS)?;
@@ -236,7 +313,170 @@ async fn main() -> Result<()> {
     let mut frame_timer = tokio::time::interval(Duration::from_millis(FRAME_DURATION_MS));
     frame_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    // --- Validation state ---
+    let mut assembler = if args.validate {
+        Some(FrameAssembler::new())
+    } else {
+        None
+    };
+    let mut decoder = if args.validate {
+        Some(AudioDecoder::new(SAMPLE_RATE, CHANNELS)?)
+    } else {
+        None
+    };
+    let mut validation_results: Vec<wail_audio::fft_analysis::IntervalAnalysis> = Vec::new();
+    let validate_start = Instant::now();
+
+    // --- Chaos script state ---
+    let chaos_actions = if let Some(ref script) = args.chaos_script {
+        chaos::parse_chaos_script(script)?
+    } else {
+        Vec::new()
+    };
+    let mut chaos_idx = 0usize;
+    let mut chaos_done = false;
+    let mut chaos_intervals_counted = 0u32;
+    let mut chaos_waiting_until: Option<Instant> = None;
+    let mut is_transport_playing = true;
+
     loop {
+        // --- Process chaos script actions ---
+        if chaos_idx < chaos_actions.len() {
+            match &chaos_actions[chaos_idx] {
+                chaos::ChaosAction::Stable(n) => {
+                    if chaos_intervals_counted >= *n {
+                        println!("[chaos] Stable({n}) complete, advancing to action {}", chaos_idx + 1);
+                        chaos_intervals_counted = 0;
+                        chaos_idx += 1;
+                    }
+                }
+                chaos::ChaosAction::Leave(duration) => {
+                    if chaos_waiting_until.is_none() {
+                        println!("[chaos] Disconnecting (leave for {duration:?})...");
+                        if let Some(m) = mesh_opt.take() {
+                            drop(m);
+                        }
+                        sync_rx_opt = None;
+                        audio_rx_opt = None;
+                        chaos_waiting_until = Some(Instant::now() + *duration);
+                    } else if Instant::now() >= chaos_waiting_until.unwrap() {
+                        chaos_waiting_until = None;
+                        chaos_idx += 1;
+                        println!("[chaos] Leave complete, advancing to action {}", chaos_idx);
+                    }
+                }
+                chaos::ChaosAction::Rejoin => {
+                    if mesh_opt.is_none() {
+                        println!("[chaos] Reconnecting...");
+                        let ice = if let (Some(url), Some(user), Some(cred)) = (&args.turn_url, &args.turn_user, &args.turn_credential) {
+                            ice_servers_with_turn(url, user, cred)
+                        } else {
+                            match fetch_metered_ice_servers().await {
+                                Ok(s) => s,
+                                Err(_) => metered_stun_fallback(),
+                            }
+                        };
+                        let (new_mesh, new_sync_rx, new_audio_rx) = PeerMesh::connect_full(
+                            &args.server, &args.room, &peer_id, password,
+                            ice, args.relay_only,
+                            if args.echo { 2 } else { 1 },
+                            Some(&args.name),
+                        ).await?;
+                        mesh_opt = Some(new_mesh);
+                        sync_rx_opt = Some(new_sync_rx);
+                        audio_rx_opt = Some(new_audio_rx);
+
+                        // Wait for datachannel to open.
+                        if let Some(ref mut m) = mesh_opt {
+                            wait_for_datachannel(m, Duration::from_secs(30)).await?;
+                        }
+
+                        // Re-send Hello.
+                        if let Some(ref m) = mesh_opt {
+                            m.broadcast(&SyncMessage::Hello {
+                                peer_id: peer_id.clone(),
+                                display_name: Some(args.name.clone()),
+                                identity: Some(identity.clone()),
+                            }).await;
+                        }
+                        greeted_peers.clear();
+                        println!("[chaos] Reconnected successfully");
+                    }
+                    chaos_idx += 1;
+                }
+                chaos::ChaosAction::TransportStop(duration) => {
+                    if chaos_waiting_until.is_none() {
+                        println!("[chaos] Stopping transport for {duration:?}...");
+                        is_transport_playing = false;
+                        chaos_waiting_until = Some(Instant::now() + *duration);
+                    } else if Instant::now() >= chaos_waiting_until.unwrap() {
+                        chaos_waiting_until = None;
+                        chaos_idx += 1;
+                        println!("[chaos] TransportStop complete, advancing to action {}", chaos_idx);
+                    }
+                }
+                chaos::ChaosAction::Resume => {
+                    println!("[chaos] Resuming transport");
+                    is_transport_playing = true;
+                    chaos_idx += 1;
+                }
+            }
+        }
+
+        // When chaos script is exhausted, continue running normally.
+        // The validator (peer-b) will exit when it has enough intervals,
+        // and --abort-on-container-exit will shut everything down.
+        if !chaos_done && !chaos_actions.is_empty() && chaos_idx >= chaos_actions.len() {
+            chaos_done = true;
+            if args.validate {
+                let all_pass = validation_results.iter().all(|r| r.pass);
+                let total_dropouts: u32 = validation_results
+                    .iter()
+                    .flat_map(|r| &r.bars)
+                    .map(|b| b.dropout_frames)
+                    .sum();
+                let total_seam_failures: u32 = validation_results
+                    .iter()
+                    .flat_map(|r| &r.bars)
+                    .filter(|b| !b.seam_ok)
+                    .count() as u32;
+                let total_freq_mismatches: u32 = validation_results
+                    .iter()
+                    .flat_map(|r| &r.bars)
+                    .filter(|b| !b.freq_match)
+                    .count() as u32;
+                let silence_expected: u32 = validation_results
+                    .iter()
+                    .flat_map(|r| &r.bars)
+                    .filter(|b| b.is_silence_expected)
+                    .count() as u32;
+                let silence_confirmed: u32 = validation_results
+                    .iter()
+                    .flat_map(|r| &r.bars)
+                    .filter(|b| b.is_silence_expected && b.freq_match)
+                    .count() as u32;
+
+                let report = serde_json::json!({
+                    "pass": all_pass,
+                    "intervals": validation_results,
+                    "summary": {
+                        "intervals_validated": validation_results.len(),
+                        "intervals_passed": validation_results.iter().filter(|r| r.pass).count(),
+                        "total_dropouts": total_dropouts,
+                        "total_seam_failures": total_seam_failures,
+                        "total_freq_mismatches": total_freq_mismatches,
+                        "silence_bars_expected": silence_expected,
+                        "silence_bars_confirmed": silence_confirmed,
+                    }
+                });
+
+                println!("\n{}", serde_json::to_string_pretty(&report)?);
+                std::process::exit(if all_pass { 0 } else { 1 });
+            } else {
+                println!("[chaos] Script complete, continuing to stream");
+            }
+        }
+
         tokio::select! {
             _ = frame_timer.tick() => {
                 // Read current beat position from Link.
@@ -260,17 +500,34 @@ async fn main() -> Result<()> {
                     }
 
                     // Broadcast interval boundary sync.
-                    mesh.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
+                    if let Some(ref m) = mesh_opt {
+                        m.broadcast(&SyncMessage::IntervalBoundary { index: idx }).await;
+                    }
                     frame_in_interval = 0;
                     prev_bar = None;
 
+                    // Increment chaos interval counter only during Stable actions.
+                    if !chaos_actions.is_empty()
+                        && chaos_idx < chaos_actions.len()
+                        && matches!(chaos_actions[chaos_idx], chaos::ChaosAction::Stable(_))
+                    {
+                        chaos_intervals_counted += 1;
+                    }
+
                     // Log the new interval's first note.
-                    let note_idx = (bar_in_interval as usize) % 5;
+                    let first_global_bar = idx as u64 * args.bars as u64 + bar_in_interval as u64;
+                    let first_freq = if args.constant {
+                        Some(440.0)
+                    } else {
+                        note_script.freq_at_bar(first_global_bar)
+                    };
                     println!(
-                        "Bar 1: {} ({:.0} Hz)  [interval {idx}, beat {beat:.1}, {bpm:.1} BPM, Link peers: {}]",
-                        NOTE_NAMES[note_idx],
-                        SCALE[note_idx],
-                        link.num_peers(),
+                        "Bar 1: {freq_desc}  [interval {idx}, beat {beat:.1}, {bpm:.1} BPM, Link peers: {peers}]",
+                        freq_desc = match first_freq {
+                            Some(f) => format!("{f:.0} Hz"),
+                            None => "silence".to_string(),
+                        },
+                        peers = link.num_peers(),
                     );
                 }
 
@@ -282,57 +539,82 @@ async fn main() -> Result<()> {
                 if is_new_bar {
                     prev_bar = Some(bar_in_interval);
                     let global_bar = interval_index as u64 * args.bars as u64 + bar_in_interval as u64;
-                    let note_idx = (global_bar % 5) as usize;
+                    let bar_freq = if args.constant {
+                        Some(440.0)
+                    } else {
+                        note_script.freq_at_bar(global_bar)
+                    };
                     println!(
-                        "Bar {}: {} ({:.0} Hz)  [interval {interval_index}]",
+                        "Bar {}: {freq_desc}  [interval {interval_index}]",
                         bar_in_interval + 1,
-                        NOTE_NAMES[note_idx],
-                        SCALE[note_idx],
+                        freq_desc = match bar_freq {
+                            Some(f) => format!("{f:.0} Hz"),
+                            None => "silence".to_string(),
+                        },
                     );
                 }
                 if prev_bar.is_none() {
                     prev_bar = Some(bar_in_interval);
                 }
 
-                // Determine current note.
-                let global_bar = interval_index as u64 * args.bars as u64 + bar_in_interval as u64;
-                let note_idx = (global_bar % 5) as usize;
-                let freq = if args.constant { 440.0 } else { SCALE[note_idx] };
+                // Gate audio sending on transport state.
+                if is_transport_playing {
+                    // Determine current note.
+                    let global_bar = interval_index as u64 * args.bars as u64 + bar_in_interval as u64;
+                    let current_freq = if args.constant {
+                        Some(440.0f32)
+                    } else {
+                        note_script.freq_at_bar(global_bar)
+                    };
 
-                // Generate PCM and encode to Opus (per-note amplitude scaling).
-                let note_amplitude = amplitude * NOTE_AMPLITUDES[note_idx];
-                let pcm = generate_sine_frame(freq, &mut phase, note_amplitude);
-                let opus_data = encoder.encode_frame(&pcm)?;
+                    // Generate PCM and encode to Opus.
+                    let note_amplitude = if args.note_script.is_some() || args.constant {
+                        // Custom script or constant: uniform amplitude.
+                        amplitude
+                    } else {
+                        // Default pentatonic: per-note amplitude scaling.
+                        let note_idx = (global_bar % 5) as usize;
+                        amplitude * NOTE_AMPLITUDES[note_idx]
+                    };
+                    let pcm = match current_freq {
+                        Some(freq) => generate_sine_frame(freq, &mut phase, note_amplitude),
+                        None => vec![0.0f32; FRAME_SIZE * CHANNELS as usize], // silence
+                    };
+                    let opus_data = encoder.encode_frame(&pcm)?;
 
-                // Compute frames_per_interval for the is_final header.
-                let beat_duration_s = 60.0 / bpm;
-                let bar_duration_ms = beat_duration_s * args.quantum * 1000.0;
-                let frames_per_bar = (bar_duration_ms / FRAME_DURATION_MS as f64).round() as u32;
-                let frames_per_interval = frames_per_bar * args.bars;
+                    // Compute frames_per_interval for the is_final header.
+                    let beat_duration_s = 60.0 / bpm;
+                    let bar_duration_ms = beat_duration_s * args.quantum * 1000.0;
+                    let frames_per_bar = (bar_duration_ms / FRAME_DURATION_MS as f64).round() as u32;
+                    let frames_per_interval = frames_per_bar * args.bars;
 
-                let is_final = frame_in_interval == frames_per_interval.saturating_sub(1);
-                let frame = AudioFrame {
-                    interval_index,
-                    stream_id: 0,
-                    frame_number: frame_in_interval,
-                    channels: CHANNELS,
-                    opus_data,
-                    is_final,
-                    sample_rate: if is_final { SAMPLE_RATE } else { 0 },
-                    total_frames: if is_final { frames_per_interval } else { 0 },
-                    bpm: if is_final { bpm } else { 0.0 },
-                    quantum: if is_final { args.quantum } else { 0.0 },
-                    bars: if is_final { args.bars } else { 0 },
-                };
+                    let is_final = frame_in_interval == frames_per_interval.saturating_sub(1);
+                    let frame = AudioFrame {
+                        interval_index,
+                        stream_id: 0,
+                        frame_number: frame_in_interval,
+                        channels: CHANNELS,
+                        opus_data,
+                        is_final,
+                        sample_rate: if is_final { SAMPLE_RATE } else { 0 },
+                        total_frames: if is_final { frames_per_interval } else { 0 },
+                        bpm: if is_final { bpm } else { 0.0 },
+                        quantum: if is_final { args.quantum } else { 0.0 },
+                        bars: if is_final { args.bars } else { 0 },
+                    };
 
-                let wire_bytes = AudioFrameWire::encode(&frame);
-                mesh.broadcast_audio(&wire_bytes).await;
+                    let wire_bytes = AudioFrameWire::encode(&frame);
+                    if let Some(ref m) = mesh_opt {
+                        m.broadcast_audio(&wire_bytes).await;
+                    }
 
-                frame_in_interval += 1;
+                    frame_in_interval += 1;
+                }
 
-                // Print per-peer health every 5 seconds.
+                // Print per-peer health and send metrics report every 5 seconds.
                 if last_health_print.elapsed() >= Duration::from_secs(5) && !peer_remote_sent.is_empty() {
                     last_health_print = Instant::now();
+                    let mut per_peer_metrics = HashMap::new();
                     for (pid, &remote_sent) in &peer_remote_sent {
                         let local_recv = peer_frames_recv.get(pid).copied().unwrap_or(0);
                         let pct = if remote_sent > 0 {
@@ -342,15 +624,51 @@ async fn main() -> Result<()> {
                         };
                         let name = peer_names.get(pid).map(|s| s.as_str()).unwrap_or(&pid[..pid.len().min(8)]);
                         println!("[{name}] health: {local_recv}/{remote_sent} frames ({pct:.1}%)");
+                        per_peer_metrics.insert(pid.clone(), PeerFrameReport {
+                            frames_expected: remote_sent,
+                            frames_received: local_recv,
+                            rtt_us: None,
+                            jitter_us: None,
+                            dc_drops: 0,
+                            late_frames: 0,
+                            decode_failures: 0,
+                        });
                     }
+                    if let Some(ref m) = mesh_opt {
+                        let has_audio_dc = m.any_audio_dc_open();
+                        m.send_metrics_report(has_audio_dc, true, per_peer_metrics, 0, None);
+                    }
+                }
+
+                // Validation timeout check.
+                if args.validate && validate_start.elapsed() >= Duration::from_secs(args.validate_timeout) {
+                    eprintln!(
+                        "Validation timed out after {}s ({} of {} intervals validated)",
+                        args.validate_timeout,
+                        validation_results.len(),
+                        args.validate_intervals,
+                    );
+                    std::process::exit(1);
                 }
             }
 
-            Some((from, msg)) = sync_rx.recv() => {
-                handle_sync(&mesh, &from, &msg, &peer_id, &identity, &args.name, &mut greeted_peers, &link, &mut session_state, &mut interval_tracker, &mut peer_remote_sent, &mut peer_names).await;
+            Some((from, msg)) = async {
+                match sync_rx_opt.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(ref m) = mesh_opt {
+                    handle_sync(m, &from, &msg, &peer_id, &identity, &args.name, &mut greeted_peers, &link, &mut session_state, &mut interval_tracker, &mut peer_remote_sent, &mut peer_names).await;
+                }
             }
 
-            Some((from, data)) = audio_rx.recv() => {
+            Some((from, data)) = async {
+                match audio_rx_opt.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 *peer_frames_recv.entry(from.clone()).or_insert(0) += 1;
                 if args.echo {
                     // Echo received audio back on stream 1.
@@ -358,9 +676,11 @@ async fn main() -> Result<()> {
                     if data.len() >= 7 && &data[0..4] == b"WAIF" {
                         let src_stream = u16::from_le_bytes([data[5], data[6]]);
                         if src_stream == 0 {
-                            let mut echo = data;
+                            let mut echo = data.clone();
                             echo[5..7].copy_from_slice(&1u16.to_le_bytes());
-                            mesh.broadcast_audio(&echo).await;
+                            if let Some(ref m) = mesh_opt {
+                                m.broadcast_audio(&echo).await;
+                            }
                             echo_frames += 1;
                             if echo_frames == 1 {
                                 println!("Echo: first frame from {from} re-sent on stream 1");
@@ -368,18 +688,118 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+
+                // Validation: assemble WAIF frames, decode, and analyze.
+                if let Some(ref mut asm) = assembler {
+                    if let Ok(frame) = AudioFrameWire::decode(&data) {
+                        if let Some(assembled) = asm.insert(&from, &frame) {
+                            if let Some(ref mut dec) = decoder {
+                                if let Ok(pcm) = dec.decode_interval(&assembled.opus_data) {
+                                    // Build expected notes for this interval.
+                                    let mut expected: Vec<Option<f32>> = Vec::new();
+                                    for bar in 0..assembled.bars {
+                                        let global_bar =
+                                            assembled.interval_index as u64 * args.bars as u64
+                                                + bar as u64;
+                                        expected.push(expect_script.freq_at_bar(global_bar));
+                                    }
+
+                                    let analysis = wail_audio::fft_analysis::analyze_interval(
+                                        &pcm,
+                                        assembled.channels,
+                                        assembled.sample_rate,
+                                        assembled.bars,
+                                        assembled.bpm,
+                                        assembled.quantum,
+                                        assembled.interval_index,
+                                        &expected,
+                                    );
+
+                                    println!(
+                                        "Validated interval {}: {}",
+                                        assembled.interval_index,
+                                        if analysis.pass { "PASS" } else { "FAIL" },
+                                    );
+                                    for bar in &analysis.bars {
+                                        println!(
+                                            "  Bar {}: expected={:?}Hz detected={:.1}Hz match={} seam_ok={} dropouts={}",
+                                            bar.bar_index, bar.expected_freq, bar.detected_freq,
+                                            bar.freq_match, bar.seam_ok, bar.dropout_frames,
+                                        );
+                                    }
+
+                                    validation_results.push(analysis);
+
+                                    // Check if we have enough validated intervals.
+                                    if validation_results.len() >= args.validate_intervals as usize {
+                                        let all_pass = validation_results.iter().all(|r| r.pass);
+                                        let total_dropouts: u32 = validation_results
+                                            .iter()
+                                            .flat_map(|r| &r.bars)
+                                            .map(|b| b.dropout_frames)
+                                            .sum();
+                                        let total_seam_failures: u32 = validation_results
+                                            .iter()
+                                            .flat_map(|r| &r.bars)
+                                            .filter(|b| !b.seam_ok)
+                                            .count() as u32;
+                                        let total_freq_mismatches: u32 = validation_results
+                                            .iter()
+                                            .flat_map(|r| &r.bars)
+                                            .filter(|b| !b.freq_match)
+                                            .count() as u32;
+                                        let silence_expected: u32 = validation_results
+                                            .iter()
+                                            .flat_map(|r| &r.bars)
+                                            .filter(|b| b.is_silence_expected)
+                                            .count() as u32;
+                                        let silence_confirmed: u32 = validation_results
+                                            .iter()
+                                            .flat_map(|r| &r.bars)
+                                            .filter(|b| b.is_silence_expected && b.freq_match)
+                                            .count() as u32;
+
+                                        let report = serde_json::json!({
+                                            "pass": all_pass,
+                                            "intervals": validation_results,
+                                            "summary": {
+                                                "intervals_validated": validation_results.len(),
+                                                "intervals_passed": validation_results.iter().filter(|r| r.pass).count(),
+                                                "total_dropouts": total_dropouts,
+                                                "total_seam_failures": total_seam_failures,
+                                                "total_freq_mismatches": total_freq_mismatches,
+                                                "silence_bars_expected": silence_expected,
+                                                "silence_bars_confirmed": silence_confirmed,
+                                            }
+                                        });
+
+                                        println!("\n{}", serde_json::to_string_pretty(&report)?);
+                                        std::process::exit(if all_pass { 0 } else { 1 });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
-            result = mesh.poll_signaling() => {
+            result = async {
+                match mesh_opt.as_mut() {
+                    Some(m) => m.poll_signaling().await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 match result? {
                     Some(MeshEvent::PeerJoined { peer_id: pid, display_name }) => {
                         println!("Peer joined: {pid} ({})", display_name.as_deref().unwrap_or("?"));
                         // Greet the new peer.
-                        mesh.broadcast(&SyncMessage::Hello {
-                            peer_id: peer_id.clone(),
-                            display_name: Some(args.name.clone()),
-                            identity: Some(identity.clone()),
-                        }).await;
+                        if let Some(ref m) = mesh_opt {
+                            m.broadcast(&SyncMessage::Hello {
+                                peer_id: peer_id.clone(),
+                                display_name: Some(args.name.clone()),
+                                identity: Some(identity.clone()),
+                            }).await;
+                        }
                     }
                     Some(MeshEvent::PeerLeft(pid)) => {
                         println!("Peer left: {pid}");

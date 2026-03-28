@@ -1,0 +1,18 @@
+# Multi-stage build for wail-test-client
+# Requires: git submodule update --init --recursive (for vendor/link)
+
+FROM rust:1.88-bookworm AS builder
+RUN apt-get update && apt-get install -y cmake g++ libopus-dev pkg-config libclang-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build -p wail-test-client --release && \
+    cp /app/target/release/wail-test-client /usr/local/bin/wail-test-client
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y libopus0 iproute2 ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/bin/wail-test-client /usr/local/bin/wail-test-client
+COPY docker/entrypoint-peer.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

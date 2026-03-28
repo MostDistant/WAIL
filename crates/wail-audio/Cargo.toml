@@ -10,3 +10,8 @@ crossbeam-channel = "0.5"
 serde = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+rustfft = { version = "6", optional = true }
+
+[features]
+default = []
+analysis = ["rustfft"]
