@@ -1010,6 +1010,34 @@ summary:hover {
   width: calc(100% - 40px);
 }
 
+/* --- Stats mode toggle --- */
+.stats-mode-toggle {
+  display: inline;
+  width: auto;
+  font-size: 9px;
+  padding: 1px 6px;
+  margin: 0 0 0 4px;
+  cursor: pointer;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  vertical-align: middle;
+}
+.stats-mode-toggle:hover {
+  color: var(--fg);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.network-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 6px;
+}
+
 /* Status indicator */
 .connected {
   color: var(--state-ok);

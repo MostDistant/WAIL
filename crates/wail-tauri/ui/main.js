@@ -205,6 +205,14 @@ let unlisten = [];
 let testToneEnabled = false;
 let roomRefreshTimer = null;
 
+// Rolling stats window state
+const STATS_WINDOW_SIZE = 60; // 60 ticks x 2s = 2 minutes
+let statsMode = 'all';        // 'all' or 'recent'
+let statusSnapshots = [];
+let networkSnapshots = [];
+let lastStatusPayload = null;
+let lastNetworkPeers = null;
+
 // --- Display Name Storage ---
 const DISPLAY_NAME_KEY = 'wail-display-name';
 const TELEMETRY_KEY = 'wail-telemetry';
@@ -520,6 +528,16 @@ sessionTabChatBtn.addEventListener('click', () => switchSessionTab(sessionTabCha
 sessionTabLogsBtn.addEventListener('click', () => switchSessionTab(sessionTabLogsBtn));
 sessionTabNetworkBtn.addEventListener('click', () => switchSessionTab(sessionTabNetworkBtn));
 
+function resetStatsWindow() {
+  statusSnapshots = [];
+  networkSnapshots = [];
+  statsMode = 'all';
+  lastStatusPayload = null;
+  lastNetworkPeers = null;
+  document.getElementById('stats-mode-btn').textContent = 'all time';
+  document.getElementById('stats-mode-btn-net').textContent = 'all time';
+}
+
 function showJoin() {
   firstLaunchScreen.style.display = 'none';
   joinScreen.style.display = '';
@@ -528,6 +546,7 @@ function showJoin() {
   joinBtn.disabled = false;
   joinBtn.textContent = 'Join Room';
   switchSessionTab(sessionTabSessionBtn);
+  resetStatsWindow();
   cleanup();
 }
 
@@ -535,6 +554,7 @@ function showSession(room) {
   joinScreen.style.display = 'none';
   sessionScreen.style.display = '';
   sessionError.style.display = 'none';
+  resetStatsWindow();
   clearLog();
   clearChatMessages();
   document.getElementById('session-room').textContent = room;
@@ -643,6 +663,10 @@ toggleTestToneBtn.addEventListener('click', async () => {
   updateTestToneUI();
 });
 
+// --- Stats mode toggle click handlers ---
+document.getElementById('stats-mode-btn').addEventListener('click', toggleStatsMode);
+document.getElementById('stats-mode-btn-net').addEventListener('click', toggleStatsMode);
+
 // --- Chat ---
 chatSendBtn.addEventListener('click', sendChatMessage);
 chatInput.addEventListener('keydown', (e) => {
@@ -652,72 +676,152 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 
+// --- Stats mode toggle ---
+function toggleStatsMode() {
+  statsMode = statsMode === 'all' ? 'recent' : 'all';
+  const label = statsMode === 'all' ? 'all time' : 'last 2 min';
+  document.getElementById('stats-mode-btn').textContent = label;
+  document.getElementById('stats-mode-btn-net').textContent = label;
+  if (lastStatusPayload) renderStatus(lastStatusPayload);
+  if (lastNetworkPeers) renderNetwork(lastNetworkPeers);
+}
+
+function renderStatus(s) {
+  const bpmInput = sessionBpmInput;
+  if (document.activeElement !== bpmInput) {
+    bpmInput.value = s.bpm.toFixed(1);
+  }
+  document.getElementById('session-link-peers').textContent = s.link_peers;
+  document.getElementById('link-no-peers-warning').style.display =
+    (s.link_peers === 0 && s.plugin_connected) ? '' : 'none';
+
+  // Compute display values (windowed or cumulative)
+  let sent = s.audio_sent, recv = s.audio_recv;
+  let bytesSent = s.audio_bytes_sent, bytesRecv = s.audio_bytes_recv;
+  if (statsMode === 'recent' && statusSnapshots.length > 1) {
+    const oldest = statusSnapshots[0];
+    sent = Math.max(0, s.audio_sent - oldest.audio_sent);
+    recv = Math.max(0, s.audio_recv - oldest.audio_recv);
+    bytesSent = Math.max(0, s.audio_bytes_sent - oldest.audio_bytes_sent);
+    bytesRecv = Math.max(0, s.audio_bytes_recv - oldest.audio_bytes_recv);
+  }
+  document.getElementById('session-audio').textContent = `${sent} / ${recv}`;
+  document.getElementById('session-audio-bytes').textContent =
+    `${formatBytes(bytesSent)} / ${formatBytes(bytesRecv)}`;
+
+  document.getElementById('session-interval').textContent = `${s.interval_bars} bar${s.interval_bars !== 1 ? 's' : ''}`;
+  document.getElementById('session-plugin').textContent =
+    s.plugin_connected ? 'connected' : 'disconnected';
+  document.getElementById('session-plugin').className =
+    s.plugin_connected ? 'status-value connected' : 'status-value';
+
+  // Sync test tone state
+  testToneEnabled = s.test_tone_enabled;
+  updateTestToneUI();
+
+  // Update recording status
+  if (s.recording) {
+    document.getElementById('recording-stat').style.display = '';
+    const mb = (s.recording_size_bytes / (1024 * 1024)).toFixed(1);
+    document.getElementById('recording-size').textContent = `${mb} MB`;
+  }
+
+  // Update slot list (local sends first, then remote slots)
+  const slotList = document.getElementById('peer-list');
+  const localSends = s.local_sends || [];
+  const slots = (s.slots || []).slice().sort((a, b) => a.slot - b.slot);
+  if (localSends.length === 0 && slots.length === 0) {
+    slotList.innerHTML = '<span class="empty">No peers connected</span>';
+  } else {
+    const localHtml = localSends.map(ls => {
+      const label = localSends.length > 1 ? `My Send (stream ${ls.stream_index})` : 'My Send';
+      const sendClass = ls.is_sending ? 'peer-status status-connected' : 'peer-status';
+      const sendLabel = ls.is_sending ? 'sending' : 'idle';
+      return `<div class="peer-item peer-item--local">
+        <span class="peer-slot">Send</span><span class="peer-name">${label}</span>
+        <span class="${sendClass}">${sendLabel}</span>
+        <span class="peer-rtt"></span>
+      </div>`;
+    }).join('');
+    const remoteHtml = slots.map(sl => {
+      const name = sl.display_name
+        ? `${escapeHtml(sl.display_name)} (${escapeHtml(sl.short_id)})`
+        : escapeHtml(sl.short_id);
+      const rtt = sl.rtt_ms != null ? `${sl.rtt_ms.toFixed(0)}ms` : '...';
+      const status = sl.status || 'connecting';
+      const statusClass = `peer-status status-${status}`;
+      return `<div class="peer-item">
+        <span class="peer-slot">Slot ${sl.slot}</span><span class="peer-name">${name}</span>
+        <span class="${statusClass}">${escapeHtml(status)}</span>
+        <span class="peer-rtt">${rtt}</span>
+      </div>`;
+    }).join('');
+    slotList.innerHTML = localHtml + remoteHtml;
+  }
+}
+
+function renderNetwork(peers) {
+  const tbody = document.getElementById('network-table-body');
+  if (peers.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">No peers connected</td></tr>';
+    return;
+  }
+  const oldest = networkSnapshots.length > 1 ? networkSnapshots[0] : null;
+  tbody.innerHTML = peers.map(p => {
+    const name = p.display_name
+      ? escapeHtml(p.display_name)
+      : escapeHtml(p.peer_id.slice(0, 8));
+    const slot = p.slot != null ? `Slot ${p.slot}` : '-';
+    const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '-';
+
+    let audioRecv = p.audio_recv;
+    let sentRemote = p.intervals_sent_remote;
+    let fe = p.frames_expected;
+    let fr = p.frames_received;
+
+    if (statsMode === 'recent' && oldest) {
+      const old = oldest.get(p.peer_id);
+      if (old) {
+        audioRecv = Math.max(0, p.audio_recv - old.audio_recv);
+        sentRemote = Math.max(0, p.intervals_sent_remote - old.intervals_sent_remote);
+        fe = Math.max(0, p.frames_expected - old.frames_expected);
+        fr = Math.max(0, p.frames_received - old.frames_received);
+      }
+    }
+
+    let health = '-';
+    let healthClass = '';
+    if (sentRemote > 0) {
+      const pct = audioRecv / sentRemote * 100;
+      health = `${audioRecv}/${sentRemote} (${pct.toFixed(1)}%)`;
+      healthClass = pct >= 98 ? 'health-good' : pct >= 90 ? 'health-warn' : 'health-bad';
+    }
+    return `<tr>
+      <td>${name}</td>
+      <td>${slot}</td>
+      <td class="net-state net-${escapeHtml(p.ice_state)}">${escapeHtml(p.ice_state)}</td>
+      <td class="net-state net-${escapeHtml(p.dc_sync_state)}">${escapeHtml(p.dc_sync_state)}</td>
+      <td class="net-state net-${escapeHtml(p.dc_audio_state)}">${escapeHtml(p.dc_audio_state)}</td>
+      <td>${rtt}</td>
+      <td>${audioRecv}</td>
+      <td class="${healthClass}">${health}</td>
+    </tr>`;
+  }).join('');
+}
+
 // --- Event Listeners ---
 async function setupListeners() {
   cleanup();
 
   unlisten.push(await listen('status:update', (event) => {
     const s = event.payload;
-    const bpmInput = sessionBpmInput;
-    if (document.activeElement !== bpmInput) {
-      bpmInput.value = s.bpm.toFixed(1);
-    }
-    document.getElementById('session-link-peers').textContent = s.link_peers;
-    document.getElementById('link-no-peers-warning').style.display =
-      (s.link_peers === 0 && s.plugin_connected) ? '' : 'none';
-    document.getElementById('session-audio').textContent =
-      `${s.audio_sent} / ${s.audio_recv}`;
-    document.getElementById('session-audio-bytes').textContent =
-      `${formatBytes(s.audio_bytes_sent)} / ${formatBytes(s.audio_bytes_recv)}`;
-    document.getElementById('session-interval').textContent = `${s.interval_bars} bar${s.interval_bars !== 1 ? 's' : ''}`;
-    document.getElementById('session-plugin').textContent =
-      s.plugin_connected ? 'connected' : 'disconnected';
-    document.getElementById('session-plugin').className =
-      s.plugin_connected ? 'status-value connected' : 'status-value';
-
-    // Sync test tone state
-    testToneEnabled = s.test_tone_enabled;
-    updateTestToneUI();
-
-    // Update recording status
-    if (s.recording) {
-      document.getElementById('recording-stat').style.display = '';
-      const mb = (s.recording_size_bytes / (1024 * 1024)).toFixed(1);
-      document.getElementById('recording-size').textContent = `${mb} MB`;
-    }
-
-    // Update slot list (local sends first, then remote slots)
-    const slotList = document.getElementById('peer-list');
-    const localSends = s.local_sends || [];
-    const slots = (s.slots || []).slice().sort((a, b) => a.slot - b.slot);
-    if (localSends.length === 0 && slots.length === 0) {
-      slotList.innerHTML = '<span class="empty">No peers connected</span>';
-    } else {
-      const localHtml = localSends.map(ls => {
-        const label = localSends.length > 1 ? `My Send (stream ${ls.stream_index})` : 'My Send';
-        const sendClass = ls.is_sending ? 'peer-status status-connected' : 'peer-status';
-        const sendLabel = ls.is_sending ? 'sending' : 'idle';
-        return `<div class="peer-item peer-item--local">
-          <span class="peer-slot">Send</span><span class="peer-name">${label}</span>
-          <span class="${sendClass}">${sendLabel}</span>
-          <span class="peer-rtt"></span>
-        </div>`;
-      }).join('');
-      const remoteHtml = slots.map(sl => {
-        const name = sl.display_name
-          ? `${escapeHtml(sl.display_name)} (${escapeHtml(sl.short_id)})`
-          : escapeHtml(sl.short_id);
-        const rtt = sl.rtt_ms != null ? `${sl.rtt_ms.toFixed(0)}ms` : '...';
-        const status = sl.status || 'connecting';
-        const statusClass = `peer-status status-${status}`;
-        return `<div class="peer-item">
-          <span class="peer-slot">Slot ${sl.slot}</span><span class="peer-name">${name}</span>
-          <span class="${statusClass}">${escapeHtml(status)}</span>
-          <span class="peer-rtt">${rtt}</span>
-        </div>`;
-      }).join('');
-      slotList.innerHTML = localHtml + remoteHtml;
-    }
+    lastStatusPayload = s;
+    statusSnapshots.push({
+      audio_sent: s.audio_sent, audio_recv: s.audio_recv,
+      audio_bytes_sent: s.audio_bytes_sent, audio_bytes_recv: s.audio_bytes_recv,
+    });
+    if (statusSnapshots.length > STATS_WINDOW_SIZE) statusSnapshots.shift();
+    renderStatus(s);
   }));
 
   unlisten.push(await listen('tempo:changed', (event) => {
@@ -754,36 +858,17 @@ async function setupListeners() {
 
   unlisten.push(await listen('peers:network', (event) => {
     const peers = event.payload.peers;
-    const tbody = document.getElementById('network-table-body');
-    if (peers.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty">No peers connected</td></tr>';
-      return;
+    lastNetworkPeers = peers;
+    const snap = new Map();
+    for (const p of peers) {
+      snap.set(p.peer_id, {
+        audio_recv: p.audio_recv, intervals_sent_remote: p.intervals_sent_remote,
+        frames_expected: p.frames_expected, frames_received: p.frames_received,
+      });
     }
-    tbody.innerHTML = peers.map(p => {
-      const name = p.display_name
-        ? escapeHtml(p.display_name)
-        : escapeHtml(p.peer_id.slice(0, 8));
-      const slot = p.slot != null ? `Slot ${p.slot}` : '-';
-      const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '-';
-      // Health: frames received / frames remote sent (percentage)
-      let health = '-';
-      let healthClass = '';
-      if (p.intervals_sent_remote > 0) {
-        const pct = p.interval_pct;
-        health = `${p.audio_recv}/${p.intervals_sent_remote} (${pct.toFixed(1)}%)`;
-        healthClass = pct >= 98 ? 'health-good' : pct >= 90 ? 'health-warn' : 'health-bad';
-      }
-      return `<tr>
-        <td>${name}</td>
-        <td>${slot}</td>
-        <td class="net-state net-${escapeHtml(p.ice_state)}">${escapeHtml(p.ice_state)}</td>
-        <td class="net-state net-${escapeHtml(p.dc_sync_state)}">${escapeHtml(p.dc_sync_state)}</td>
-        <td class="net-state net-${escapeHtml(p.dc_audio_state)}">${escapeHtml(p.dc_audio_state)}</td>
-        <td>${rtt}</td>
-        <td>${p.audio_recv}</td>
-        <td class="${healthClass}">${health}</td>
-      </tr>`;
-    }).join('');
+    networkSnapshots.push(snap);
+    if (networkSnapshots.length > STATS_WINDOW_SIZE) networkSnapshots.shift();
+    renderNetwork(peers);
   }));
 }
 
