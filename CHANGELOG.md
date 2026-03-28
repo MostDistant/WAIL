@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.23.0 (2026-03-28)
+
+### Features
+
+- add cross-network e2e test with Docker-isolated peers and audio validation (#241)
+- add rolling 2-minute window toggle for network stats (#243)
+- add send channel renaming (#244)
+
 ## 1.22.0 (2026-03-19)
 
 ### Features
