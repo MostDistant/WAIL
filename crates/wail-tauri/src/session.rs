@@ -211,7 +211,13 @@ async fn session_loop(
     // Load persisted local stream names
     let mut local_stream_names: HashMap<u16, String> = app
         .try_state::<crate::stream_names::StreamNameConfig>()
-        .and_then(|cfg| cfg.names.lock().ok().map(|n| n.clone()))
+        .and_then(|cfg| match cfg.names.lock() {
+            Ok(n) => Some(n.clone()),
+            Err(e) => {
+                warn!("Stream names mutex poisoned, starting with empty names: {e}");
+                None
+            }
+        })
         .unwrap_or_default();
 
     // Track last broadcast tempo to avoid echo loops

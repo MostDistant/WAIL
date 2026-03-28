@@ -992,7 +992,11 @@ function startStreamNameEdit(e) {
   input.maxLength = 32;
   input.placeholder = 'Name this send...';
 
+  let committed = false;
+  let cancelled = false;
   const commit = () => {
+    if (committed || cancelled) return;
+    committed = true;
     const name = input.value.trim();
     invoke('rename_stream', { streamIndex, name });
     // The next status:update will re-render with the new name
@@ -1005,13 +1009,12 @@ function startStreamNameEdit(e) {
       input.blur();
     } else if (ev.key === 'Escape') {
       ev.preventDefault();
-      // Cancel — restore original span, next tick will re-render
+      cancelled = true;
       input.replaceWith(span);
     }
   });
   input.addEventListener('blur', () => {
-    // Only commit if input is still in the DOM (not replaced by Escape)
-    if (input.parentNode) commit();
+    if (!cancelled) commit();
   });
 
   span.replaceWith(input);
