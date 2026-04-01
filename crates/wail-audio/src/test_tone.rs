@@ -5,6 +5,8 @@
 
 use anyhow::{bail, Result};
 
+use crate::codec::AudioEncoder;
+use crate::interval::AudioFrame;
 use crate::wire::AudioFrameWire;
 
 /// Result of validating received audio data.
@@ -44,6 +46,45 @@ pub fn frames_per_interval(bpm: f64, bars: u32, quantum: f64) -> u32 {
     let beats = bars as f64 * quantum;
     let seconds = beats / (bpm / 60.0);
     (seconds / 0.020).round().max(1.0) as u32
+}
+
+/// Encode a synthetic sine-wave test tone as multiple WAIF frames.
+///
+/// Convenience wrapper around `generate_sine_frame` + `frames_per_interval`
+/// for use in e2e tests that need a complete interval in one call.
+pub fn encode_test_interval(
+    index: i64,
+    freq: f32,
+    bpm: f64,
+    bars: u32,
+    quantum: f64,
+) -> Result<Vec<Vec<u8>>> {
+    let total_frames = frames_per_interval(bpm, bars, quantum);
+    let mut encoder = AudioEncoder::new(48000, 2, 128)?;
+    let mut phase: f64 = 0.0;
+    let mut frames = Vec::with_capacity(total_frames as usize);
+
+    for frame_num in 0..total_frames {
+        let samples = generate_sine_frame(freq, &mut phase, 48000, 2);
+        let opus_data = encoder.encode_frame(&samples)?;
+        let is_final = frame_num == total_frames - 1;
+
+        let frame = AudioFrame {
+            interval_index: index,
+            stream_id: 0,
+            frame_number: frame_num,
+            channels: 2,
+            opus_data,
+            is_final,
+            sample_rate: if is_final { 48000 } else { 0 },
+            total_frames: if is_final { total_frames } else { 0 },
+            bpm: if is_final { bpm } else { 0.0 },
+            quantum: if is_final { quantum } else { 0.0 },
+            bars: if is_final { bars } else { 0 },
+        };
+        frames.push(AudioFrameWire::encode(&frame));
+    }
+    Ok(frames)
 }
 
 /// Validate received audio wire data: decode, check format, return details.
