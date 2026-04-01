@@ -604,7 +604,8 @@ func (h *hub) leaveUnlocked(c *conn) {
 		// If room is empty, clean up
 		if peerCountAfter == 0 {
 			delete(h.rooms, room)
-			delete(h.completedSessions, room)
+			// Keep completedSessions — they're capped at maxCompletedSessions
+			// per room and are the only way the dashboard shows historical data.
 			h.db.Exec("DELETE FROM rooms WHERE room = ?", room)
 		}
 	}
