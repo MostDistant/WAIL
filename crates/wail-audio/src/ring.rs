@@ -4,8 +4,9 @@ use crate::slot::{ClientChannelMapping, SlotTable, MAX_SLOTS};
 pub const MAX_REMOTE_PEERS: usize = MAX_SLOTS;
 
 /// Crossfade overlap window in interleaved samples (both channels).
-/// 128 per channel × 2 = 256 interleaved — matches NINJAM's MAX_FADE=128 per channel.
+/// 128 frames × 2 channels = 256 interleaved — matches NINJAM's MAX_FADE=128 per channel.
 /// At 48 kHz stereo this is ~2.7 ms, just above Opus's 2.5 ms algorithmic delay.
+/// Uses linear crossfade (new_w + old_w = 1.0) to prevent amplitude bumps on correlated signals.
 const XFADE_SAMPLES: usize = 256;
 
 /// Per-peer-stream isolated playback slot.
@@ -624,18 +625,30 @@ impl IntervalRing {
             // Assign slot FIRST so we can check needs_fade_in before summing
             let slot_assignment = self.assign_peer_slot(&remote.peer_id, remote.stream_id);
 
-            // Apply equal-power crossfade at interval boundary.
+            // Apply linear crossfade at interval boundary.
             // Blends the tail of the previous interval (fading out) with the head of
             // the new interval (fading in). When crossfade_tail is all zeros (new peer
             // or reconnect), this naturally produces a clean fade-in from silence.
+            //
+            // Linear (not equal-power) ensures new_w + old_w = 1.0 at every point,
+            // preventing amplitude bumps on correlated signals (sustained notes, test
+            // tones). The -3dB power dip for uncorrelated signals over ~2.7ms is
+            // inaudible. Matches NINJAM's reference crossfade implementation.
+            //
+            // Iterates by frame (not sample) so that all channels of the same audio
+            // frame receive identical crossfade weights.
             if let Some(slot_idx) = slot_assignment {
-                let fade_len = XFADE_SAMPLES.min(remote.samples.len());
+                let ch = self.channels as usize;
+                let fade_frames = (XFADE_SAMPLES / ch).min(remote.samples.len() / ch);
                 let tail = self.peer_slots[slot_idx].crossfade_tail;
-                for i in 0..fade_len {
-                    let t = (i + 1) as f32 / fade_len as f32;
-                    let new_w = (t * std::f32::consts::FRAC_PI_2).sin();
-                    let old_w = (t * std::f32::consts::FRAC_PI_2).cos();
-                    remote.samples[i] = remote.samples[i] * new_w + tail[i] * old_w;
+                for frame in 0..fade_frames {
+                    let t = (frame + 1) as f32 / fade_frames as f32;
+                    let new_w = t;
+                    let old_w = 1.0 - t;
+                    for c in 0..ch {
+                        let idx = frame * ch + c;
+                        remote.samples[idx] = remote.samples[idx] * new_w + tail[idx] * old_w;
+                    }
                 }
             }
 
@@ -829,7 +842,7 @@ mod tests {
         // Cross into interval 1 — remote audio should become playback
         ring.process(&input, &mut output, 16.0);
 
-        // First sample near-zero: equal-power crossfade from silence
+        // First sample near-zero: linear crossfade from silence
         assert!(output[0] < 0.02, "First sample should be near zero, got: {}", output[0]);
         // Post-fade region should contain the remote audio at full amplitude
         assert!(output[XFADE_LEN..].iter().all(|&s| (s - 0.7).abs() < f32::EPSILON),
@@ -898,9 +911,10 @@ mod tests {
         // Cross boundary
         ring.process(&input, &mut output, 16.0);
 
-        // First sample near-zero: equal-power crossfade from silence, sin(1/32·π/2) ≈ 0.049
+        // First sample near-zero: linear crossfade from silence, weight = 1/16 = 0.0625
+        // (32 interleaved samples / 2 channels = 16 frames, so fade_frames = 16)
         assert!(output[0] < 0.1, "First sample should be near zero (faded), got: {}", output[0]);
-        // Last sample (i=31, t=1.0): new_w = sin(π/2) = 1.0 → output = 0.5 * 1.0 = 0.5
+        // Last sample (frame 15, t=1.0): new_w = 1.0 → output = 0.5 * 1.0 = 0.5
         assert!((output[31] - 0.5).abs() < 0.01,
             "Last audio sample should be ~0.5, got: {}", output[31]);
         // Rest = silence
@@ -1732,15 +1746,17 @@ mod tests {
         ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; buf]);
         ring.process(&input, &mut output, 16.0);
 
-        // First sample near-zero: equal-power from silence, sin(1/XFADE_LEN·π/2) is small
+        // First sample near-zero: linear fade from silence, weight = 1/128 ≈ 0.008
         assert!(output[0] < 0.02,
             "First sample should be near 0.0 (faded), got: {}", output[0]);
 
-        // Mid-fade: equal-power formula, not linear
+        // Mid-fade: linear formula — weight = (mid_frame + 1) / fade_frames
         let mid = XFADE_LEN / 2;
-        let expected_mid = ((mid + 1) as f32 / XFADE_LEN as f32 * std::f32::consts::FRAC_PI_2).sin();
+        let fade_frames = XFADE_LEN / CH as usize;
+        let mid_frame = mid / CH as usize;
+        let expected_mid = (mid_frame + 1) as f32 / fade_frames as f32;
         assert!((output[mid] - expected_mid).abs() < 0.01,
-            "Mid-fade sample should be ~{expected_mid:.3} (sin curve), got: {}", output[mid]);
+            "Mid-fade sample should be ~{expected_mid:.3} (linear), got: {}", output[mid]);
 
         // Post-fade should be full amplitude
         assert!((output[XFADE_LEN] - 1.0).abs() < f32::EPSILON,
@@ -1782,6 +1798,65 @@ mod tests {
         assert!((output[0] - 0.8).abs() > 0.001, "Start of crossfade should blend, not pass through");
         assert!((output[XFADE_LEN] - 0.8).abs() < f32::EPSILON,
             "Post-crossfade should be pure new audio (0.8), got: {}", output[XFADE_LEN]);
+    }
+
+    #[test]
+    fn linear_crossfade_no_bump_for_correlated_signal() {
+        let mut ring = make_ring();
+        // Buffer must be >= 2*XFADE_LEN so the captured tail from the first
+        // interval is entirely from the post-fade (full amplitude) region.
+        let buf = XFADE_LEN * 2 + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        ring.process(&input, &mut output, 0.0);
+
+        // First interval: constant 1.0 (fades in from silence — that's fine)
+        ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; buf]);
+        ring.process(&input, &mut output, 16.0);
+
+        // Second interval: also constant 1.0 (correlated / identical signal).
+        // The tail captured from the first interval's post-fade region is all 1.0.
+        ring.feed_remote("peer-a".into(), 0, 1, vec![1.0f32; buf]);
+        ring.process(&input, &mut output, 32.0);
+
+        // With linear crossfade: 1.0 * t + 1.0 * (1-t) = 1.0 at every point.
+        // Equal-power would peak at sqrt(2) ≈ 1.414 at the midpoint.
+        for i in 0..buf {
+            assert!((output[i] - 1.0).abs() < f32::EPSILON,
+                "Sample {i} should be exactly 1.0 (no bump), got: {}", output[i]);
+        }
+    }
+
+    #[test]
+    fn stereo_crossfade_pairs_channels() {
+        let mut ring = make_ring(); // stereo (CH=2)
+        // Buffer must be >= 2*XFADE_LEN so tail is from post-fade region.
+        let buf = XFADE_LEN * 2 + 64;
+        let input = vec![0.0f32; buf];
+        let mut output = vec![0.0f32; buf];
+
+        // Build stereo audio: L=1.0, R=0.5 interleaved
+        let stereo: Vec<f32> = (0..buf).map(|i| if i % 2 == 0 { 1.0 } else { 0.5 }).collect();
+
+        ring.process(&input, &mut output, 0.0);
+
+        // First interval (fades in from silence)
+        ring.feed_remote("peer-a".into(), 0, 0, stereo.clone());
+        ring.process(&input, &mut output, 16.0);
+
+        // Second interval with same stereo pattern — tail is from post-fade region
+        ring.feed_remote("peer-a".into(), 0, 1, stereo.clone());
+        ring.process(&input, &mut output, 32.0);
+
+        // Both intervals have identical L/R pattern, so linear crossfade should
+        // preserve them exactly. Verify L and R channels maintain their values.
+        for i in 0..buf {
+            let expected = if i % 2 == 0 { 1.0 } else { 0.5 };
+            assert!((output[i] - expected).abs() < f32::EPSILON,
+                "Sample {i} ({}) should be {expected}, got: {}",
+                if i % 2 == 0 { "L" } else { "R" }, output[i]);
+        }
     }
 
     #[test]
@@ -1872,9 +1947,9 @@ mod tests {
         ring.feed_remote("peer-a".into(), 0, 0, vec![1.0f32; 32]);
         ring.process(&input, &mut output, 16.0);
 
-        // Should not panic; first sample near zero (sin(1/32·π/2) ≈ 0.098)
+        // Should not panic; first sample near zero (linear weight = 1/16 = 0.0625)
         assert!(output[0] < 0.15, "First sample should be near zero, got: {}", output[0]);
-        // Last audio sample (i=31, t=1.0): sin(π/2) = 1.0, so output = 1.0 * 1.0 = 1.0
+        // Last audio sample (frame 15, t=1.0): new_w = 1.0, so output = 1.0 * 1.0 = 1.0
         assert!((output[31] - 1.0).abs() < 0.01,
             "Last sample should be ~1.0, got: {}", output[31]);
         // Silence after audio
