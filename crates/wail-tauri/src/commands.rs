@@ -140,10 +140,10 @@ pub fn send_chat(state: State<'_, SessionState>, text: String) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn set_test_tone(state: State<'_, SessionState>, enabled: bool) -> Result<(), String> {
+pub fn set_test_tone(state: State<'_, SessionState>, stream_index: Option<u16>) -> Result<(), String> {
     let session = state.lock().map_err(|e| e.to_string())?;
     if let Some(ref handle) = *session {
-        let _ = handle.cmd_tx.send(SessionCommand::SetTestTone(enabled));
+        let _ = handle.cmd_tx.send(SessionCommand::SetTestTone(stream_index));
     }
     Ok(())
 }

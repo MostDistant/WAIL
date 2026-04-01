@@ -19,12 +19,6 @@ pub enum LinkEvent {
         quantum: f64,
         timestamp_us: i64,
     },
-    /// Fires every poll tick (~20ms) with current beat position.
-    BeatTick {
-        beat: f64,
-        phase: f64,
-        bpm: f64,
-    },
 }
 
 /// Pure-logic tempo change detector with echo guard.
@@ -203,16 +197,6 @@ impl LinkBridge {
                                 warn!("Link event receiver dropped — stopping poller");
                                 break;
                             }
-                        }
-
-                        // Beat tick every poll (~20ms) for debug visualization
-                        {
-                            let s = self.state();
-                            let _ = event_tx.send(LinkEvent::BeatTick {
-                                beat: s.beat,
-                                phase: s.phase,
-                                bpm: s.bpm,
-                            });
                         }
 
                         // Send periodic state snapshot (every ~200ms = 10 ticks)

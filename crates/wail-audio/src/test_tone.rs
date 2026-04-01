@@ -5,13 +5,7 @@
 
 use anyhow::{bail, Result};
 
-use crate::codec::AudioEncoder;
-use crate::interval::AudioFrame;
 use crate::wire::AudioFrameWire;
-
-const SAMPLE_RATE: u32 = 48000;
-const CHANNELS: u16 = 2;
-const OPUS_BITRATE: u32 = 128;
 
 /// Result of validating received audio data.
 pub struct AudioValidation {
@@ -25,60 +19,31 @@ pub struct AudioValidation {
     pub detail: String,
 }
 
-/// Encode a synthetic sine-wave test tone as multiple WAIF frames.
+/// Generate a single 20ms stereo sine frame (960 samples/channel at 48kHz).
 ///
-/// Computes the real frame count from BPM/bars/quantum (matching what a
-/// DAW plugin would produce), then generates that many 20ms Opus frames.
-/// Each frame is wrapped in WAIF wire format; the last is marked final
-/// with interval metadata.
-pub fn encode_test_interval(
-    index: i64,
-    freq: f32,
-    bpm: f64,
-    bars: u32,
-    quantum: f64,
-) -> Result<Vec<Vec<u8>>> {
-    // Compute interval duration from musical parameters (same as real plugins)
-    let beats_per_interval = bars as f64 * quantum;
-    let interval_seconds = beats_per_interval / (bpm / 60.0);
-    let frame_duration_s = 0.020; // 20ms per Opus frame
-    let total_frames = (interval_seconds / frame_duration_s).round().max(1.0) as u32;
+/// `phase` is updated in-place for continuous waveform across calls.
+/// Returns interleaved stereo f32 samples.
+pub fn generate_sine_frame(freq: f32, phase: &mut f64, sample_rate: u32, channels: u16) -> Vec<f32> {
+    let samples_per_frame = (sample_rate as f64 * 0.020) as usize; // 20ms
+    let num_samples = samples_per_frame * channels as usize;
+    let phase_inc = freq as f64 / sample_rate as f64;
+    let mut samples = vec![0.0f32; num_samples];
 
-    let samples_per_frame = 960usize; // 20ms at 48kHz
-    let num_samples = samples_per_frame * CHANNELS as usize;
-    let mut encoder = AudioEncoder::new(SAMPLE_RATE, CHANNELS, OPUS_BITRATE)?;
-    let mut phase: f64 = 0.0;
-    let phase_inc = freq as f64 / SAMPLE_RATE as f64;
-    let mut frames = Vec::with_capacity(total_frames as usize);
-
-    for frame_num in 0..total_frames {
-        let mut samples = vec![0.0f32; num_samples];
-        for i in 0..samples_per_frame {
-            let val = (2.0 * std::f64::consts::PI * phase).sin() as f32 * 0.5;
-            samples[i * 2] = val;
-            samples[i * 2 + 1] = val;
-            phase += phase_inc;
+    for i in 0..samples_per_frame {
+        let val = (2.0 * std::f64::consts::PI * *phase).sin() as f32 * 0.5;
+        for ch in 0..channels as usize {
+            samples[i * channels as usize + ch] = val;
         }
-
-        let opus_data = encoder.encode_frame(&samples)?;
-        let is_final = frame_num == total_frames - 1;
-
-        let frame = AudioFrame {
-            interval_index: index,
-            stream_id: 0,
-            frame_number: frame_num,
-            channels: CHANNELS,
-            opus_data,
-            is_final,
-            sample_rate: if is_final { SAMPLE_RATE } else { 0 },
-            total_frames: if is_final { total_frames } else { 0 },
-            bpm: if is_final { bpm } else { 0.0 },
-            quantum: if is_final { quantum } else { 0.0 },
-            bars: if is_final { bars } else { 0 },
-        };
-        frames.push(AudioFrameWire::encode(&frame));
+        *phase += phase_inc;
     }
-    Ok(frames)
+    samples
+}
+
+/// Compute the expected number of 20ms frames in one interval.
+pub fn frames_per_interval(bpm: f64, bars: u32, quantum: f64) -> u32 {
+    let beats = bars as f64 * quantum;
+    let seconds = beats / (bpm / 60.0);
+    (seconds / 0.020).round().max(1.0) as u32
 }
 
 /// Validate received audio wire data: decode, check format, return details.
@@ -125,35 +90,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encode_decode_roundtrip() {
-        let frames = encode_test_interval(42, 440.0, 120.0, 4, 4.0).unwrap();
-        // At 120 BPM, 4 bars, quantum 4: 16 beats = 8 seconds = 400 frames
-        assert_eq!(frames.len(), 400);
-        // Validate last frame (final)
-        let validation = validate_audio(&frames[frames.len() - 1]).unwrap();
-        assert_eq!(validation.format, "WAIF");
-        assert!(validation.detail.contains("interval 42"));
-        assert!(validation.detail.contains("final=true"));
-        // Validate first frame (not final)
-        let first = validate_audio(&frames[0]).unwrap();
-        assert!(first.detail.contains("final=false"));
+    fn generate_sine_frame_correct_length() {
+        let mut phase = 0.0;
+        let samples = generate_sine_frame(440.0, &mut phase, 48000, 2);
+        assert_eq!(samples.len(), 960 * 2); // 20ms at 48kHz stereo
+        assert!(phase > 0.0);
+    }
+
+    #[test]
+    fn generate_sine_frame_nonzero_energy() {
+        let mut phase = 0.0;
+        let samples = generate_sine_frame(440.0, &mut phase, 48000, 2);
+        assert!(rms(&samples) > 0.1);
+    }
+
+    #[test]
+    fn frames_per_interval_120bpm_4bars() {
+        assert_eq!(frames_per_interval(120.0, 4, 4.0), 400);
     }
 
     #[test]
     fn rms_of_silence_is_zero() {
         let silence = vec![0.0f32; 1920];
         assert_eq!(rms(&silence), 0.0);
-    }
-
-    #[test]
-    fn rms_of_signal_is_nonzero() {
-        let mut samples = vec![0.0f32; 1920];
-        for i in 0..960 {
-            let val = (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48000.0).sin() * 0.5;
-            samples[i * 2] = val;
-            samples[i * 2 + 1] = val;
-        }
-        assert!(rms(&samples) > 0.1);
     }
 
     #[test]

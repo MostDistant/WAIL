@@ -108,7 +108,7 @@ pub struct StatusUpdate {
     pub plugin_connected: bool,
     pub recording: bool,
     pub recording_size_bytes: u64,
-    pub test_tone_enabled: bool,
+    pub test_tone_stream: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

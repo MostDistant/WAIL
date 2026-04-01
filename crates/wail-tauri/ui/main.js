@@ -13,7 +13,7 @@ const joinError = document.getElementById('join-error');
 const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
 const sessionBpmInput = document.getElementById('session-bpm');
-const toggleTestToneBtn = document.getElementById('toggle-test-tone-btn');
+const testToneSelect = document.getElementById('test-tone-select');
 const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsCloseBtn = document.getElementById('settings-close-btn');
@@ -202,7 +202,7 @@ document.getElementById('generate-room-btn').addEventListener('click', () => {
 
 // State
 let unlisten = [];
-let testToneEnabled = false;
+let testToneStream = null; // null or stream index number
 let roomRefreshTimer = null;
 
 // Rolling stats window state
@@ -575,16 +575,13 @@ function showSession(room) {
   document.getElementById('session-plugin').className = 'status-value';
   document.getElementById('session-link-peers').textContent = '0';
   document.getElementById('session-interval').textContent = '-';
-  testToneEnabled = document.getElementById('test-tone').checked;
-  updateTestToneUI();
+  testToneStream = document.getElementById('test-tone').checked ? 0 : null;
   document.getElementById('recording-stat').style.display =
     document.getElementById('recording-enabled').checked ? '' : 'none';
 }
 
 function updateTestToneUI() {
-  document.getElementById('session-test-tone').textContent = testToneEnabled ? 'ON' : 'OFF';
-  document.getElementById('session-test-tone').className = testToneEnabled ? 'status-value connected' : 'status-value';
-  toggleTestToneBtn.textContent = testToneEnabled ? 'Disable' : 'Enable';
+  testToneSelect.value = testToneStream != null ? String(testToneStream) : '';
 }
 
 function showError(el, msg) {
@@ -661,15 +658,16 @@ sessionBpmInput.addEventListener('keydown', (e) => {
 sessionBpmInput.addEventListener('change', applyBpm);
 
 // --- Test Tone Toggle ---
-toggleTestToneBtn.addEventListener('click', async () => {
-  testToneEnabled = !testToneEnabled;
+testToneSelect.addEventListener('change', async () => {
+  const val = testToneSelect.value;
+  const streamIndex = val === '' ? null : parseInt(val, 10);
   try {
-    await invoke('set_test_tone', { enabled: testToneEnabled });
+    await invoke('set_test_tone', { streamIndex });
+    testToneStream = streamIndex;
   } catch (err) {
-    console.error('Test tone toggle error:', err);
-    testToneEnabled = !testToneEnabled; // revert on error
+    console.error('Test tone error:', err);
+    updateTestToneUI(); // revert
   }
-  updateTestToneUI();
 });
 
 // --- Stats mode toggle click handlers ---
@@ -725,7 +723,7 @@ function renderStatus(s) {
     s.plugin_connected ? 'status-value connected' : 'status-value';
 
   // Sync test tone state
-  testToneEnabled = s.test_tone_enabled;
+  testToneStream = s.test_tone_stream;
   updateTestToneUI();
 
   // Update recording status
