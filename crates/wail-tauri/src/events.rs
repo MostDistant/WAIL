@@ -175,6 +175,8 @@ pub struct LogEntry {
 pub struct DebugIntervalFrame {
     pub peer_id: String,
     pub display_name: Option<String>,
+    pub stream_index: u16,
+    pub stream_name: Option<String>,
     pub interval_index: i64,
     pub frame_number: u32,
     /// Set on the final frame of an interval.

@@ -152,6 +152,7 @@ impl AudioFrameWire {
 #[derive(Debug, Clone, Copy)]
 pub struct WaifHeaderPeek {
     pub interval_index: i64,
+    pub stream_id: u16,
     pub frame_number: u32,
     pub is_final: bool,
     /// Only valid when `is_final` is true.
@@ -166,6 +167,7 @@ pub fn peek_waif_header(data: &[u8]) -> Option<WaifHeaderPeek> {
     }
     let flags = data[4];
     let is_final = flags & FRAME_FLAG_FINAL != 0;
+    let stream_id = u16::from_le_bytes(data[5..7].try_into().ok()?);
     let interval_index = i64::from_le_bytes(data[7..15].try_into().ok()?);
     let frame_number = u32::from_le_bytes(data[15..19].try_into().ok()?);
     let total_frames = if is_final {
@@ -180,6 +182,7 @@ pub fn peek_waif_header(data: &[u8]) -> Option<WaifHeaderPeek> {
     };
     Some(WaifHeaderPeek {
         interval_index,
+        stream_id,
         frame_number,
         is_final,
         total_frames,

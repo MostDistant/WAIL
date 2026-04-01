@@ -1071,22 +1071,25 @@ const DEBUG_PIX_GAP = 1;
 const DEBUG_CELL_GAP = 4;
 const DEBUG_VISIBLE_INTERVALS = 2; // current (PLAY+REC) and previous
 
-// State per peer
+// State per stream (keyed by "peer_id:stream_index")
 const debugPeers = new Map();
 let debugPeerOrder = [];
-let debugCurrentInterval = new Map(); // peer_id -> highest interval index
+let debugCurrentInterval = new Map(); // col_key -> highest interval index
 let debugExpectedFrames = 0; // expected frames per interval (from BPM math)
 let debugLinkBeat = 0; // current Link beat position (updated at 20ms)
 
 function debugHandleFrame(ev) {
   const f = ev.payload;
-  const pid = f.peer_id;
-  if (!debugPeers.has(pid)) {
-    debugPeers.set(pid, { name: f.display_name || pid.slice(0, 6), isLocal: f.is_local, intervals: new Map() });
+  const key = `${f.peer_id}:${f.stream_index}`;
+  if (!debugPeers.has(key)) {
+    const peerName = f.display_name || f.peer_id.slice(0, 6);
+    const streamLabel = f.stream_name || `#${f.stream_index}`;
+    debugPeers.set(key, { name: peerName, streamLabel, isLocal: f.is_local, intervals: new Map() });
     debugPeerOrder = Array.from(debugPeers.keys());
   }
-  const peer = debugPeers.get(pid);
+  const peer = debugPeers.get(key);
   if (f.display_name) peer.name = f.display_name;
+  if (f.stream_name) peer.streamLabel = f.stream_name;
 
   if (!peer.intervals.has(f.interval_index)) {
     peer.intervals.set(f.interval_index, { frames: new Set(), total: null, offsetMs: f.arrival_offset_ms });
@@ -1100,14 +1103,14 @@ function debugHandleFrame(ev) {
     iv.offsetMs = f.arrival_offset_ms;
   }
 
-  // Track current interval (highest seen for this peer)
-  const prev = debugCurrentInterval.get(pid) || 0;
+  // Track current interval (highest seen for this stream)
+  const prev = debugCurrentInterval.get(key) || 0;
   if (f.interval_index > prev) {
-    debugCurrentInterval.set(pid, f.interval_index);
+    debugCurrentInterval.set(key, f.interval_index);
   }
 
-  // Prune: keep only the 3 visible intervals per peer
-  const cur = debugCurrentInterval.get(pid) || 0;
+  // Prune: keep only the 3 visible intervals per stream
+  const cur = debugCurrentInterval.get(key) || 0;
   const oldest = cur - 2;
   for (const idx of peer.intervals.keys()) {
     if (idx < oldest) peer.intervals.delete(idx);
@@ -1170,10 +1173,11 @@ function debugRender() {
   ctx.font = '11px ' + font;
   ctx.textAlign = 'center';
   ctx.fillStyle = '#8b8b9e';
-  debugPeerOrder.forEach((pid, colIdx) => {
-    const peer = debugPeers.get(pid);
+  debugPeerOrder.forEach((key, colIdx) => {
+    const peer = debugPeers.get(key);
     const x = startX + colIdx * colW + colW / 2;
-    const label = peer.isLocal ? `${peer.name} (local)` : peer.name;
+    const suffix = peer.isLocal ? ' (local)' : '';
+    const label = `${peer.name} / ${peer.streamLabel}${suffix}`;
     ctx.fillText(label, x, 16);
   });
 
@@ -1195,9 +1199,9 @@ function debugRender() {
     ctx.fillStyle = isActive ? '#4e9af180' : '#55556a60';
     ctx.fillText(role, labelW, cellY + cellH / 2 + 18);
 
-    // Draw cell for each peer
-    debugPeerOrder.forEach((pid, colIdx) => {
-      const peer = debugPeers.get(pid);
+    // Draw cell for each stream
+    debugPeerOrder.forEach((key, colIdx) => {
+      const peer = debugPeers.get(key);
       const iv = peer.intervals.get(idx);
       const cellX = startX + colIdx * colW + 2;
       const cw = colW - 4;

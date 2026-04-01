@@ -725,6 +725,8 @@ async fn session_loop(
                         let _ = app.emit("debug:interval-frame", DebugIntervalFrame {
                             peer_id: peer_id.clone(),
                             display_name: Some(display_name.clone()),
+                            stream_index: header.stream_id,
+                            stream_name: local_stream_names.get(&header.stream_id).cloned(),
                             interval_index: header.interval_index,
                             frame_number: header.frame_number,
                             total_frames: if header.is_final { Some(header.total_frames) } else { None },
@@ -1297,10 +1299,14 @@ async fn session_loop(
                 // frames use the local interval index (matching the viz rows).
                 if let Some(header) = wail_audio::peek_waif_header(&data) {
                     let offset_ms = last_boundary_time.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
-                    let peer_name = peers.get(&from).and_then(|p| p.display_name.clone());
+                    let peer_state = peers.get(&from);
+                    let peer_name = peer_state.and_then(|p| p.display_name.clone());
+                    let remote_stream_name = peer_state.and_then(|p| p.stream_names.get(&header.stream_id).cloned());
                     let _ = app.emit("debug:interval-frame", DebugIntervalFrame {
                         peer_id: from.clone(),
                         display_name: peer_name,
+                        stream_index: header.stream_id,
+                        stream_name: remote_stream_name,
                         interval_index: header.interval_index,
                         frame_number: header.frame_number,
                         total_frames: if header.is_final { Some(header.total_frames) } else { None },
