@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.24.0 (2026-04-01)
+
+### Features
+
+- add debug tools — multi-instance, test tone toggle, interval viz (#252)
+
+### Fixes
+
+- update GitHub Actions to Node.js 24-compatible versions (#247)
+- include version number in release artifact filenames (#250)
+
 ## 1.23.1 (2026-03-28)
 
 ### Fixes
