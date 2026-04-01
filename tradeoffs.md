@@ -82,6 +82,13 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ## Design Decisions
 
+### Linear crossfade at interval boundaries
+**Status:** Done
+**File:** `crates/wail-audio/src/ring.rs`
+**Decision:** Switched from equal-power (sin/cos) to linear (t / 1−t) crossfade at interval boundaries. Equal-power preserves constant power for uncorrelated signals but causes a √2 ≈ +3dB amplitude bump for correlated signals (sustained notes, test tones, drones). Linear guarantees new_w + old_w = 1.0 at every point — no amplitude variation regardless of signal content. The −3dB power dip for uncorrelated signals over the ~2.7ms window is inaudible. Also fixed stereo-aware frame iteration so L/R pairs get identical weights. Matches NINJAM's reference crossfade implementation.
+
+---
+
 ### TempoChangeDetector extraction
 **Status:** Done
 **File:** `crates/wail-core/src/link.rs`
