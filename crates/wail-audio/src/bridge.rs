@@ -87,6 +87,11 @@ impl AudioBridge {
         self.ring.set_buffer_return_rx(rx);
     }
 
+    /// Pre-allocated capacity of each record/playback slot in samples.
+    pub fn slot_capacity(&self) -> usize {
+        self.ring.slot_capacity()
+    }
+
     /// Update tempo/config from DAW transport.
     pub fn update_config(&mut self, bars: u32, quantum: f64, bpm: f64) {
         self.bars = bars;

@@ -219,8 +219,11 @@ impl Plugin for WailSendPlugin {
         );
 
         // Wire buffer return channel: completed interval buffers are recycled
-        // back to IntervalRing, eliminating audio-thread allocations after warmup.
+        // back to IntervalRing, eliminating audio-thread allocations entirely.
         let (buf_return_tx, buf_return_rx) = crossbeam_channel::bounded::<Vec<f32>>(8);
+        // Pre-seed one buffer so the very first interval boundary has a spare
+        // available via try_recv(), eliminating even the warmup allocation.
+        let _ = buf_return_tx.try_send(Vec::with_capacity(bridge.slot_capacity()));
         bridge.set_buffer_return_rx(buf_return_rx);
         self.buf_return_tx = Some(buf_return_tx);
 

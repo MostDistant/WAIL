@@ -189,15 +189,19 @@ impl IntervalRing {
     ) -> Option<i64> {
         // Replenish spare record buffer between boundaries so that
         // swap_intervals() can do a zero-copy move instead of to_vec().
-        // Prefer reclaiming a buffer from the encoding thread (zero alloc)
-        // over a fresh allocation (only needed during warmup).
+        // When a return channel is configured, reclaim buffers from the
+        // encoding thread (zero alloc). If the channel is empty, skip —
+        // recording degrades gracefully for one interval but the audio
+        // thread never allocates.
         if self.spare_record.capacity() == 0 {
             if let Some(ref rx) = self.buffer_return_rx {
                 if let Ok(buf) = rx.try_recv() {
                     self.spare_record = buf;
+                } else {
+                    tracing::warn!("spare_record empty and buffer return channel yielded nothing — recording skipped this interval");
                 }
-            }
-            if self.spare_record.capacity() == 0 {
+            } else {
+                // No return channel configured (tests / standalone) — allocate.
                 self.spare_record = Vec::with_capacity(self.slot_capacity);
             }
         }
@@ -330,12 +334,21 @@ impl IntervalRing {
 
     /// Set the buffer return channel for zero-allocation spare replenishment.
     ///
-    /// After the encoding thread finishes with a CompletedInterval's sample buffer,
-    /// it sends the empty Vec back through this channel. `process()` reclaims it
-    /// via `try_recv()` — after warmup (2-3 intervals), no allocations occur on
-    /// the audio thread.
+    /// After the audio thread extracts a CompletedInterval's sample buffer, it
+    /// clears and sends the Vec back through this channel. `process()` reclaims
+    /// it via `try_recv()` — no allocations occur on the audio thread.
+    ///
+    /// When the channel is configured, `process()` will **never** fall back to
+    /// `Vec::with_capacity()`. If the channel is empty (e.g. during warmup),
+    /// recording degrades gracefully for one interval. Pre-seed the channel
+    /// with one buffer to eliminate even the warmup gap.
     pub fn set_buffer_return_rx(&mut self, rx: crossbeam_channel::Receiver<Vec<f32>>) {
         self.buffer_return_rx = Some(rx);
+    }
+
+    /// Pre-allocated capacity of each record/playback slot in samples.
+    pub fn slot_capacity(&self) -> usize {
+        self.slot_capacity
     }
 
     /// Reset all state (preserves pre-allocated capacity).
@@ -2398,4 +2411,111 @@ mod tests {
         );
     }
 
+    // --- Tests: Buffer return channel recycling ---
+
+    #[test]
+    fn spare_replenished_from_return_channel() {
+        let mut ring = make_ring();
+        let cap = ring.slot_capacity();
+        let (tx, rx) = crossbeam_channel::bounded::<Vec<f32>>(4);
+        ring.set_buffer_return_rx(rx);
+
+        // Pre-seed one buffer (simulates what the plugin does at init)
+        tx.try_send(Vec::with_capacity(cap)).unwrap();
+
+        let input = vec![1.0f32; 256];
+        let mut output = vec![0.0f32; 256];
+
+        // Interval 0: record some audio
+        ring.process(&input, &mut output, 0.0);
+
+        // Cross into interval 1 — consumes spare, produces CompletedInterval
+        let boundary = ring.process(&input, &mut output, 16.0);
+        assert!(boundary.is_some());
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 1, "First boundary should produce a CompletedInterval");
+
+        // Return the buffer (simulating what the plugin does)
+        let mut buf = completed.into_iter().next().unwrap().samples;
+        buf.clear();
+        tx.try_send(buf).unwrap();
+
+        // Record in interval 1
+        ring.process(&input, &mut output, 16.5);
+
+        // Cross into interval 2 — spare should have been reclaimed from the channel
+        let boundary = ring.process(&input, &mut output, 32.0);
+        assert!(boundary.is_some());
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 1, "Second boundary should produce a CompletedInterval (buffer recycled)");
+    }
+
+    #[test]
+    fn no_alloc_when_channel_configured_but_empty() {
+        let mut ring = make_ring();
+        let (_tx, rx) = crossbeam_channel::bounded::<Vec<f32>>(4);
+        ring.set_buffer_return_rx(rx);
+        // Channel is configured but empty — no pre-seeded buffer.
+
+        let input = vec![1.0f32; 256];
+        let mut output = vec![0.0f32; 256];
+
+        // Interval 0: record some audio (uses pre-allocated record_slot from new())
+        ring.process(&input, &mut output, 0.0);
+
+        // Cross into interval 1 — consumes the initial spare from new()
+        let boundary = ring.process(&input, &mut output, 16.0);
+        assert!(boundary.is_some());
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 1, "First boundary uses initial spare from new()");
+
+        // Do NOT return the buffer — channel stays empty.
+
+        // Record in interval 1 — spare is empty, channel is empty.
+        // process() should NOT allocate; spare stays at capacity 0.
+        // record_slot is the old spare (has capacity), so recording works.
+        ring.process(&input, &mut output, 16.5);
+
+        // Cross into interval 2 — spare was empty, but record_slot (old spare)
+        // had capacity. This boundary consumes it, producing a CompletedInterval.
+        // After this swap, the new record_slot (from empty spare) has no capacity.
+        let boundary = ring.process(&input, &mut output, 32.0);
+        assert!(boundary.is_some());
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 1, "Second boundary should still work (old spare had capacity)");
+
+        // Record in interval 2 — record_slot now has zero capacity (from empty spare)
+        ring.process(&input, &mut output, 32.5);
+
+        // Cross into interval 3 — record_pos == 0 (couldn't record), no CompletedInterval
+        let boundary = ring.process(&input, &mut output, 48.0);
+        assert!(boundary.is_some());
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 0, "Third boundary should skip recording (no spare, no channel buffer)");
+    }
+
+    #[test]
+    fn fallback_alloc_when_no_channel_configured() {
+        let mut ring = make_ring();
+        // No set_buffer_return_rx call — channel is None.
+
+        let input = vec![1.0f32; 256];
+        let mut output = vec![0.0f32; 256];
+
+        // Interval 0
+        ring.process(&input, &mut output, 0.0);
+
+        // Cross into interval 1
+        ring.process(&input, &mut output, 16.0);
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 1, "First boundary should produce CompletedInterval");
+
+        // Record in interval 1
+        ring.process(&input, &mut output, 16.5);
+
+        // Cross into interval 2 — without a channel, fallback allocation kicks in
+        ring.process(&input, &mut output, 32.0);
+        let completed = ring.take_completed();
+        assert_eq!(completed.len(), 1, "Second boundary should produce CompletedInterval (fallback alloc)");
+    }
 }
