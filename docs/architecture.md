@@ -44,15 +44,6 @@ wail-app/ (Go/Wails desktop app — session orchestration, IPC, recording)
 ├── abletonlink-go (Ableton Link via CGo)
 └── pion/opus (Opus codec)
 
-wail-tauri (Rust/Tauri desktop app — legacy, being replaced by wail-app)
-├── wail-core (library — no networking deps)
-│   └── rusty_link (Ableton Link C FFI)
-├── wail-audio (library — no networking deps)
-│   └── audiopus (Opus codec via libopus)
-└── wail-net (library)
-    ├── wail-core
-    └── tokio-tungstenite (WebSocket client)
-
 wail-plugin-send (CLAP/VST3, captures DAW audio, stream_index param 0-14)
 ├── wail-core
 └── wail-audio
@@ -300,7 +291,7 @@ Two independent time domains exist in the system:
 
 10. **Stable slot assignment via `ClientChannelMapping`**: Each remote audio channel is identified by `ClientChannelMapping(client_id, channel_index)` where `client_id` is a persistent UUID. A `SlotTable` manages assignment, affinity reservations, and reclamation. When a peer disconnects, their slot entries move to reserved; on reconnect with the same identity, they reclaim the same slots. This prevents DAW routing from breaking during brief network interruptions.
 
-11. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.rs` in wail-tauri.
+11. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.go` in wail-app.
 
 12. **Fade-in on peer join**: When a new or reconnecting peer's first audio interval arrives, a 10ms linear ramp-from-silence is applied before mixing into the playback buffer. This prevents audible pops/clicks caused by abrupt sample onset. The fade length is clamped to the interval length for safety. After the first interval, subsequent intervals play at full amplitude with no ramping.
 

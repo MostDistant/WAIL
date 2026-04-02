@@ -2,7 +2,7 @@
 //!
 //! Contains an in-process WebSocket signaling server and a role-aware mini_app
 //! session loop that bridges plugin IPC ↔ WebSocket relay, mirroring the audio forwarding
-//! logic in wail-tauri/src/session.rs without Tauri, Link, or clock sync.
+//! logic in wail-app/session.go without Link or clock sync.
 //!
 //! The signaling server and `mini_app_session_v2` are derived from
 //! `wail-net/tests/common/mod.rs` and `wail-net/tests/ipc_e2e.rs` respectively.

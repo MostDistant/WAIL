@@ -27,8 +27,8 @@ WAIL connects musicians over the internet using WebRTC DataChannels for both syn
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                   wail-tauri / session.rs               │
-│   Session orchestrator: Link + WebRTC + IPC + UI        │
+│                   wail-app / session.go                  │
+│   Session orchestrator: Link + WebSocket + IPC + UI     │
 ├─────────────────────────────────────────────────────────┤
 │                   wail-net / PeerMesh                   │
 │   WebRTC peer management + signaling                    │
@@ -53,7 +53,7 @@ Peers communicate directly (P2P) once WebRTC connects. The signaling server is o
 
 | Layer | Crate/File | Responsibility |
 |-------|-----------|----------------|
-| Session orchestration | `wail-tauri/session.rs` | Drives the `tokio::select!` loop, owns all state, routes messages between Link, mesh, plugins, and frontend |
+| Session orchestration | `wail-app/session.go` | Drives the goroutine select loop, owns all state, routes messages between Link, mesh, plugins, and frontend |
 | Peer mesh | `wail-net/lib.rs` | Manages the `HashMap<peer_id, PeerConnection>` and the signaling polling loop |
 | Single peer | `wail-net/peer.rs` | One WebRTC peer connection with two DataChannels |
 | Signaling | `wail-net/signaling.rs` | WebSocket client; sends/receives signaling messages in real time |

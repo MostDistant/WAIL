@@ -52,14 +52,6 @@ crates/
 │   └── signaling.rs      WebSocket signaling + data relay client
 ├── wail-e2e/            Two-machine end-to-end test binary
 │   └── main.rs           7-phase test: Signaling → Discovery → Sync → Audio → Sustained → Burst → Reconnect
-├── wail-tauri/          Tauri desktop app (legacy, being replaced by wail-app)
-│   ├── main.rs           App entry point
-│   ├── lib.rs            Tauri setup and plugin registration
-│   ├── commands.rs       Tauri IPC commands (join/leave room, etc.)
-│   ├── events.rs         Tauri event types for frontend
-│   ├── peers.rs          PeerRegistry + IpcWriterPool (consolidated peer state)
-│   ├── session.rs        Session state machine (Link + WebSocket relay + audio)
-│   └── recorder.rs       Local session recording
 ├── wail-plugin-send/    CLAP/VST3 send plugin (captures DAW audio)
 │   ├── lib.rs            Plugin entry point, send-only IPC thread
 │   └── params.rs         Plugin parameters (empty — defaults hardcoded)
@@ -67,7 +59,7 @@ crates/
 │   ├── lib.rs            Plugin entry point, recv-only IPC thread
 │   └── params.rs         Plugin parameters (empty — defaults hardcoded)
 
-xtask/                   Build tasks (build-plugin, install-plugin, build-tauri, etc.)
+xtask/                   Build tasks (build-plugin, install-plugin, etc.)
 
 signaling-server/
 └── main.go           WebSocket signaling server (Go + SQLite, deployed to fly.io)
@@ -173,7 +165,7 @@ cargo xtask test -- -p wail-audio         # audio tests (codec, ring buffer, wir
 
 Managed by [knope](https://github.com/knope-dev/knope) via `knope.toml`. All crates share one version (workspace-level).
 
-**Versioned files** (kept in sync automatically): `Cargo.toml` (workspace), `crates/wail-tauri/tauri.conf.json`
+**Versioned files** (kept in sync automatically): `Cargo.toml` (workspace)
 
 ### Recording changes
 
@@ -216,7 +208,7 @@ Releases are fully automated — no manual `knope` commands needed:
 
 ## Common Tasks
 
-- **Add a new sync message**: Add variant to `SyncMessage` in `crates/wail-core/src/protocol.rs`, handle in `crates/wail-tauri/src/session.rs` select loop
+- **Add a new sync message**: Add variant to `SyncMessage` in `crates/wail-core/src/protocol.rs`, handle in `wail-app/session.go` select loop
 - **Change Link polling rate**: `POLL_INTERVAL` in `crates/wail-core/src/link.rs`
 - **Change Opus bitrate**: `AudioBridge::new()` bitrate_kbps param in `crates/wail-audio/src/bridge.rs`
 - **Modify wire format**: `crates/wail-audio/src/wire.rs` (bump version byte)

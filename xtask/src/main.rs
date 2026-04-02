@@ -18,8 +18,6 @@ TASKS:
   bundle-plugin   Build and assemble plugin bundles without cargo-nih-plug
   install-plugin  Build (optional) and install to system plugin directories
   package-plugin  Create a macOS .pkg installer (macOS only)
-  run-tauri       Run the Tauri desktop app in dev mode
-  build-tauri     Build plugins, then build the Tauri distributable
   test            Build plugins if missing, then run cargo test
   run-turn        Start a local coturn TURN server
   test-client     Run the test tone client
@@ -61,8 +59,6 @@ EXAMPLES:
   cargo xtask install-plugin --no-build
   cargo xtask package-plugin
   cargo xtask package-plugin --no-build
-  cargo xtask run-tauri
-  cargo xtask build-tauri
   cargo xtask test
   cargo xtask test -- -p wail-net --ignored
   cargo xtask run-turn
@@ -95,14 +91,6 @@ fn main() -> Result<()> {
         Some("package-plugin") => {
             args.remove(0);
             package_plugin(&args)
-        }
-        Some("run-tauri") => {
-            args.remove(0);
-            run_tauri()
-        }
-        Some("build-tauri") => {
-            args.remove(0);
-            build_tauri()
         }
         Some("test") => {
             args.remove(0);
@@ -451,35 +439,6 @@ fn cargo_version(root: &Path) -> Result<String> {
         .and_then(|p| p["version"].as_str())
         .map(|s| s.to_owned())
         .context("Could not find wail-plugin-send version in cargo metadata")
-}
-
-fn run_tauri() -> Result<()> {
-    println!("Starting WAIL Tauri app in dev mode...");
-    let mut cmd = Command::new("cargo");
-    cmd.args(["tauri", "dev", "-c", "crates/wail-tauri/tauri.conf.json"])
-        .current_dir(workspace_dir());
-    run_cmd(cmd)
-}
-
-fn build_tauri() -> Result<()> {
-    // Build plugins first — they're bundled as resources
-    println!("Building plugins first...");
-    build_plugin(&[])?;
-
-    // Ensure opus.dll placeholder exists for Tauri resource bundling.
-    // On Windows the real opus.dll should already be in the build environment;
-    // on other platforms an empty placeholder prevents Tauri from erroring on
-    // the missing resource mapping entry in tauri.conf.json.
-    let opus_placeholder = target_dir().join("bundled/opus.dll");
-    if !opus_placeholder.exists() {
-        fs::write(&opus_placeholder, b"")?;
-    }
-
-    println!("\nBuilding WAIL Tauri app...");
-    let mut cmd = Command::new("cargo");
-    cmd.args(["tauri", "build", "-c", "crates/wail-tauri/tauri.conf.json"])
-        .current_dir(workspace_dir());
-    run_cmd(cmd)
 }
 
 /// Two-phase test runner: builds plugin bundles if missing, then runs `cargo test`.

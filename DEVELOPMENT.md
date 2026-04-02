@@ -17,17 +17,18 @@ DAW A → [WAIL Send] → record → Opus encode → DataChannel → remote peer
 ## Project Structure
 
 ```
-Cargo workspace with 7 crates:
+wail-app/                Go/Wails desktop app (session orchestration)
+
+Cargo workspace with Rust crates (plugins + shared libraries):
 
 crates/
 ├── wail-core/           Core sync library (no networking)
 ├── wail-audio/          Audio encoding, intervalic ring buffer, IPC framing
-├── wail-net/            WebRTC peer mesh and signaling client
-├── wail-tauri/          Tauri desktop app (session orchestration)
+├── wail-net/            WebSocket relay and signaling client
 ├── wail-plugin-send/    CLAP/VST3 send plugin (captures DAW audio)
 ├── wail-plugin-recv/    CLAP/VST3 receive plugin (plays remote audio)
 
-xtask/                   Build tasks (build-plugin, install-plugin, build-tauri, etc.)
+xtask/                   Build tasks (build-plugin, install-plugin, etc.)
 
 signaling-server/
 └── main.go              WebSocket signaling server (Go + SQLite, deployed to fly.io)
@@ -43,8 +44,7 @@ Requires: **Rust 1.75+**, CMake 3.14+, a C++ compiler, and libopus-dev.
 **Linux build dependencies (Debian/Ubuntu):**
 
 ```sh
-sudo apt-get install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-  librsvg2-dev libxdo-dev libssl-dev patchelf libopus-dev cmake g++
+sudo apt-get install libssl-dev libopus-dev cmake g++
 ```
 
 ```sh
@@ -69,11 +69,10 @@ Plugin directories:
 - **Linux** — `~/.clap/` and `~/.vst3/`
 - **Windows** — `%COMMONPROGRAMFILES%\{CLAP,VST3}\`
 
-### Tauri App
+### Desktop App
 
 ```sh
-cargo tauri dev          # run in development mode
-cargo xtask build-tauri  # production build (builds plugins first)
+bin/dev                  # build plugins + run Go/Wails app in dev mode
 ```
 
 ## Testing

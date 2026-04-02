@@ -1,6 +1,6 @@
 //! Shared test tone generation and audio validation utilities.
 //!
-//! Used by both `wail-e2e` (two-machine tests) and `wail-tauri` (test mode)
+//! Used by both `wail-e2e` (two-machine tests) and `wail-app` (test mode)
 //! to generate synthetic audio and validate received audio without a DAW.
 
 use anyhow::{bail, Result};

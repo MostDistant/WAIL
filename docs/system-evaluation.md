@@ -271,7 +271,7 @@ The encoder and decoder are created once in `initialize()`. If the DAW changes s
 
 ### 14. Reconnect timer race condition (low risk)
 
-**File:** `crates/wail-tauri/src/session.rs:522-559`
+**File:** `wail-app/session.go` (equivalent logic)
 
 **Problem:** The `reconnect_pending` guard (line 522) prevents duplicate timers for the same peer. However, there's a theoretical window: if `PeerFailed` arrives on the channel between checking `reconnect_pending` (line 522) and setting it to `true` (line 542), a duplicate timer could spawn.
 
@@ -304,14 +304,6 @@ If `sample_rate` is 0.0 (e.g., before `initialize()` is called), the fallback ca
 **File:** `crates/wail-net/src/peer.rs:51`
 
 Mutex poison in the audio reassembly path is logged at `debug` level, making it invisible in production. Should be `warn`.
-
----
-
-### 18. Tauri event emission errors discarded
-
-**File:** `crates/wail-tauri/src/session.rs` (multiple sites)
-
-`let _ = app.emit(...)` discards Tauri event errors at ~15 call sites. Per trade-off preferences, these should log at `warn` level for critical events (peer join/leave) and `debug` for high-frequency events (audio status).
 
 ---
 

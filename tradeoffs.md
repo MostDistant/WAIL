@@ -46,7 +46,7 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ### W11. No reconnection logic
 **Status:** Completed
-**File:** `crates/wail-net/src/lib.rs`, `crates/wail-tauri/src/session.rs`
+**File:** `crates/wail-net/src/lib.rs`, `wail-app/session.go`
 **Problem:** Signaling server disconnect and WebRTC peer failures killed the session permanently.
 **Resolution:** Implemented automatic reconnection for both:
 - **WebRTC peers:** `MeshEvent::PeerFailed` detection via connection state callbacks, `re_initiate()` with exponential backoff (2s–16s, max 5 attempts), UI events (`peer:reconnecting`).
@@ -91,7 +91,7 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ### WebRTC → WebSocket relay migration
 **Status:** Done
-**Files:** `crates/wail-net/`, `signaling-server/main.go`, `crates/wail-tauri/src/session.rs`
+**Files:** `crates/wail-net/`, `signaling-server/main.go`, `wail-app/session.go`
 **Decision:** Replaced all WebRTC DataChannels with server-relayed WebSocket messages. All sync (JSON text) and audio (binary) data now flows through the Go signaling server, which broadcasts to all room peers (SFU-style). Removed `webrtc`/`webrtc-ice` crate dependencies and deleted `peer.rs`.
 **Rationale:** Dramatically simpler architecture — no ICE/STUN/TURN negotiation, no per-peer connection state, no tie-breaking logic. Eliminates Metered TURN dependency and credentials management. Compile times and binary size significantly reduced.
 **Trade-offs:** (1) TCP head-of-line blocking — a lost packet delays all subsequent frames, unlike WebRTC's UDP/SCTP. For audio at ~50 frames/sec this could cause occasional latency spikes. (2) Server bandwidth scales quadratically — N peers × (N−1) streams relayed through the server. At 128kbps Opus with 4 peers: ~1.5 Mbps outbound. (3) One extra network hop (peer→server→peer) vs direct P2P, though for users behind NATs this may be comparable to TURN relay.

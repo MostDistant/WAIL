@@ -1,6 +1,6 @@
 # Missing Tests Punch List
 
-Cross-reference of `docs/test-strategies.md` against the actual test functions found in the codebase (~160 tests across wail-core, wail-audio, wail-net, wail-tauri, wail-plugin-test). Every scenario marked `missing` or `partial` in test-strategies.md is listed here, grouped by what infrastructure is needed to write it.
+Cross-reference of `docs/test-strategies.md` against the actual test functions found in the codebase (~160 tests across wail-core, wail-audio, wail-net, wail-plugin-test). Every scenario marked `missing` or `partial` in test-strategies.md is listed here, grouped by what infrastructure is needed to write it.
 
 ---
 
