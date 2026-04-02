@@ -1,20 +1,17 @@
 package main
 
 import (
+	"embed"
 	"flag"
 	"fmt"
 	"log"
 
 	"github.com/google/uuid"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-// StdoutEmitter is a simple EventEmitter that logs events to stdout.
-// Will be replaced by WailsEmitter in Phase 3.
-type StdoutEmitter struct{}
-
-func (e *StdoutEmitter) Emit(event string, data any) {
-	log.Printf("[event] %s: %+v", event, data)
-}
+//go:embed frontend/*
+var assets embed.FS
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -26,12 +23,33 @@ func main() {
 	instance := flag.Int("instance", 0, "Instance number (port = 9191+N, separate data dir)")
 	flag.Parse()
 
-	log.Println("WAIL - WebSocket Audio Interchange for Link (Go)")
+	log.Println("WAIL - WebSocket Audio Interchange for Link (Go/Wails)")
 
-	app := NewApp(*instance)
-	app.SetEmitter(&StdoutEmitter{})
+	appBackend := NewApp(*instance)
 
-	log.Printf("App initialized — identity: %s, IPC port: %d", app.identity, app.ipcPort)
+	title := "WAIL"
+	if *instance > 0 {
+		title = fmt.Sprintf("WAIL (Instance %d)", *instance+1)
+	}
+
+	wailsApp := application.New(application.Options{
+		Name: "WAIL",
+		Services: []application.Service{
+			application.NewService(appBackend),
+		},
+		Assets: application.AssetOptions{
+			Handler: application.BundledAssetFileServer(assets),
+		},
+	})
+
+	appBackend.SetEmitter(NewWailsEmitter(wailsApp))
+
+	wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
+		Title:  title,
+		Width:  480,
+		Height: 640,
+		URL:    "/frontend/index.html",
+	})
 
 	// Auto-join test room if requested
 	if *testRoom != "" {
@@ -42,15 +60,17 @@ func main() {
 		log.Printf("Auto-joining test room %q as %q at %.0f BPM", *testRoom, displayName, *testBPM)
 		bpm := *testBPM
 		testMode := true
-		result, err := app.JoinRoom(*testRoom, nil, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil, &testMode)
-		if err != nil {
-			log.Fatalf("Failed to auto-join test room: %v", err)
-		}
-		log.Printf("Joined room %q as peer %s", result.Room, result.PeerID)
-		// Block forever (session runs in goroutine)
-		select {}
+		go func() {
+			result, err := appBackend.JoinRoom(*testRoom, nil, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil, &testMode)
+			if err != nil {
+				log.Printf("Failed to auto-join test room: %v", err)
+				return
+			}
+			log.Printf("Joined room %q as peer %s", result.Room, result.PeerID)
+		}()
 	}
 
-	// TODO: Phase 3 replaces this with wails.Run(...)
-	log.Println("Build OK — all Go types and session logic compiled successfully.")
+	if err := wailsApp.Run(); err != nil {
+		log.Fatalf("Wails app error: %v", err)
+	}
 }
