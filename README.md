@@ -82,7 +82,7 @@ Built on the shoulders of great open-source projects:
 [Ableton Link](https://www.ableton.com/link/) (tempo/phase sync),
 [nih-plug](https://github.com/robbert-vdh/nih-plug) (CLAP/VST3 plugin framework),
 [Opus](https://opus-codec.org/) (audio codec),
-[Tauri](https://tauri.app/) (desktop app framework).
+[Wails](https://wails.io/) (desktop app framework).
 
 Thanks to early supporters [Jeff Hopkins](https://www.youtube.com/@JeffHopkinsMusic) and [Geren M](https://www.youtube.com/@GerenM63) for testing, feedback, and encouragement.
 

@@ -7,7 +7,30 @@ WAIL synchronizes Ableton Link sessions across the internet using a WebSocket re
 ## Project Structure
 
 ```
-Cargo workspace with 8 crates:
+wail-app/                Go/Wails desktop app (session orchestration)
+├── main.go               Entry point, Wails window setup, CLI flags
+├── app.go                Frontend-callable methods (JoinRoom, Disconnect, etc.)
+├── session.go            Session state machine (goroutine-based select loop)
+├── signaling.go          WebSocket signaling client + PeerMesh
+├── peers.go              PeerRegistry + IPCWriterPool
+├── ipc.go                TCP IPC protocol (plugin ↔ app framing)
+├── link_real.go          Ableton Link bridge via abletonlink-go (CGo)
+├── link_stub.go          Link stub for testing (-tags=linkstub)
+├── link_types.go         Link types, poller, echo guard, tempo detector
+├── clock.go              NTP-style RTT/clock sync
+├── protocol.go           SyncMessage + SignalMessage types
+├── wire.go               WAIF binary wire format
+├── test_tone.go          Test tone generator (Opus sine wave)
+├── recorder.go           Local session recording (WAIF frames to disk)
+├── plugin_install.go     Auto-install CLAP/VST3 plugins on startup
+├── events.go             Frontend event types
+├── stream_names.go       Persistent per-stream name storage
+├── filelog.go            Rotating file logger
+├── wslog.go              WebSocket log broadcaster
+├── honeybadger.go        Honeybadger crash reporting
+└── frontend/             Bundled web UI (HTML/JS/CSS)
+
+Cargo workspace with Rust crates (plugins + shared libraries):
 
 crates/
 ├── wail-core/           Core sync library (no networking)
@@ -29,7 +52,7 @@ crates/
 │   └── signaling.rs      WebSocket signaling + data relay client
 ├── wail-e2e/            Two-machine end-to-end test binary
 │   └── main.rs           7-phase test: Signaling → Discovery → Sync → Audio → Sustained → Burst → Reconnect
-├── wail-tauri/          Tauri desktop app (session orchestration)
+├── wail-tauri/          Tauri desktop app (legacy, being replaced by wail-app)
 │   ├── main.rs           App entry point
 │   ├── lib.rs            Tauri setup and plugin registration
 │   ├── commands.rs       Tauri IPC commands (join/leave room, etc.)
@@ -55,24 +78,32 @@ vendor/
 
 ## Build
 
-Requires: Rust 1.75+, CMake 3.14+, C++ compiler (for rusty_link/Ableton Link SDK), libopus-dev
+Requires: Go 1.22+, Rust 1.75+, CMake 3.14+, C++ compiler (for abletonlink-go/Ableton Link SDK), libopus-dev
 
 ```sh
 git submodule update --init --recursive   # fetch Link 4 SDK
-cargo build                               # build workspace
+cargo build                               # build Rust workspace (plugins + libraries)
 cargo xtask test                          # run all tests (builds plugins if missing)
 
-# Plugin (install bundler once)
+# Plugins (install bundler once)
 cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
 cargo xtask build-plugin                  # → target/bundled/wail-plugin-{send,recv}.{clap,vst3}
 cargo xtask install-plugin                # build + install to system plugin dirs
 
-# Tauri app (handles Link + WebSocket relay + IPC)
-cargo tauri dev
+# Go/Wails desktop app (handles Link + WebSocket relay + IPC)
+cd wail-app && go build                   # build the app binary
+cd wail-app && go test ./...              # run Go tests
 ```
 
 ## Key Dependencies
 
+### Go (wail-app)
+- `wails/v3` - Desktop app framework (webview)
+- `gorilla/websocket` - WebSocket client (signaling + data relay)
+- `abletonlink-go` - Ableton Link via CGo
+- `pion/opus` - Opus codec bindings
+
+### Rust (plugins + libraries)
 - `rusty_link` - Ableton Link via C FFI to official SDK
 - `tokio-tungstenite` - WebSocket client (signaling + data relay)
 - `audiopus` - Opus audio codec (libopus bindings)

@@ -35,10 +35,16 @@ WAIL bridges Ableton Link sessions across the internet via a WebSocket relay ser
                                    └──────────────────┘
 ```
 
-## Crate Dependency Graph
+## Dependency Graph
 
 ```
-wail-tauri (Tauri desktop app — session orchestration, IPC, recording)
+wail-app/ (Go/Wails desktop app — session orchestration, IPC, recording)
+├── wails/v3 (desktop webview framework)
+├── gorilla/websocket (WebSocket client)
+├── abletonlink-go (Ableton Link via CGo)
+└── pion/opus (Opus codec)
+
+wail-tauri (Rust/Tauri desktop app — legacy, being replaced by wail-app)
 ├── wail-core (library — no networking deps)
 │   └── rusty_link (Ableton Link C FFI)
 ├── wail-audio (library — no networking deps)
