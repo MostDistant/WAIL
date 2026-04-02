@@ -4,9 +4,13 @@ import (
 	"embed"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/google/uuid"
+	"github.com/honeybadger-io/honeybadger-go"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
@@ -23,9 +27,29 @@ func main() {
 	instance := flag.Int("instance", 0, "Instance number (port = 9191+N, separate data dir)")
 	flag.Parse()
 
+	// Initialize Honeybadger error reporting
+	InitHoneybadger()
+	defer honeybadger.Monitor()
+	defer FlushHoneybadger()
+
 	log.Println("WAIL - WebSocket Audio Interchange for Link (Go/Wails)")
 
 	appBackend := NewApp(*instance)
+
+	// Set up rotating file logger + WebSocket log broadcaster
+	logDir := filepath.Join(appBackend.dataDir, "logs")
+	fileWriter, wsLogWriter, err := SetupLogOutputs(logDir)
+	if err != nil {
+		log.Printf("Warning: file logging disabled: %v", err)
+		// Continue without file logging
+	} else {
+		combined := io.MultiWriter(os.Stderr, fileWriter, wsLogWriter)
+		log.SetOutput(combined)
+		appBackend.fileLog = fileWriter
+		appBackend.wsLog = wsLogWriter
+	}
+
+	log.Printf("App initialized — identity: %s, IPC port: %d", appBackend.identity, appBackend.ipcPort)
 
 	title := "WAIL"
 	if *instance > 0 {

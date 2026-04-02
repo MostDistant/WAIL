@@ -22,6 +22,8 @@ type App struct {
 	ipcPort      uint16
 	streamNames  map[uint16]string
 	dataDir      string
+	fileLog      *RotatingFileWriter
+	wsLog        *WsLogWriter
 }
 
 // NewApp creates a new App instance. Pass instance=0 for the default instance.
@@ -238,6 +240,30 @@ func (a *App) GetActiveSession() *JoinResult {
 		return nil
 	}
 	return &JoinResult{PeerID: a.session.PeerID, Room: a.session.Room, BPM: 120.0}
+}
+
+// SetTelemetry toggles file logging (telemetry).
+func (a *App) SetTelemetry(enabled bool) error {
+	if a.fileLog != nil {
+		a.fileLog.SetEnabled(enabled)
+		log.Printf("[app] Telemetry toggled: %v", enabled)
+	}
+	return nil
+}
+
+// SetLogSharing toggles WebSocket log broadcasting to peers.
+func (a *App) SetLogSharing(enabled bool) error {
+	if a.wsLog != nil {
+		a.wsLog.SetEnabled(enabled)
+		log.Printf("[app] Peer log sharing toggled: %v", enabled)
+	}
+	return nil
+}
+
+// GetPluginInstallErrors returns any plugin installation errors.
+func (a *App) GetPluginInstallErrors() []string {
+	// TODO: Phase 6 — wire up plugin_install.go
+	return nil
 }
 
 // RenameStream updates a stream name.
