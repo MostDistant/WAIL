@@ -118,6 +118,10 @@ struct Args {
     /// Chaos test script: 'stable:4,leave:5s,rejoin,stable:4,transport-stop:5s,resume,stable:4'
     #[arg(long)]
     chaos_script: Option<String>,
+
+    /// Only validate audio from the peer with this display name (ignore other peers' audio).
+    #[arg(long)]
+    validate_peer: Option<String>,
 }
 
 /// Generate one 20ms stereo-interleaved sine frame, advancing `phase` continuously.
@@ -647,6 +651,12 @@ async fn main() -> Result<()> {
                 if let Some(ref mut asm) = assembler {
                     if let Ok(frame) = AudioFrameWire::decode(&data) {
                         if let Some(assembled) = asm.insert(&from, &frame) {
+                            // If --validate-peer is set, skip intervals from other peers.
+                            let should_validate = match args.validate_peer {
+                                Some(ref target) => peer_names.get(&from).map(|n| n.as_str()) == Some(target.as_str()),
+                                None => true,
+                            };
+                            if should_validate {
                             if let Some(ref mut dec) = decoder {
                                 if let Ok(pcm) = dec.decode_interval(&assembled.opus_data) {
                                     // Build expected notes for this interval.
@@ -731,6 +741,7 @@ async fn main() -> Result<()> {
                                         std::process::exit(if all_pass { 0 } else { 1 });
                                     }
                                 }
+                            }
                             }
                         }
                     }
