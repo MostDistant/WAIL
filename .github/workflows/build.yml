@@ -42,7 +42,7 @@ jobs:
         run: cargo build --workspace
 
       - name: Build Go app (linkstub)
-        run: go build -tags linkstub -o /dev/null .
+        run: go build -tags "linkstub,nolibopusfile" -o /dev/null .
         working-directory: wail-app
 
   build-windows:
@@ -88,7 +88,7 @@ jobs:
       - name: Build Go app (linkstub)
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: go build -tags linkstub -o NUL .
+        run: go build -tags "linkstub,nolibopusfile" -o NUL .
         working-directory: wail-app
 
       - name: Collect artifacts
@@ -135,6 +135,9 @@ jobs:
           sudo apt-get install -y \
             libssl-dev \
             libopus-dev \
+            libgl-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
             cmake \
             g++
 
@@ -142,7 +145,7 @@ jobs:
         run: cargo xtask bundle-plugin
 
       - name: Build Go app (linkstub)
-        run: go build -tags linkstub -o /dev/null .
+        run: go build -tags "linkstub,nolibopusfile" -o /dev/null .
         working-directory: wail-app
 
       - name: Collect artifacts
