@@ -3,6 +3,8 @@ networks:
     driver: bridge
   net-b:
     driver: bridge
+  net-c:
+    driver: bridge
   net-infra:
     driver: bridge
 
@@ -65,6 +67,7 @@ services:
       NOTE_SCRIPT: "${PEER_B_NOTES:-}"
       EXPECT_NOTES: "${PEER_A_NOTES:-}"
       CHAOS_SCRIPT: "${PEER_B_CHAOS:-}"
+      VALIDATE_PEER: "${VALIDATE_PEER:-}"
     command: >
       --server ws://signaling:8080
       --room ${ROOM_NAME:-e2e-test}
@@ -78,3 +81,33 @@ services:
     networks:
       net-b: {}
       net-infra: {}
+
+  peer-c:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-client
+    depends_on:
+      signaling:
+        condition: service_healthy
+      peer-a:
+        condition: service_started
+    cap_add:
+      - NET_ADMIN
+    environment:
+      WAN_DELAY: "${WAN_DELAY:-50ms}"
+      WAN_JITTER: "${WAN_JITTER:-10ms}"
+      WAN_LOSS: "${WAN_LOSS:-1%}"
+      NOTE_SCRIPT: "${PEER_C_NOTES:-}"
+      CHAOS_SCRIPT: "${PEER_C_CHAOS:-}"
+    command: >
+      --server ws://signaling:8080
+      --room ${ROOM_NAME:-e2e-test}
+      --name peer-c
+      --bpm 120
+      --bars 4
+      --quantum 4.0
+    networks:
+      net-c: {}
+      net-infra: {}
+    profiles:
+      - three-peer

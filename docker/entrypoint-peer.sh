@@ -24,5 +24,9 @@ if [ -n "$CHAOS_SCRIPT" ]; then
     ARGS+=("--chaos-script" "$CHAOS_SCRIPT")
 fi
 
+if [ -n "$VALIDATE_PEER" ]; then
+    ARGS+=("--validate-peer" "$VALIDATE_PEER")
+fi
+
 # Use stdbuf to force line-buffered stdout so Docker logs appear in real time.
 exec stdbuf -oL wail-test-client "${ARGS[@]}"
