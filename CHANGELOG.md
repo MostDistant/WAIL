@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.0 (2026-04-03)
+
+### Features
+
+- add 3-peer chaos isolation to e2e network test (#302)
+
+### Fixes
+
+- resolve symlinks in plugin installer for Homebrew compatibility (#303)
+
 ## 2.0.1 (2026-04-03)
 
 ### Fixes
