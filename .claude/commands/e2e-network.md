@@ -1,11 +1,11 @@
 ---
-description: Run cross-network e2e test in Docker (isolated networks + TURN + WAN simulation)
+description: Run cross-network e2e test in Docker (isolated networks + WAN simulation)
 allowed-tools: [Bash]
 ---
 
 # Cross-Network E2E Test
 
-Run the Docker-based cross-network end-to-end test: two peers on separate Docker networks communicate via a local TURN server with simulated WAN conditions (latency, jitter, packet loss).
+Run the Docker-based cross-network end-to-end test: two peers on separate Docker networks communicate via the signaling server with simulated WAN conditions (latency, jitter, packet loss).
 
 Two phases: happy path validation, then chaos testing (disconnect/rejoin + transport stop/start).
 
