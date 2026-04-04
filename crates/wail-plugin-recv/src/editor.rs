@@ -80,6 +80,8 @@ pub struct EditorData {
     pub bpm: f64,
     pub interval_progress: f32,
     pub current_interval: i64,
+    /// Whether the IPC thread has an active connection to wail-app.
+    pub ipc_connected: bool,
 }
 
 impl Default for EditorData {
@@ -89,6 +91,7 @@ impl Default for EditorData {
             bpm: 120.0,
             interval_progress: 0.0,
             current_interval: 0,
+            ipc_connected: false,
         }
     }
 }
@@ -161,6 +164,7 @@ struct EditorSnapshot {
     bpm: f64,
     interval_progress: f32,
     current_interval: i64,
+    ipc_connected: bool,
 }
 
 struct SlotSnapshot {
@@ -190,6 +194,7 @@ impl EditorSnapshot {
             bpm: data.bpm,
             interval_progress: data.interval_progress,
             current_interval: data.current_interval,
+            ipc_connected: data.ipc_connected,
         }
     }
 }
@@ -258,13 +263,18 @@ fn draw_header(ui: &mut egui::Ui, snap: &EditorSnapshot) {
 
 fn draw_slots(ui: &mut egui::Ui, snap: &EditorSnapshot) {
     if snap.slots.is_empty() {
+        let status = if snap.ipc_connected {
+            "Waiting for peers..."
+        } else {
+            "Connecting to wail-app..."
+        };
         let available = ui.available_size();
         ui.allocate_new_ui(
             egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(ui.cursor().min, available)),
             |ui| {
                 ui.centered_and_justified(|ui| {
                     ui.label(
-                        egui::RichText::new("Waiting for peers...")
+                        egui::RichText::new(status)
                             .size(13.0)
                             .color(TEXT_DIM),
                     );

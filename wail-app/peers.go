@@ -351,6 +351,32 @@ func (r *PeerRegistry) WithPeer(peerID string, fn func(p *PeerState)) bool {
 	return true
 }
 
+// PeerSnapshot holds the info needed to replay peer state to a newly connected recv plugin.
+type PeerSnapshot struct {
+	PeerID      string
+	Identity    string
+	DisplayName string
+}
+
+// SnapshotForRecvReplay returns all peers that have a known identity,
+// suitable for replaying PeerJoined + PeerName IPC messages.
+func (r *PeerRegistry) SnapshotForRecvReplay() []PeerSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var result []PeerSnapshot
+	for id, p := range r.peers {
+		if p.Identity == nil {
+			continue
+		}
+		snap := PeerSnapshot{PeerID: id, Identity: *p.Identity}
+		if p.DisplayName != nil {
+			snap.DisplayName = *p.DisplayName
+		}
+		result = append(result, snap)
+	}
+	return result
+}
+
 // IsSlotOccupied returns whether a slot is occupied.
 func (r *PeerRegistry) IsSlotOccupied(slot int) bool {
 	r.mu.Lock()

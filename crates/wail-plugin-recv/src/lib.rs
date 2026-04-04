@@ -26,6 +26,8 @@ enum PeerEvent {
     Joined { peer_id: String, identity: String },
     Left { peer_id: String },
     NameChanged { peer_id: String, display_name: String },
+    /// IPC connection established — update GUI status.
+    Connected,
     /// IPC connection dropped — clear all audio state to stop stale playback.
     Disconnected,
 }
@@ -73,6 +75,8 @@ pub struct WailRecvPlugin {
     was_playing: Option<bool>,
     /// Last observed interval index — used to detect boundary crossings for markers.
     last_interval: i64,
+    /// Whether the IPC thread has an active connection to wail-app.
+    ipc_connected: bool,
 }
 
 impl Default for WailRecvPlugin {
@@ -94,6 +98,7 @@ impl Default for WailRecvPlugin {
             editor_state: EguiState::from_size(380, 460),
             editor_data: Arc::new(Mutex::new(EditorData::default())),
             last_interval: 0,
+            ipc_connected: false,
         }
     }
 }
@@ -394,7 +399,11 @@ impl Plugin for WailRecvPlugin {
                                     // arrives, so we apply deferred below after audio is fed.
                                     self.pending_names.insert(peer_id, display_name);
                                 }
+                                PeerEvent::Connected => {
+                                    self.ipc_connected = true;
+                                }
                                 PeerEvent::Disconnected => {
+                                    self.ipc_connected = false;
                                     tracing::info!("WAIL Recv: IPC disconnected — clearing audio state");
                                     bridge.reset();
                                     // Drain any buffered frames so stale audio doesn't play
@@ -473,6 +482,7 @@ impl Plugin for WailRecvPlugin {
 
                 permit_alloc(|| {
                     if let Ok(mut vis) = self.editor_data.try_lock() {
+                        vis.ipc_connected = self.ipc_connected;
                         vis.bpm = bpm;
                         let interval_len = DEFAULT_BARS as f64 * DEFAULT_QUANTUM;
                         vis.interval_progress = ((beat_position % interval_len) / interval_len) as f32;
@@ -554,6 +564,9 @@ fn ipc_thread_recv(
             continue;
         }
 
+        // Notify audio thread that IPC is connected (for GUI status)
+        let _ = peer_event_tx.try_send(PeerEvent::Connected);
+
         // Use a read timeout so the thread can detect when channels are disconnected
         // (e.g., when the DAW re-initializes the plugin and replaces receivers).
         if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(5))) {
@@ -568,6 +581,7 @@ fn ipc_thread_recv(
                 Ok(0) => {
                     tracing::info!("WAIL Recv IPC connection closed");
                     let _ = peer_event_tx.try_send(PeerEvent::Disconnected);
+                    decoders.clear();
                     break;
                 }
                 Ok(n) => {
@@ -665,6 +679,8 @@ fn ipc_thread_recv(
                             }
                             Some(IPC_TAG_PEER_LEFT_PUB) => {
                                 if let Some(peer_id) = IpcMessage::decode_peer_left(&payload) {
+                                    // Clean up Opus decoders for the departing peer
+                                    decoders.retain(|(pid, _), _| *pid != peer_id);
                                     if let Err(e) = peer_event_tx.try_send(PeerEvent::Left { peer_id }) {
                                         tracing::warn!(error = %e, "IPC recv: failed to send PeerLeft event (channel full)");
                                     }
@@ -694,6 +710,7 @@ fn ipc_thread_recv(
                 Err(_) => {
                     tracing::warn!("WAIL Recv IPC read error — reconnecting");
                     let _ = peer_event_tx.try_send(PeerEvent::Disconnected);
+                    decoders.clear();
                     break;
                 }
             }

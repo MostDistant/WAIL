@@ -208,7 +208,7 @@ func sessionLoop(
 	logInfo("IPC listening on %s", listener.Addr())
 
 	// Accept IPC connections in goroutine
-	go acceptIPCConnections(ctx, listener, ipcFromPluginCh, ipcDisconnectCh, ipcSendRegCh, ipcPool, &nextConnID, &ipcDropCount, emitter, logInfo, logWarn)
+	go acceptIPCConnections(ctx, listener, ipcFromPluginCh, ipcDisconnectCh, ipcSendRegCh, ipcPool, peers, &nextConnID, &ipcDropCount, emitter, logInfo, logWarn)
 
 	// Timers
 	pingTicker := time.NewTicker(time.Duration(PingIntervalMs) * time.Millisecond)
@@ -909,6 +909,7 @@ func acceptIPCConnections(
 	disconnectCh chan<- int,
 	sendRegCh chan<- ipcSendRegistration,
 	pool *IPCWriterPool,
+	peers *PeerRegistry,
 	nextID *int,
 	dropCounter *atomic.Uint64,
 	emitter EventEmitter,
@@ -962,6 +963,18 @@ func acceptIPCConnections(
 
 			if role == IPCRoleRecv {
 				pool.Add(connID, conn)
+				// Replay existing peer state so the recv plugin knows about
+				// peers that joined before it connected.
+				for _, snap := range peers.SnapshotForRecvReplay() {
+					if err := WriteFrame(conn, EncodePeerJoinedMsg(snap.PeerID, snap.Identity)); err != nil {
+						logWarn("Plugin (conn %d): failed to replay PeerJoined for %s: %v", connID, snap.PeerID, err)
+					}
+					if snap.DisplayName != "" {
+						if err := WriteFrame(conn, EncodePeerNameMsg(snap.PeerID, snap.DisplayName)); err != nil {
+							logWarn("Plugin (conn %d): failed to replay PeerName for %s: %v", connID, snap.PeerID, err)
+						}
+					}
+				}
 				logInfo("Plugin (conn %d) identified as recv", connID)
 			} else {
 				sendRegCh <- ipcSendRegistration{ConnID: connID, StreamIndex: streamIndex}

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 // IPC role bytes sent by plugins on connect.
@@ -288,12 +289,13 @@ func (p *IPCWriterPool) Len() int {
 	return len(p.writers)
 }
 
-// Broadcast sends a frame to all recv plugins. Dead connections are removed.
+// Broadcast sends a frame to all recv plugins. Dead or slow connections are removed.
 func (p *IPCWriterPool) Broadcast(frame []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var dead []int
 	for id, conn := range p.writers {
+		conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
 		if _, err := conn.Write(frame); err != nil {
 			dead = append(dead, id)
 		}
