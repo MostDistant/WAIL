@@ -74,6 +74,22 @@ func TestTokenBucketStreamScaling(t *testing.T) {
 	}
 }
 
+func TestStreamCountCap(t *testing.T) {
+	// Even if a peer claims 100 streams, the rate bucket should be capped at maxStreamsPerPeer.
+	cap := maxStreamsPerPeer
+	b := newTokenBucket(baseBinaryRate*float64(cap), baseBinaryBurst*float64(cap))
+	expectedBurst := int(baseBinaryBurst * float64(cap))
+	allowed := 0
+	for i := 0; i < expectedBurst+50; i++ {
+		if b.allow() {
+			allowed++
+		}
+	}
+	if allowed < expectedBurst-5 || allowed > expectedBurst+5 {
+		t.Fatalf("expected ~%d burst for capped streams, got %d", expectedBurst, allowed)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration test helpers
 // ---------------------------------------------------------------------------

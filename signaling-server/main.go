@@ -41,6 +41,7 @@ const (
 	baseTextRate     = 100.0 // tokens/sec (not scaled by streams)
 	baseTextBurst    = 200.0 // max tokens
 	rateLimitWarnMax = 50    // violations before disconnect
+	maxStreamsPerPeer = 16   // cap stream_count for rate-limit scaling
 )
 
 // ---------------------------------------------------------------------------
@@ -427,6 +428,7 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 	peerID := msg.PeerID
 	streamCount := msg.StreamCount
 	if streamCount < 1 { streamCount = 1 }
+	if streamCount > maxStreamsPerPeer { streamCount = maxStreamsPerPeer }
 
 	if semverLess(msg.ClientVersion, minVersion) {
 		c.sendJSON(map[string]any{"type": "join_error", "code": "version_outdated", "min_version": minVersion})

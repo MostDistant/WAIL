@@ -268,6 +268,7 @@ Two independent time domains exist in the system:
 | `SyncTo` | Client → Server → Client | Relay sync message to a specific peer |
 | `LogBroadcast` (`log`) | Client → Server → Room | Broadcast structured log entry to all room peers (opt-in) |
 | `MetricsReport` | Client → Server | Per-peer audio frame counts + pipeline state (consumed server-side, not relayed) |
+| `rate_limit_warning` | Server → Client | Warning that the peer is sending too fast and will be disconnected if it continues |
 
 ## Key Design Decisions
 
@@ -283,19 +284,21 @@ Two independent time domains exist in the system:
 
 6. **Server-relayed architecture**: All data flows through the signaling server (no direct P2P). This eliminates ICE/STUN/TURN negotiation complexity at the cost of an extra hop and server bandwidth scaling quadratically with room size.
 
-7. **wail-core and wail-audio have no network deps**: Reusable from the CLAP/VST3 plugin without pulling in tokio-tungstenite.
+7. **Stream-count-aware rate limiting**: Per-connection token bucket rate limiting on the signaling server. Binary message rate scales with `stream_count` (60 tokens/sec/stream, 2× burst), text rate is fixed at 100/sec. Escalation: drop excess messages → warn log → send `rate_limit_warning` to client → disconnect after 50 cumulative violations. Join messages are exempt from text rate limiting so peers can always reconnect.
 
-8. **IPC over TCP** (not shared memory): Simpler, cross-platform, reliable. Latency is negligible compared to the 1-interval NINJAM delay.
+8. **wail-core and wail-audio have no network deps**: Reusable from the CLAP/VST3 plugin without pulling in tokio-tungstenite.
 
-9. **JSON sync protocol**: Readable for debugging. Bandwidth is negligible for small sync messages.
+9. **IPC over TCP** (not shared memory): Simpler, cross-platform, reliable. Latency is negligible compared to the 1-interval NINJAM delay.
 
-10. **Stable slot assignment via `ClientChannelMapping`**: Each remote audio channel is identified by `ClientChannelMapping(client_id, channel_index)` where `client_id` is a persistent UUID. A `SlotTable` manages assignment, affinity reservations, and reclamation. When a peer disconnects, their slot entries move to reserved; on reconnect with the same identity, they reclaim the same slots. This prevents DAW routing from breaking during brief network interruptions.
+10. **JSON sync protocol**: Readable for debugging. Bandwidth is negligible for small sync messages.
 
-11. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.go` in wail-app.
+11. **Stable slot assignment via `ClientChannelMapping`**: Each remote audio channel is identified by `ClientChannelMapping(client_id, channel_index)` where `client_id` is a persistent UUID. A `SlotTable` manages assignment, affinity reservations, and reclamation. When a peer disconnects, their slot entries move to reserved; on reconnect with the same identity, they reclaim the same slots. This prevents DAW routing from breaking during brief network interruptions.
 
-12. **Fade-in on peer join**: When a new or reconnecting peer's first audio interval arrives, a 10ms linear ramp-from-silence is applied before mixing into the playback buffer. This prevents audible pops/clicks caused by abrupt sample onset. The fade length is clamped to the interval length for safety. After the first interval, subsequent intervals play at full amplitude with no ramping.
+12. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.go` in wail-app.
 
-13. **Lock-free audio broadcast via copy-on-write**: The signaling server uses per-room `atomic.Pointer[[]connEntry]` snapshots so the audio hot path (~50 frames/sec/peer) iterates the connection list without holding any lock. Mutations (join/leave) acquire the per-room `r.mu`, rebuild the slice, and store it atomically. To avoid data races on `conn.room`/`conn.peerID` fields (which are cleared during eviction and leave), broadcast functions receive `room` and `peerID` as value parameters captured once per join in `readPump`, rather than reading them from the shared `conn` struct.
+13. **Fade-in on peer join**: When a new or reconnecting peer's first audio interval arrives, a 10ms linear ramp-from-silence is applied before mixing into the playback buffer. This prevents audible pops/clicks caused by abrupt sample onset. The fade length is clamped to the interval length for safety. After the first interval, subsequent intervals play at full amplitude with no ramping.
+
+14. **Lock-free audio broadcast via copy-on-write**: The signaling server uses per-room `atomic.Pointer[[]connEntry]` snapshots so the audio hot path (~50 frames/sec/peer) iterates the connection list without holding any lock. Mutations (join/leave) acquire the per-room `r.mu`, rebuild the slice, and store it atomically. To avoid data races on `conn.room`/`conn.peerID` fields (which are cleared during eviction and leave), broadcast functions receive `room` and `peerID` as value parameters captured once per join in `readPump`, rather than reading them from the shared `conn` struct.
 
 ## Session Metrics and Live Dashboard
 
