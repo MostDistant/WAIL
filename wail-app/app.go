@@ -212,10 +212,10 @@ func (a *App) Disconnect() error {
 // Shutdown disconnects any active session and disables frontend event emission.
 // Called after the Wails app exits to ensure clean teardown.
 func (a *App) Shutdown() {
-	a.Disconnect()
 	if we, ok := a.emitter.(*WailsEmitter); ok {
 		we.Shutdown()
 	}
+	a.Disconnect()
 }
 
 // ChangeBPM sends a BPM change command.
