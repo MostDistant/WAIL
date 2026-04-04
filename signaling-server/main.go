@@ -91,8 +91,9 @@ type wsMessage struct {
 
 // connEntry is one element in the copy-on-write connection slice.
 type connEntry struct {
-	peerID string
-	c      *conn
+	peerID      string
+	displayName string
+	c           *conn
 }
 
 // conn wraps a single WebSocket connection that has joined a room.
@@ -100,6 +101,7 @@ type conn struct {
 	ws          *websocket.Conn
 	room        string
 	peerID      string
+	displayName string // cached from join, avoids DB queries under lock
 	send        chan wsMessage
 	publicIP    string // client's public IP for LAN detection
 	streamCount int    // declared at join time; used to scale rate limits
@@ -311,7 +313,7 @@ func newRoom() *room {
 func (r *room) rebuildConns() {
 	snap := make([]connEntry, 0, len(r.connMap))
 	for pid, c := range r.connMap {
-		snap = append(snap, connEntry{peerID: pid, c: c})
+		snap = append(snap, connEntry{peerID: pid, displayName: c.displayName, c: c})
 	}
 	r.conns.Store(&snap)
 }
@@ -481,10 +483,8 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 	for id, rc := range r.connMap {
 		if id != peerID {
 			peers = append(peers, id)
-			var dn sql.NullString
-			h.db.QueryRow("SELECT display_name FROM peers WHERE room = ? AND peer_id = ?", roomName, id).Scan(&dn)
-			if dn.Valid && dn.String != "" {
-				name := dn.String
+			if rc.displayName != "" {
+				name := rc.displayName
 				peerDisplayNames[id] = &name
 			} else {
 				peerDisplayNames[id] = nil
@@ -493,6 +493,7 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 		}
 	}
 
+	c.displayName = displayName
 	r.connMap[peerID] = c
 	c.room = roomName
 	c.peerID = peerID
@@ -853,16 +854,13 @@ func handleRooms(h *hub, w http.ResponseWriter, r *http.Request) {
 	var result []roomInfo
 	for _, roomName := range roomNames {
 		var pwHash sql.NullString
-		h.db.QueryRow("SELECT password_hash FROM rooms WHERE room = ?", roomName).Scan(&pwHash)
-		if pwHash.Valid && pwHash.String != "" { continue }
 		var createdAt int64
-		h.db.QueryRow("SELECT created_at FROM rooms WHERE room = ?", roomName).Scan(&createdAt)
+		h.db.QueryRow("SELECT password_hash, created_at FROM rooms WHERE room = ?", roomName).Scan(&pwHash, &createdAt)
+		if pwHash.Valid && pwHash.String != "" { continue }
 		conns := roomSnaps[roomName]
 		names := []string{}
 		for _, e := range conns {
-			var dn sql.NullString
-			h.db.QueryRow("SELECT display_name FROM peers WHERE room = ? AND peer_id = ?", roomName, e.peerID).Scan(&dn)
-			if dn.Valid && dn.String != "" { names = append(names, dn.String) }
+			if e.displayName != "" { names = append(names, e.displayName) }
 		}
 		result = append(result, roomInfo{Room: roomName, CreatedAt: createdAt, PeerCount: len(conns), DisplayNames: names})
 	}
@@ -896,12 +894,12 @@ func sessionToJSON(s *session) sessionJSON {
 }
 
 func (h *hub) lookupDisplayNames(sj *sessionJSON) {
+	r := h.getRoom(sj.Room)
+	if r == nil { return }
 	names := make(map[string]string)
-	for _, pid := range sj.Peers {
-		var dn sql.NullString
-		h.db.QueryRow("SELECT display_name FROM peers WHERE room = ? AND peer_id = ?", sj.Room, pid).Scan(&dn)
-		if dn.Valid && dn.String != "" {
-			names[pid] = dn.String
+	for _, e := range r.loadConns() {
+		if e.displayName != "" {
+			names[e.peerID] = e.displayName
 		}
 	}
 	if len(names) > 0 {
