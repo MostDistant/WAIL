@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEST="/tmp/abletonlink-go-build"
+
+if [ -f "$DEST/vendor/link/build/extensions/abl_link/libabl_link.a" ]; then
+  echo "abletonlink-go already built at $DEST — skipping"
+  exit 0
+fi
+
+echo "Building abletonlink-go at $DEST..."
+rm -rf "$DEST"
+git clone --recursive https://github.com/DatanoiseTV/abletonlink-go.git "$DEST"
+CMAKE_POLICY_VERSION_MINIMUM=3.5 bash "$DEST/build.sh"
+echo "Done."

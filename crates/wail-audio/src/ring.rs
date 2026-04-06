@@ -111,6 +111,14 @@ pub struct IntervalRing {
     /// Needed because audio arrives keyed by session-scoped peer_id, but SlotTable
     /// uses persistent client_id.
     peer_identity_map: Vec<(String, String)>,
+    /// Scratch buffer reused across swap_intervals() calls to avoid allocating
+    /// a new Vec for kept entries every boundary.
+    swap_scratch: Vec<RemoteInterval>,
+    /// Pre-mixed sum for the upcoming interval's playback. Audio is summed here
+    /// incrementally during `feed_remote()` so that `swap_intervals()` can swap
+    /// buffers in O(1) instead of mixing O(interval_length) samples at boundary.
+    next_playback_slot: Vec<f32>,
+    next_playback_len: usize,
 }
 
 /// A completed local recording ready for encoding.
@@ -126,6 +134,10 @@ struct RemoteInterval {
     peer_id: String,
     stream_id: u16,
     pub samples: Vec<f32>,
+    /// True if this entry's samples have been incrementally summed into
+    /// `next_playback_slot` during `feed_remote()`. At boundary, pre-mixed
+    /// entries skip the playback summation (it's already done).
+    premixed: bool,
 }
 
 impl IntervalRing {
@@ -169,6 +181,9 @@ impl IntervalRing {
             peer_slots,
             slot_table: SlotTable::new(),
             peer_identity_map: Vec::with_capacity(MAX_REMOTE_PEERS),
+            swap_scratch: Vec::new(),
+            next_playback_slot: vec![0.0f32; slot_capacity],
+            next_playback_len: 0,
         }
     }
 
@@ -257,6 +272,78 @@ impl IntervalRing {
         boundary_crossed
     }
 
+    /// Process one audio buffer using an externally-provided interval index.
+    ///
+    /// Identical to [`process()`] except the interval index is supplied directly
+    /// instead of being derived from `beat_position`. This is used by the recv
+    /// plugin, where the authoritative interval index comes from the Go app's
+    /// Link session (carried in incoming audio frames) rather than from the
+    /// DAW's transport position.
+    ///
+    /// When `interval_index` is `None` (no audio received yet), no boundary
+    /// detection occurs and the output is filled with silence.
+    pub fn process_with_interval(
+        &mut self,
+        input: &[f32],
+        output: &mut [f32],
+        interval_index: Option<i64>,
+    ) -> Option<i64> {
+        // Replenish spare record buffer (same as process())
+        if self.spare_record.capacity() == 0 {
+            if let Some(ref rx) = self.buffer_return_rx {
+                if let Ok(buf) = rx.try_recv() {
+                    self.spare_record = buf;
+                }
+            } else {
+                self.spare_record = Vec::with_capacity(self.slot_capacity);
+            }
+        }
+
+        let mut boundary_crossed = None;
+
+        if let Some(idx) = interval_index {
+            match self.current_interval {
+                Some(prev) if prev != idx => {
+                    boundary_crossed = Some(prev);
+                    self.swap_intervals(prev);
+                }
+                None => {
+                    self.playback_interval = Some(idx);
+                }
+                _ => {}
+            }
+            self.current_interval = Some(idx);
+        }
+
+        // Record: write input into pre-allocated record slot
+        let remaining_capacity = self.record_slot.capacity() - self.record_pos;
+        let to_write = input.len().min(remaining_capacity);
+        if to_write > 0 {
+            let new_len = self.record_pos + to_write;
+            if self.record_slot.len() < new_len {
+                self.record_slot.resize(new_len, 0.0);
+            }
+            self.record_slot[self.record_pos..new_len].copy_from_slice(&input[..to_write]);
+            self.record_pos = new_len;
+        }
+
+        // Playback: read from playback slot
+        let available = self.playback_len.saturating_sub(self.playback_pos);
+        let to_read = available.min(output.len());
+
+        if to_read > 0 {
+            output[..to_read]
+                .copy_from_slice(&self.playback_slot[self.playback_pos..self.playback_pos + to_read]);
+            self.playback_pos += to_read;
+        }
+
+        for sample in &mut output[to_read..] {
+            *sample = 0.0;
+        }
+
+        boundary_crossed
+    }
+
     /// Feed a remote peer's decoded interval audio for playback.
     ///
     /// If the audio matches the currently playing interval, it is appended
@@ -305,20 +392,55 @@ impl IntervalRing {
             // This happens for the very first frame before the peer is known.
         }
 
+        // Pre-mix into next_playback_slot when this audio will be the next
+        // interval's playback (i.e., it matches current_interval which becomes
+        // completed_index at the next boundary). This amortizes O(n) mixing
+        // across process() callbacks, eliminating the CPU spike at boundaries.
+        let premix = self.current_interval == Some(interval_index);
+
         // Accumulate into existing entry for the same (peer_id, stream_id, interval_index)
         // to support incremental per-frame decode without creating hundreds of entries.
         if let Some(existing) = self.pending_remote.iter_mut().find(|r| {
             r.peer_id == peer_id && r.stream_id == stream_id && r.index == interval_index
         }) {
+            let offset = existing.samples.len();
             existing.samples.extend_from_slice(&samples);
+            if premix {
+                existing.premixed = true;
+                self.premix_into_next_playback(&samples, offset);
+            }
             return;
+        }
+        let is_premixed = premix;
+        if premix {
+            self.premix_into_next_playback(&samples, 0);
         }
         self.pending_remote.push(RemoteInterval {
             index: interval_index,
             peer_id,
             stream_id,
             samples,
+            premixed: is_premixed,
         });
+    }
+
+    /// Incrementally sum samples into the next playback buffer at the given offset.
+    /// Called from `feed_remote()` to amortize mixing across callbacks.
+    fn premix_into_next_playback(&mut self, samples: &[f32], offset: usize) {
+        let end = (offset + samples.len()).min(self.next_playback_slot.len());
+        let write_len = end.saturating_sub(offset);
+        if write_len == 0 {
+            return;
+        }
+        // Zero-fill any region being written for the first time
+        if end > self.next_playback_len {
+            let zero_start = self.next_playback_len.max(offset);
+            self.next_playback_slot[zero_start..end].fill(0.0);
+            self.next_playback_len = end;
+        }
+        for (i, &s) in samples[..write_len].iter().enumerate() {
+            self.next_playback_slot[offset + i] += s;
+        }
     }
 
     /// Take completed intervals that are ready for encoding and transmission.
@@ -369,6 +491,7 @@ impl IntervalRing {
         self.record_pos = 0;
         self.playback_pos = 0;
         self.playback_len = 0;
+        self.next_playback_len = 0;
         self.current_interval = None;
         self.playback_interval = None;
         self.completed.clear();
@@ -390,6 +513,7 @@ impl IntervalRing {
         self.record_pos = 0;
         self.playback_pos = 0;
         self.playback_len = 0;
+        self.next_playback_len = 0;
         self.current_interval = None;
         self.playback_interval = None;
         self.completed.clear();
@@ -531,6 +655,15 @@ impl IntervalRing {
             }
         }
 
+        // Invalidate the pre-mix buffer: the removed peer's audio was already
+        // summed in. Zero it and mark remaining entries as not pre-mixed so
+        // swap_intervals will re-sum from scratch.
+        self.next_playback_slot[..self.next_playback_len].fill(0.0);
+        self.next_playback_len = 0;
+        for entry in &mut self.pending_remote {
+            entry.premixed = false;
+        }
+
         self.peer_identity_map.retain(|(pid, _)| pid != peer_id);
     }
 
@@ -618,10 +751,6 @@ impl IntervalRing {
             slot.read_pos = 0;
         }
 
-        // Mix pending remote intervals into pre-allocated playback slot
-        self.playback_pos = 0;
-        self.playback_len = 0;
-
         // Capture previous playback interval BEFORE updating — entries for
         // the outgoing interval may be in pending_remote if the peer slot
         // wasn't assigned during live-append (first audio from a new peer).
@@ -629,8 +758,48 @@ impl IntervalRing {
 
         // Track the interval being played so late-arriving frames can append live.
         self.playback_interval = Some(completed_index);
+
+        // Build summed crossfade tail from per-peer tails (not the mixed
+        // playback slot). This ensures removed peers don't contribute stale
+        // audio to the fade — their crossfade_tail is zeroed on removal.
+        let mut summed_tail = [0.0f32; XFADE_SAMPLES];
+        for slot in &self.peer_slots {
+            if slot.active {
+                for j in 0..XFADE_SAMPLES {
+                    summed_tail[j] += slot.crossfade_tail[j];
+                }
+            }
+        }
+
+        // Swap pre-mixed next_playback into active playback (O(1) pointer swap).
+        // feed_remote() has been summing next interval's audio here incrementally.
+        std::mem::swap(&mut self.playback_slot, &mut self.next_playback_slot);
+        self.playback_len = self.next_playback_len;
+        self.playback_pos = 0;
+        self.next_playback_len = 0;
+
+        // Apply summed crossfade: blend outgoing tail (fade out) with incoming
+        // head (fade in). O(XFADE_SAMPLES) — trivially cheap.
+        {
+            let ch = self.channels as usize;
+            let fade_frames = (XFADE_SAMPLES / ch).min(self.playback_len / ch.max(1));
+            for frame in 0..fade_frames {
+                let t = (frame + 1) as f32 / fade_frames as f32;
+                for c in 0..ch {
+                    let idx = frame * ch + c;
+                    self.playback_slot[idx] =
+                        self.playback_slot[idx] * t + summed_tail[idx] * (1.0 - t);
+                }
+            }
+        }
+
+        // Process pending_remote for per-peer slot assignment and crossfade.
+        // Pre-mixed entries (matching completed_index) skip the playback sum.
+        // Non-pre-mixed entries (matching prev_playback) are summed traditionally
+        // but are rare and small (late-arriving frames).
         let mut pending = std::mem::take(&mut self.pending_remote);
-        let mut keep = Vec::new();
+        let mut keep = std::mem::take(&mut self.swap_scratch);
+        keep.clear();
         let pending_count = pending.len();
         let mut mixed_count = 0usize;
         let mut evicted_count = 0usize;
@@ -645,21 +814,10 @@ impl IntervalRing {
                 continue;
             }
             mixed_count += 1;
-            // Assign slot FIRST so we can check needs_fade_in before summing
+            let was_premixed = remote.premixed;
             let slot_assignment = self.assign_peer_slot(&remote.peer_id, remote.stream_id);
 
-            // Apply linear crossfade at interval boundary.
-            // Blends the tail of the previous interval (fading out) with the head of
-            // the new interval (fading in). When crossfade_tail is all zeros (new peer
-            // or reconnect), this naturally produces a clean fade-in from silence.
-            //
-            // Linear (not equal-power) ensures new_w + old_w = 1.0 at every point,
-            // preventing amplitude bumps on correlated signals (sustained notes, test
-            // tones). The -3dB power dip for uncorrelated signals over ~2.7ms is
-            // inaudible. Matches NINJAM's reference crossfade implementation.
-            //
-            // Iterates by frame (not sample) so that all channels of the same audio
-            // frame receive identical crossfade weights.
+            // Per-peer crossfade for aux outputs.
             if let Some(slot_idx) = slot_assignment {
                 let ch = self.channels as usize;
                 let fade_frames = (XFADE_SAMPLES / ch).min(remote.samples.len() / ch);
@@ -675,20 +833,19 @@ impl IntervalRing {
                 }
             }
 
-            let mix_len = self.playback_len.max(remote.samples.len());
-            // Grow playback within pre-allocated capacity
-            let mix_len = mix_len.min(self.playback_slot.len());
-
-            // Zero-fill the extension range
-            for s in &mut self.playback_slot[self.playback_len..mix_len] {
-                *s = 0.0;
-            }
-            self.playback_len = mix_len;
-
-            // Sum remote audio into playback (with fade already applied if needed)
-            let copy_len = remote.samples.len().min(self.playback_slot.len());
-            for (i, sample) in remote.samples[..copy_len].iter().enumerate() {
-                self.playback_slot[i] += sample;
+            // Only sum into playback for entries that were NOT pre-mixed
+            // (rare: late arrivals matching prev_playback).
+            if !was_premixed {
+                let mix_len = self.playback_len.max(remote.samples.len());
+                let mix_len = mix_len.min(self.playback_slot.len());
+                for s in &mut self.playback_slot[self.playback_len..mix_len] {
+                    *s = 0.0;
+                }
+                self.playback_len = mix_len;
+                let copy_len = remote.samples.len().min(self.playback_slot.len());
+                for (i, sample) in remote.samples[..copy_len].iter().enumerate() {
+                    self.playback_slot[i] += sample;
+                }
             }
 
             // Move samples to per-peer-stream slot
@@ -729,29 +886,31 @@ impl IntervalRing {
                 }
             }
         }
-        // Put back entries for future intervals, plus the drained vec
-        keep.extend(pending.drain(..));
+        // Reuse both allocations: keep → pending_remote, drained pending → scratch
         self.pending_remote = keep;
+        self.swap_scratch = pending;
 
-        // Diagnostic: log boundary swap details to identify gap root cause
-        let kept_count = self.pending_remote.len();
-        let active_peers: Vec<_> = self.peer_slots.iter()
-            .filter(|s| s.active)
-            .map(|s| {
-                let tail_nonzero = s.crossfade_tail.iter().any(|&v| v != 0.0);
-                format!("{}:{} len={} tail={}", s.peer_id, s.stream_id, s.samples.len(), if tail_nonzero { "audio" } else { "zero" })
-            })
-            .collect();
-        tracing::info!(
-            completed_index = completed_index,
-            pending_count = pending_count,
-            mixed_count = mixed_count,
-            evicted_stale = evicted_count,
-            kept_for_future = kept_count,
-            playback_len = self.playback_len,
-            peers = ?active_peers,
-            "INTERVAL SWAP"
-        );
+        // Diagnostic: log boundary swap details (gated to avoid allocations on audio thread)
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let kept_count = self.pending_remote.len();
+            let active_peers: Vec<_> = self.peer_slots.iter()
+                .filter(|s| s.active)
+                .map(|s| {
+                    let tail_nonzero = s.crossfade_tail.iter().any(|&v| v != 0.0);
+                    format!("{}:{} len={} tail={}", s.peer_id, s.stream_id, s.samples.len(), if tail_nonzero { "audio" } else { "zero" })
+                })
+                .collect();
+            tracing::debug!(
+                completed_index = completed_index,
+                pending_count = pending_count,
+                mixed_count = mixed_count,
+                evicted_stale = evicted_count,
+                kept_for_future = kept_count,
+                playback_len = self.playback_len,
+                peers = ?active_peers,
+                "INTERVAL SWAP"
+            );
+        }
     }
 }
 
@@ -2569,5 +2728,253 @@ mod tests {
         ring.process(&input, &mut output, 32.0);
         let completed = ring.take_completed();
         assert_eq!(completed.len(), 1, "Second boundary should produce CompletedInterval (fallback alloc)");
+    }
+
+    // --- Tests for process_with_interval ---
+
+    #[test]
+    fn process_with_interval_none_produces_silence() {
+        let mut ring = make_ring();
+        let mut output = vec![0.0f32; 256];
+        // Fill output with non-zero to verify it gets zeroed
+        output.fill(1.0);
+
+        let boundary = ring.process_with_interval(&[], &mut output, None);
+
+        assert!(boundary.is_none(), "No boundary when interval is None");
+        assert!(output.iter().all(|&s| s == 0.0), "Output should be silence");
+        assert!(ring.current_interval.is_none(), "current_interval stays None");
+    }
+
+    #[test]
+    fn process_with_interval_plays_remote_audio() {
+        let mut ring = make_ring();
+        let mut output = vec![0.0f32; 256];
+
+        // Feed remote audio for interval 50
+        let samples = vec![0.5f32; 256];
+        ring.feed_remote("peer1".into(), 0, 50, samples.clone());
+
+        // Start on interval 50 — first call sets playback_interval
+        ring.process_with_interval(&[], &mut output, Some(50));
+
+        // Cross boundary to interval 51 — swaps interval 50 into playback
+        // and reads it in the same call
+        output.fill(0.0);
+        ring.process_with_interval(&[], &mut output, Some(51));
+
+        // The swap mixed interval 50's audio into the playback slot
+        // and the same process call read it into output
+        let has_audio = output.iter().any(|&s| s != 0.0);
+        assert!(has_audio, "Should hear remote audio after boundary swap");
+    }
+
+    #[test]
+    fn process_with_interval_boundary_swap() {
+        let mut ring = make_ring();
+        let mut output = vec![0.0f32; 128];
+
+        // First call — establishes interval 10
+        let b = ring.process_with_interval(&[], &mut output, Some(10));
+        assert!(b.is_none(), "First call should not trigger boundary");
+        assert_eq!(ring.current_interval, Some(10));
+
+        // Same interval — no boundary
+        let b = ring.process_with_interval(&[], &mut output, Some(10));
+        assert!(b.is_none(), "Same interval should not trigger boundary");
+
+        // Different interval — triggers boundary
+        let b = ring.process_with_interval(&[], &mut output, Some(11));
+        assert_eq!(b, Some(10), "Boundary should report completed interval 10");
+        assert_eq!(ring.current_interval, Some(11));
+    }
+
+    // --- Test: Zero sample loss in perfect network ---
+
+    /// Validates that every sample fed for an interval is played back with no
+    /// truncation, duplication, or dropout. Simulates a perfect network where
+    /// all packets arrive before the interval boundary (N+1 playback).
+    ///
+    /// Uses a unique ramp signal so each sample is individually identifiable.
+    /// After crossfade, verifies exact sample match for the post-fade region
+    /// and correct sample count for the full interval.
+    #[test]
+    fn zero_sample_loss_single_peer() {
+        let mut ring = make_ring();
+        let buf_size = 512;
+        let mut output = vec![0.0f32; buf_size];
+
+        // Generate a full interval of identifiable audio: ascending ramp
+        // so every sample has a unique value. Stereo interleaved.
+        let interval_samples = (SR as f64 / 120.0 * 16.0) as usize * CH as usize;
+        let ramp: Vec<f32> = (0..interval_samples)
+            .map(|i| (i as f32 + 1.0) / interval_samples as f32)
+            .collect();
+
+        // Establish interval 0
+        ring.process_with_interval(&[], &mut output, Some(0));
+
+        // Feed the full interval as remote audio (simulating perfect delivery)
+        ring.feed_remote("peer-a".into(), 0, 0, ramp.clone());
+
+        // Advance to interval 1 — swaps interval 0 into playback
+        ring.process_with_interval(&[], &mut output, Some(1));
+
+        // Drain the entire playback slot
+        let mut played = Vec::new();
+        // First buffer was already read by the process call above
+        played.extend_from_slice(&output);
+
+        loop {
+            output.fill(0.0);
+            ring.process_with_interval(&[], &mut output, Some(1));
+            if ring.playback_remaining() == 0 && output.iter().all(|&s| s == 0.0) {
+                break;
+            }
+            played.extend_from_slice(&output);
+        }
+
+        // Trim trailing silence (from the last partial buffer fill)
+        while played.last() == Some(&0.0) {
+            played.pop();
+        }
+
+        // Total sample count must match what was fed
+        assert_eq!(
+            played.len(), interval_samples,
+            "Played {} samples but fed {} — sample loss or duplication detected",
+            played.len(), interval_samples,
+        );
+
+        // Post-crossfade region must be an exact match.
+        // The crossfade region (first XFADE_SAMPLES) blends with silence (new peer),
+        // so those samples are attenuated. Everything after must be bit-exact.
+        let post_fade = &played[XFADE_SAMPLES..];
+        let expected_post_fade = &ramp[XFADE_SAMPLES..];
+        for (i, (&got, &expected)) in post_fade.iter().zip(expected_post_fade).enumerate() {
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "Sample mismatch at post-fade index {i}: got {got}, expected {expected}",
+            );
+        }
+    }
+
+    /// Same as above but with multiple peers — verifies summed playback
+    /// preserves the total sample count and no peer's audio is dropped.
+    #[test]
+    fn zero_sample_loss_multi_peer() {
+        let mut ring = make_ring();
+        let buf_size = 512;
+        let mut output = vec![0.0f32; buf_size];
+
+        let interval_samples = (SR as f64 / 120.0 * 16.0) as usize * CH as usize;
+
+        // Peer A: constant 0.3, Peer B: constant 0.5 — summed should be 0.8
+        let audio_a = vec![0.3f32; interval_samples];
+        let audio_b = vec![0.5f32; interval_samples];
+
+        ring.process_with_interval(&[], &mut output, Some(0));
+
+        ring.feed_remote("peer-a".into(), 0, 0, audio_a);
+        ring.feed_remote("peer-b".into(), 0, 0, audio_b);
+
+        // Boundary swap
+        ring.process_with_interval(&[], &mut output, Some(1));
+
+        let mut played = Vec::new();
+        played.extend_from_slice(&output);
+
+        loop {
+            output.fill(0.0);
+            ring.process_with_interval(&[], &mut output, Some(1));
+            if ring.playback_remaining() == 0 && output.iter().all(|&s| s == 0.0) {
+                break;
+            }
+            played.extend_from_slice(&output);
+        }
+
+        while played.last() == Some(&0.0) {
+            played.pop();
+        }
+
+        assert_eq!(
+            played.len(), interval_samples,
+            "Played {} samples but fed {} — sample loss or duplication",
+            played.len(), interval_samples,
+        );
+
+        // Post-crossfade: every sample should be 0.3 + 0.5 = 0.8
+        for (i, &sample) in played[XFADE_SAMPLES..].iter().enumerate() {
+            assert!(
+                (sample - 0.8).abs() < 1e-5,
+                "Sample {i} post-fade: got {sample}, expected 0.8 — peer audio missing or duplicated",
+            );
+        }
+    }
+
+    /// Verifies zero sample loss across 3 consecutive interval boundaries.
+    /// Each interval gets a different constant value so we can verify the
+    /// correct interval's audio plays at the right time and no samples are
+    /// lost at boundaries.
+    #[test]
+    fn zero_sample_loss_across_boundaries() {
+        let mut ring = make_ring();
+        let buf_size = 512;
+        let mut output = vec![0.0f32; buf_size];
+
+        let interval_samples = (SR as f64 / 120.0 * 16.0) as usize * CH as usize;
+
+        // Three intervals with distinct amplitudes
+        let values: [f32; 3] = [0.25, 0.50, 0.75];
+
+        // Establish interval 0
+        ring.process_with_interval(&[], &mut output, Some(0));
+
+        // Feed all three intervals upfront (perfect network: all arrive early)
+        for (idx, &val) in values.iter().enumerate() {
+            ring.feed_remote("peer-a".into(), 0, idx as i64, vec![val; interval_samples]);
+        }
+
+        // Drive each interval individually: advance to N+1, drain playback,
+        // verify the played samples match interval N's audio exactly.
+        for (i, &val) in values.iter().enumerate() {
+            let next_interval = (i as i64) + 1;
+
+            let mut played = Vec::new();
+            // First call triggers the boundary and reads the first buffer
+            output.fill(0.0);
+            ring.process_with_interval(&[], &mut output, Some(next_interval));
+            played.extend_from_slice(&output);
+
+            // Drain remaining playback for this interval
+            while ring.playback_remaining() > 0 {
+                output.fill(0.0);
+                ring.process_with_interval(&[], &mut output, Some(next_interval));
+                played.extend_from_slice(&output);
+            }
+
+            // Trim trailing silence from the last partial buffer
+            while played.last() == Some(&0.0) {
+                played.pop();
+            }
+
+            assert_eq!(
+                played.len(), interval_samples,
+                "Interval {i}: played {} samples, expected {} — sample loss at boundary",
+                played.len(), interval_samples,
+            );
+
+            // Post-crossfade: verify content matches the expected value
+            let mismatches: Vec<_> = played[XFADE_SAMPLES..].iter().enumerate()
+                .filter(|(_, &s)| (s - val).abs() > 1e-4)
+                .take(5)
+                .collect();
+
+            assert!(
+                mismatches.is_empty(),
+                "Interval {i}: expected {val} post-fade, got mismatches: {:?}",
+                mismatches,
+            );
+        }
     }
 }

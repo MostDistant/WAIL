@@ -4,4 +4,4 @@ export RUST_LOG="${RUST_LOG:-info}"
 "$(dirname "$0")/setup"
 cargo xtask build-plugin
 cargo xtask install-plugin --debug
-cd wail-app && exec go run . "$@"
+cd wail-app && exec go run . --headless --wav ../rust.wav "$@"

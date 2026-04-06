@@ -67,6 +67,19 @@ impl AudioBridge {
         self.ring.take_completed()
     }
 
+    /// Like [`process_rt()`] but uses an externally-provided interval index
+    /// instead of deriving one from `beat_position`. See
+    /// [`IntervalRing::process_with_interval`] for details.
+    pub fn process_rt_with_interval(
+        &mut self,
+        input: &[f32],
+        output: &mut [f32],
+        interval_index: Option<i64>,
+    ) -> Vec<CompletedInterval> {
+        self.ring.process_with_interval(input, output, interval_index);
+        self.ring.take_completed()
+    }
+
     /// Audio-thread safe: feed already-decoded PCM to ring for playback.
     ///
     /// Use this from the real-time audio callback after decoding Opus on a

@@ -77,6 +77,9 @@ pub struct WailRecvPlugin {
     last_interval: i64,
     /// Whether the IPC thread has an active connection to wail-app.
     ipc_connected: bool,
+    /// Latest interval index from incoming audio frames (Go app's Link timeline).
+    /// Used to drive ring buffer boundaries instead of DAW transport position.
+    remote_interval: Option<i64>,
 }
 
 impl Default for WailRecvPlugin {
@@ -99,6 +102,7 @@ impl Default for WailRecvPlugin {
             editor_data: Arc::new(Mutex::new(EditorData::default())),
             last_interval: 0,
             ipc_connected: false,
+            remote_interval: None,
         }
     }
 }
@@ -205,7 +209,9 @@ impl Plugin for WailRecvPlugin {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        // Disable GUI in debug builds to avoid crashes during development.
+        // egui + baseview crashes in debug builds (likely OpenGL context issue
+        // in the nih_plug_egui baseview backend). Keep the GUI disabled until
+        // we find the root cause or switch to a different windowing backend.
         if cfg!(debug_assertions) {
             return None;
         }
@@ -297,6 +303,7 @@ impl Plugin for WailRecvPlugin {
             self.cumulative_samples = 0;
             self.was_playing = None;
             self.last_interval = 0;
+            self.remote_interval = None;
             self.pending_names.clear();
             for name in &mut self.applied_slot_names {
                 *name = None;
@@ -347,11 +354,10 @@ impl Plugin for WailRecvPlugin {
 
         // Sampled diagnostic: log beat position every ~2 seconds (96000 samples at 48kHz)
         if self.cumulative_samples % 96000 < num_samples as u64 {
-            let interval_index = (beat_position / (DEFAULT_BARS as f64 * DEFAULT_QUANTUM)).floor() as i64;
             tracing::debug!(
                 beat = format!("{:.2}", beat_position),
                 bpm = format!("{:.1}", bpm),
-                interval = interval_index,
+                remote_interval = ?self.remote_interval,
                 playing = transport.playing,
                 "RECV beat"
             );
@@ -404,6 +410,7 @@ impl Plugin for WailRecvPlugin {
                                 }
                                 PeerEvent::Disconnected => {
                                     self.ipc_connected = false;
+                                    self.remote_interval = None;
                                     tracing::info!("WAIL Recv: IPC disconnected — clearing audio state");
                                     bridge.reset();
                                     // Drain any buffered frames so stale audio doesn't play
@@ -421,12 +428,27 @@ impl Plugin for WailRecvPlugin {
 
                     if let Some(ref rx) = self.ipc_incoming_rx {
                         while let Ok((peer_id, stream_id, interval_index, samples)) = rx.try_recv() {
+                            // Track the latest interval index from the Go app's
+                            // Link timeline. This drives ring buffer boundaries
+                            // instead of the DAW's transport position.
+                            match self.remote_interval {
+                                Some(prev) if interval_index > prev => {
+                                    self.remote_interval = Some(interval_index);
+                                }
+                                None => {
+                                    self.remote_interval = Some(interval_index);
+                                }
+                                _ => {}
+                            }
                             bridge.feed_decoded(peer_id, stream_id, interval_index, samples);
                         }
                     }
                     // Use a zero-length slice as silent input — IntervalRing
                     // handles zero-length input gracefully (nothing recorded).
-                    drop(bridge.process_rt(&[], playback, beat_position));
+                    // Drive ring boundaries from the Go app's interval index
+                    // (via incoming audio) instead of the DAW's transport position,
+                    // which may not match Link's beat timeline.
+                    drop(bridge.process_rt_with_interval(&[], playback, self.remote_interval));
 
                     // Deferred name apply: slots become active only after audio arrives
                     // at an interval boundary. Apply any cached display names now.
@@ -476,9 +498,9 @@ impl Plugin for WailRecvPlugin {
                 }
 
                 // Update visualization state for the editor GUI
-                let interval_index = (beat_position / (DEFAULT_BARS as f64 * DEFAULT_QUANTUM)).floor() as i64;
-                let is_boundary = interval_index != self.last_interval;
-                self.last_interval = interval_index;
+                let display_interval = self.remote_interval.unwrap_or(0);
+                let is_boundary = display_interval != self.last_interval;
+                self.last_interval = display_interval;
 
                 permit_alloc(|| {
                     if let Ok(mut vis) = self.editor_data.try_lock() {
@@ -486,7 +508,7 @@ impl Plugin for WailRecvPlugin {
                         vis.bpm = bpm;
                         let interval_len = DEFAULT_BARS as f64 * DEFAULT_QUANTUM;
                         vis.interval_progress = ((beat_position % interval_len) / interval_len) as f32;
-                        vis.current_interval = interval_index;
+                        vis.current_interval = display_interval;
 
                         // Compute per-slot RMS and push to sparkline history
                         let active_info = bridge.peer_info();

@@ -160,13 +160,21 @@ fn recv_plugin_e2e() {
         // Give the IPC thread time to read, decode, and send to channel
         std::thread::sleep(Duration::from_secs(1));
 
-        // Drive enough process() calls to cross the interval boundary.
-        // At 120 BPM, 4 bars × quantum 4 = 16 beats = 384,000 samples.
-        // With 4096-sample buffers: ceil(384000/4096) = 94 callbacks.
-        // The first few calls consume the decoded audio via try_recv() and
-        // feed it to the ring's pending_remote. When beat >= 16, the ring
-        // swaps pending_remote into the playback slot.
-        let num_callbacks: u64 = 100; // extra margin to guarantee boundary crossing
+        // Drive a few callbacks so the ring establishes current_interval = Some(0)
+        // from the drained interval-0 frames. This must happen BEFORE we send
+        // interval 1, otherwise the drain loop jumps remote_interval straight
+        // to Some(1) and the None → Some(1) path skips the swap.
+        for i in 1..=10u64 {
+            process_one_buffer(&mut processor, buf_size, i * buf_size as u64);
+        }
+
+        // Now send interval 1 so remote_interval advances 0 → 1, triggering
+        // the boundary that flushes interval 0 into playback.
+        let frame1 = make_test_interval_frame("test-peer", 1);
+        stream.write_all(&frame1).expect("Failed to write interval 1");
+        std::thread::sleep(Duration::from_millis(500));
+
+        let num_callbacks: u64 = 100;
 
         let mut found_audio = false;
         for i in 1..=num_callbacks {
@@ -222,14 +230,22 @@ fn recv_plugin_e2e() {
         // Establish interval 0 in the ring
         process_one_buffer(&mut processor, buf_size, 0);
 
-        // Send audio for interval 0
-        let frame = make_test_interval_frame("peer-disconnect", 0);
-        stream.write_all(&frame).expect("Failed to write audio frame");
-        std::thread::sleep(Duration::from_secs(1));
+        // Send interval 0, drive callbacks to establish current_interval = Some(0)
+        let frame0 = make_test_interval_frame("peer-disconnect", 0);
+        stream.write_all(&frame0).expect("Failed to write audio frame 0");
+        std::thread::sleep(Duration::from_secs(2));
+        for i in 1..=20u64 {
+            process_one_buffer(&mut processor, buf_size, i * buf_size as u64);
+        }
+
+        // Send interval 1 to trigger boundary (remote_interval 0 → 1)
+        let frame1 = make_test_interval_frame("peer-disconnect", 1);
+        stream.write_all(&frame1).expect("Failed to write audio frame 1");
+        std::thread::sleep(Duration::from_millis(500));
 
         // Drive past interval boundary — should hear audio
         let mut found_audio = false;
-        for i in 1..=100u64 {
+        for i in 21..=120u64 {
             let (_, out_l, _) = process_one_buffer(&mut processor, buf_size, i * buf_size as u64);
             if rms(&out_l) > 0.001 {
                 found_audio = true;
@@ -242,16 +258,17 @@ fn recv_plugin_e2e() {
         stream.write_all(&peer_left).expect("Failed to write PeerLeft");
         std::thread::sleep(Duration::from_millis(500));
 
-        // Drive past the next interval boundary (callbacks 101–200).
-        // The ring buffer only clears the departed peer's contribution at the
-        // next swap_intervals(), so we need to cross one more boundary.
-        for i in 101..=200u64 {
+        // Send interval 2 to trigger boundary after PeerLeft, then drive callbacks.
+        let frame2 = make_test_interval_frame("peer-disconnect", 2);
+        stream.write_all(&frame2).expect("Failed to write audio frame 2");
+        std::thread::sleep(Duration::from_millis(500));
+        for i in 121..=220u64 {
             process_one_buffer(&mut processor, buf_size, i * buf_size as u64);
         }
 
         // Post-boundary: all output must be silence
         let mut post_disconnect_silent = true;
-        for i in 201..=250u64 {
+        for i in 221..=270u64 {
             let (_, out_l, _) = process_one_buffer(&mut processor, buf_size, i * buf_size as u64);
             if rms(&out_l) > 0.001 {
                 eprintln!("Non-silent buffer at callback {i}: RMS={:.4}", rms(&out_l));
@@ -292,15 +309,22 @@ fn recv_plugin_e2e() {
         // Establish interval 0
         process_one_buffer(&mut processor, buf_size, 0);
 
-        // Send audio interval
-        let frame = make_test_interval_frame("test-peer-small", 0);
-        stream.write_all(&frame).expect("Failed to write audio frame");
+        // Send interval 0, drive callbacks to establish current_interval = Some(0)
+        let frame0 = make_test_interval_frame("test-peer-small", 0);
+        stream.write_all(&frame0).expect("Failed to write audio frame 0");
         std::thread::sleep(Duration::from_secs(1));
+        for i in 1..=10u64 {
+            process_one_buffer(&mut processor, buf_size, i * buf_size as u64);
+        }
 
-        // ceil(384000 / 128) = 3000 callbacks per interval; run 3200 to ensure boundary
+        // Send interval 1 to trigger boundary (remote_interval 0 → 1)
+        let frame1 = make_test_interval_frame("test-peer-small", 1);
+        stream.write_all(&frame1).expect("Failed to write audio frame 1");
+        std::thread::sleep(Duration::from_millis(500));
+
         let num_callbacks: u64 = 3200;
         let mut found_audio = false;
-        for i in 1..=num_callbacks {
+        for i in 11..=(num_callbacks + 10) {
             let (_, out_l, _) = process_one_buffer(&mut processor, buf_size, i * buf_size as u64);
             if rms(&out_l) > 0.001 {
                 found_audio = true;
@@ -381,8 +405,10 @@ fn recv_plugin_e2e() {
                 cur_ns = 0;
                 cur_total = 0;
 
-                // Feed the next interval's audio (if we have one to send)
-                if next_interval_to_send < num_intervals {
+                // Feed the next interval's audio (if we have one to send).
+                // Send up to num_intervals (exclusive), plus one extra "trigger"
+                // interval to flush the last real interval into playback.
+                if next_interval_to_send <= num_intervals {
                     let frame = make_test_interval_frame("peer-multi", next_interval_to_send);
                     stream.write_all(&frame).expect("Failed to write interval frame");
                     next_interval_to_send += 1;

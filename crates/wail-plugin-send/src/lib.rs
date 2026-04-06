@@ -172,7 +172,9 @@ impl Plugin for WailSendPlugin {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        // Disable GUI in debug builds to avoid crashes during development.
+        // egui + baseview crashes in debug builds (likely OpenGL context issue
+        // in the nih_plug_egui baseview backend). Keep the GUI disabled until
+        // we find the root cause or switch to a different windowing backend.
         if cfg!(debug_assertions) {
             return None;
         }
@@ -366,7 +368,7 @@ impl Plugin for WailSendPlugin {
                         let bpm_snap = bridge.bpm();
                         let q = bridge.quantum();
                         let b = bridge.bars();
-                        let stream_id = self.params.stream_index.value() as u16;
+                        let stream_id = self.params.stream_index.value().max(1) as u16;
                         let frame_samples = self.opus_frame_size * ch as usize;
                         let interval_idx = bridge.current_interval_index();
 
@@ -482,7 +484,7 @@ fn ipc_thread_send(
         };
 
         // Identify as a send plugin + stream index
-        let stream_index = params.stream_index.value() as u16;
+        let stream_index = params.stream_index.value().max(1) as u16;
         let mut handshake = [0u8; 3];
         handshake[0] = IPC_ROLE_SEND;
         handshake[1..3].copy_from_slice(&stream_index.to_le_bytes());
