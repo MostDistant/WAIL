@@ -400,13 +400,34 @@ impl IntervalRing {
 
         // Accumulate into existing entry for the same (peer_id, stream_id, interval_index)
         // to support incremental per-frame decode without creating hundreds of entries.
+        //
+        // Backfill: the recv plugin drains its IPC channel and calls feed_remote
+        // for every frame BEFORE advancing current_interval via
+        // process_rt_with_interval. So the first batch of frames for interval N
+        // arrives while current_interval is still N-1 (premix=false). Later
+        // batches arrive with premix=true and extend the same entry, but the
+        // head samples never reach next_playback_slot unless we backfill them
+        // at the premix=false→true transition. Without this, the new interval's
+        // playback starts with a zero-filled head region (audible dip at the
+        // start of every interval; see realtime_paced_no_dropout_e2e).
         if let Some(existing) = self.pending_remote.iter_mut().find(|r| {
             r.peer_id == peer_id && r.stream_id == stream_id && r.index == interval_index
         }) {
             let offset = existing.samples.len();
             existing.samples.extend_from_slice(&samples);
+            let needs_backfill = premix && !existing.premixed;
             if premix {
                 existing.premixed = true;
+            }
+            let backfill = if needs_backfill {
+                Some(existing.samples[..offset].to_vec())
+            } else {
+                None
+            };
+            if let Some(head) = backfill {
+                self.premix_into_next_playback(&head, 0);
+            }
+            if premix {
                 self.premix_into_next_playback(&samples, offset);
             }
             return;
@@ -2428,6 +2449,79 @@ mod tests {
         ring.feed_remote("peer-a".into(), 0, 2, vec![0.4f32; 100]);
 
         assert_eq!(ring.pending_remote_count(), 4);
+    }
+
+    // Recv plugin drains all pending IPC frames via feed_remote *before* it
+    // advances current_interval with process_rt_with_interval. The first batch
+    // of frames for a new interval therefore always arrives with premix=false,
+    // and the second-or-later batch arrives with premix=true. Without a
+    // backfill at the premix transition, the head of the new interval's
+    // playback is zero-filled — the dip that `realtime_paced_no_dropout_e2e`
+    // caught as 25 % RMS on callback 1.
+    #[test]
+    fn feed_remote_backfills_accumulated_samples_on_premix_transition() {
+        let mut ring = make_ring();
+        let buf = 1024;
+        let mut output = vec![0.0f32; buf];
+
+        // Establish current_interval=0 (receiver is still on interval 0).
+        ring.process_with_interval(&[], &mut output, Some(0));
+
+        // First batch for interval 1 arrives while ring is still on interval 0.
+        // premix=false → only goes to pending_remote. Use a region well past
+        // XFADE_SAMPLES so the head audio is unambiguously full-volume.
+        let head_len = 2048;
+        let head = vec![0.7f32; head_len];
+        ring.feed_remote("peer-a".into(), 0, 1, head.clone());
+
+        // Receiver advances to interval 1. current_interval is now 1, so the
+        // next feed_remote call will see premix=true.
+        ring.process_with_interval(&[], &mut output, Some(1));
+
+        // Second batch for interval 1 arrives with premix=true. The backfill
+        // path must also mix the previously-accumulated `head` into the head
+        // region of next_playback_slot.
+        let tail_len = 1024;
+        let tail = vec![0.3f32; tail_len];
+        ring.feed_remote("peer-a".into(), 0, 1, tail.clone());
+
+        // Cross the boundary into interval 2. Interval 1's data swaps into
+        // playback_slot.
+        output.fill(0.0);
+        ring.process_with_interval(&[], &mut output, Some(2));
+
+        let mut played = Vec::new();
+        played.extend_from_slice(&output);
+        for _ in 0..16 {
+            output.fill(0.0);
+            ring.process_with_interval(&[], &mut output, Some(2));
+            if output.iter().all(|&s| s == 0.0) {
+                break;
+            }
+            played.extend_from_slice(&output);
+        }
+
+        // Post-crossfade head region: must be audible at ~0.7 amplitude.
+        // Without backfill, samples [XFADE_LEN..head_len] would be zero.
+        let post_fade_head = &played[XFADE_LEN..head_len];
+        let non_zero = post_fade_head.iter().filter(|&&s| s.abs() > 0.5).count();
+        assert!(
+            non_zero > post_fade_head.len() / 2,
+            "Head region silent — backfill missing. realtime_paced_no_dropout_e2e dip. \
+             Post-fade non-zero count: {}/{}",
+            non_zero,
+            post_fade_head.len(),
+        );
+
+        // Tail region: must be audible at ~0.3 amplitude.
+        let tail_slice = &played[head_len..head_len + tail_len];
+        let tail_non_zero = tail_slice.iter().filter(|&&s| s.abs() > 0.2).count();
+        assert!(
+            tail_non_zero > tail_slice.len() / 2,
+            "Tail region missing — premix of new samples broke: {}/{}",
+            tail_non_zero,
+            tail_slice.len(),
+        );
     }
 
     #[test]
