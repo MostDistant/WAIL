@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.2 (2026-04-17)
+
+### Fixes
+
+- show actual app version in UI label (#321)
+- eliminate silence artifacts at interval boundaries (#320)
+
 ## 2.3.1 (2026-04-06)
 
 ### Fixes
