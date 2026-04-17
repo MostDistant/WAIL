@@ -64,6 +64,11 @@ func (a *App) SetEmitter(emitter EventEmitter) {
 
 // --- Frontend-callable methods (Wails bindings) ---
 
+// GetAppVersion returns the app version string (kept in sync with Cargo.toml).
+func (a *App) GetAppVersion() string {
+	return appVersion
+}
+
 type JoinResult struct {
 	PeerID string  `json:"peer_id"`
 	Room   string  `json:"room"`

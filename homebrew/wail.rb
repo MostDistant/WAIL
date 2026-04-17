@@ -55,7 +55,9 @@ class Wail < Formula
       inreplace "go.mod",
         /replace github\.com\/DatanoiseTV\/abletonlink-go\s*=>\s*.*/,
         "replace github.com/DatanoiseTV/abletonlink-go => #{buildpath}/abletonlink-go-build"
-      system "go", "build", "-o", "wail", "."
+      # Inject the workspace version (from Cargo.toml, provided by Homebrew via `url`)
+      # into main.appVersion so the UI shows the installed version.
+      system "go", "build", "-ldflags", "-X main.appVersion=#{version}", "-o", "wail", "."
     end
     bin.install "wail-app/wail"
 

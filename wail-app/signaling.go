@@ -12,8 +12,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const appVersion = "2.0.0-go"
-
 // PublicRoom represents a public room from the signaling server.
 type PublicRoom struct {
 	Room         string   `json:"room"`

@@ -43,6 +43,7 @@
         'get_active_session': 'main.App.GetActiveSession',
         'get_plugin_install_errors': 'main.App.GetPluginInstallErrors',
         'rename_stream': 'main.App.RenameStream',
+        'get_app_version': 'main.App.GetAppVersion',
     };
 
     // Tauri invoke passes a single object of named args.
@@ -109,7 +110,7 @@
         event: { listen },
         app: {
             getVersion: function() {
-                return Promise.resolve('2.0.0-go');
+                return invoke('get_app_version');
             }
         }
     };
