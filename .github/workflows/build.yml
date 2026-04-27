@@ -42,7 +42,7 @@ jobs:
         run: cargo build --workspace
 
       - name: Build Go app (linkstub)
-        run: go build -tags "linkstub,nolibopusfile" -o /dev/null .
+        run: go build -tags linkstub -o /dev/null .
         working-directory: wail-app
 
   build-windows:
@@ -89,7 +89,7 @@ jobs:
       - name: Build Go app (linkstub)
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: go build -tags "linkstub,nolibopusfile" -o NUL .
+        run: go build -tags linkstub -o NUL .
         working-directory: wail-app
 
       - name: Collect artifacts
@@ -149,7 +149,7 @@ jobs:
         run: cargo xtask bundle-plugin
 
       - name: Build Go app (linkstub)
-        run: go build -tags "linkstub,nolibopusfile" -o /dev/null .
+        run: go build -tags linkstub -o /dev/null .
         working-directory: wail-app
 
       - name: Collect artifacts
