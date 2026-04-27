@@ -10,6 +10,7 @@ func TestFrameWireNonFinalRoundtrip(t *testing.T) {
 		IntervalIndex: 42,
 		StreamID:      3,
 		FrameNumber:   7,
+		FrameSeq:      0xDEADBEEF,
 		Channels:      2,
 		OpusData:      []byte{0xDE, 0xAD, 0xBE, 0xEF},
 		IsFinal:       false,
@@ -22,8 +23,8 @@ func TestFrameWireNonFinalRoundtrip(t *testing.T) {
 	if encoded[4] != frameFlagStereo {
 		t.Fatalf("expected stereo flag, got 0x%02x", encoded[4])
 	}
-	if len(encoded) != 25 {
-		t.Fatalf("expected 25 bytes, got %d", len(encoded))
+	if len(encoded) != 29 {
+		t.Fatalf("expected 29 bytes, got %d", len(encoded))
 	}
 
 	decoded, err := DecodeAudioFrameWire(encoded)
@@ -39,6 +40,9 @@ func TestFrameWireNonFinalRoundtrip(t *testing.T) {
 	if decoded.FrameNumber != 7 {
 		t.Fatalf("expected frame 7, got %d", decoded.FrameNumber)
 	}
+	if decoded.FrameSeq != 0xDEADBEEF {
+		t.Fatalf("expected frame_seq 0xDEADBEEF, got 0x%08x", decoded.FrameSeq)
+	}
 	if decoded.Channels != 2 {
 		t.Fatalf("expected 2 channels, got %d", decoded.Channels)
 	}
@@ -52,6 +56,7 @@ func TestFrameWireFinalRoundtrip(t *testing.T) {
 		IntervalIndex: 10,
 		StreamID:      0,
 		FrameNumber:   399,
+		FrameSeq:      12345,
 		Channels:      1,
 		OpusData:      []byte{0xAB},
 		IsFinal:       true,
@@ -63,8 +68,8 @@ func TestFrameWireFinalRoundtrip(t *testing.T) {
 	}
 
 	encoded := EncodeAudioFrameWire(frame)
-	if len(encoded) != 50 {
-		t.Fatalf("expected 50 bytes, got %d", len(encoded))
+	if len(encoded) != 54 {
+		t.Fatalf("expected 54 bytes, got %d", len(encoded))
 	}
 
 	decoded, err := DecodeAudioFrameWire(encoded)
@@ -73,6 +78,9 @@ func TestFrameWireFinalRoundtrip(t *testing.T) {
 	}
 	if decoded.IntervalIndex != 10 || decoded.FrameNumber != 399 {
 		t.Fatal("field mismatch")
+	}
+	if decoded.FrameSeq != 12345 {
+		t.Fatalf("expected frame_seq 12345, got %d", decoded.FrameSeq)
 	}
 	if !decoded.IsFinal {
 		t.Fatal("should be final")
@@ -104,7 +112,7 @@ func TestFrameWireRejectsTruncated(t *testing.T) {
 
 func TestPeekWaifHeaderNonFinal(t *testing.T) {
 	frame := &AudioFrame{
-		IntervalIndex: 42, StreamID: 3, FrameNumber: 7,
+		IntervalIndex: 42, StreamID: 3, FrameNumber: 7, FrameSeq: 999,
 		Channels: 2, OpusData: []byte{0xDE, 0xAD}, IsFinal: false,
 	}
 	encoded := EncodeAudioFrameWire(frame)
@@ -115,11 +123,14 @@ func TestPeekWaifHeaderNonFinal(t *testing.T) {
 	if peek.IntervalIndex != 42 || peek.FrameNumber != 7 || peek.IsFinal {
 		t.Fatal("peek mismatch")
 	}
+	if peek.FrameSeq != 999 {
+		t.Fatalf("expected frame_seq 999, got %d", peek.FrameSeq)
+	}
 }
 
 func TestPeekWaifHeaderFinal(t *testing.T) {
 	frame := &AudioFrame{
-		IntervalIndex: 10, StreamID: 0, FrameNumber: 49,
+		IntervalIndex: 10, StreamID: 0, FrameNumber: 49, FrameSeq: 500,
 		Channels: 1, OpusData: []byte{0xAB}, IsFinal: true,
 		SampleRate: 48000, TotalFrames: 50, BPM: 120.0, Quantum: 4.0, Bars: 4,
 	}
@@ -149,7 +160,7 @@ func TestPeekWaifHeaderWrongMagic(t *testing.T) {
 
 func TestRewriteWaifIntervalIndexRoundtrip(t *testing.T) {
 	frame := &AudioFrame{
-		IntervalIndex: 5, StreamID: 3, FrameNumber: 7,
+		IntervalIndex: 5, StreamID: 3, FrameNumber: 7, FrameSeq: 42,
 		Channels: 2, OpusData: make([]byte, 100), IsFinal: false,
 	}
 	data := EncodeAudioFrameWire(frame)

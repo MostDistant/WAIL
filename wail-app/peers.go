@@ -8,6 +8,13 @@ import (
 
 const maxSlots = 16
 
+// StreamTrack tracks the sequence number progression for one (peer, stream) pair.
+// NextExpectedSeq is the seq the next incoming frame should have; gaps indicate loss.
+type StreamTrack struct {
+	HasFirst        bool
+	NextExpectedSeq uint32
+}
+
 // PeerState holds all state tracked per remote peer.
 type PeerState struct {
 	DisplayName         *string
@@ -19,10 +26,11 @@ type PeerState struct {
 	AudioRecvCount      uint64
 	AudioRecvPrev       uint64
 	RemoteIntervalsSent uint64
-	TotalFramesExpected uint64
 	TotalFramesReceived uint64
-	IntervalFramesExpected map[int64]uint64
-	LateFrames          uint64
+	StreamTracks        map[uint16]*StreamTrack
+	PacketsLost         uint64
+	LossEvents          uint64
+	ReorderEvents       uint64
 	PrevStatus          string
 	AddedAt             time.Time
 	HelloRetrySent      bool
@@ -33,12 +41,12 @@ type PeerState struct {
 func NewPeerState(displayName *string) *PeerState {
 	now := time.Now()
 	return &PeerState{
-		DisplayName:            displayName,
-		Slots:                  make(map[uint16]int),
-		LastSeen:               now,
-		AddedAt:                now,
-		IntervalFramesExpected: make(map[int64]uint64),
-		StreamNames:            make(map[uint16]string),
+		DisplayName:  displayName,
+		Slots:        make(map[uint16]int),
+		LastSeen:     now,
+		AddedAt:      now,
+		StreamTracks: make(map[uint16]*StreamTrack),
+		StreamNames:  make(map[uint16]string),
 	}
 }
 

@@ -19,7 +19,7 @@ use anyhow::Result;
 /// ```
 ///
 const FRAME_MAGIC: &[u8; 4] = b"WAIF";
-const FRAME_HEADER_SIZE: usize = 21; // 4+1+2+8+4+2
+const FRAME_HEADER_SIZE: usize = 25; // 4+1+2+8+4+4+2
 const FRAME_FINAL_EXTRA: usize = 28; // 4+4+8+8+4
 
 const FRAME_FLAG_STEREO: u8 = 0x01;
@@ -38,6 +38,7 @@ const FRAME_FLAG_FINAL: u8 = 0x02;
 /// [2 bytes] stream_id: u16
 /// [8 bytes] interval_index: i64
 /// [4 bytes] frame_number: u32  (0-indexed within interval)
+/// [4 bytes] frame_seq: u32     (monotonic per-stream across intervals)
 /// [2 bytes] opus_len: u16
 /// [N bytes] opus_data
 ///
@@ -69,6 +70,7 @@ impl AudioFrameWire {
         buf.extend_from_slice(&frame.stream_id.to_le_bytes());
         buf.extend_from_slice(&frame.interval_index.to_le_bytes());
         buf.extend_from_slice(&frame.frame_number.to_le_bytes());
+        buf.extend_from_slice(&frame.frame_seq.to_le_bytes());
         buf.extend_from_slice(&(frame.opus_data.len() as u16).to_le_bytes());
         buf.extend_from_slice(&frame.opus_data);
 
@@ -102,7 +104,8 @@ impl AudioFrameWire {
         let stream_id = u16::from_le_bytes(data[5..7].try_into()?);
         let interval_index = i64::from_le_bytes(data[7..15].try_into()?);
         let frame_number = u32::from_le_bytes(data[15..19].try_into()?);
-        let opus_len = u16::from_le_bytes(data[19..21].try_into()?) as usize;
+        let frame_seq = u32::from_le_bytes(data[19..23].try_into()?);
+        let opus_len = u16::from_le_bytes(data[23..25].try_into()?) as usize;
 
         if data.len() < FRAME_HEADER_SIZE + opus_len {
             anyhow::bail!(
@@ -136,6 +139,7 @@ impl AudioFrameWire {
             interval_index,
             stream_id,
             frame_number,
+            frame_seq,
             channels,
             opus_data,
             is_final,
@@ -154,6 +158,7 @@ pub struct WaifHeaderPeek {
     pub interval_index: i64,
     pub stream_id: u16,
     pub frame_number: u32,
+    pub frame_seq: u32,
     pub is_final: bool,
     /// Only valid when `is_final` is true.
     pub total_frames: u32,
@@ -170,8 +175,9 @@ pub fn peek_waif_header(data: &[u8]) -> Option<WaifHeaderPeek> {
     let stream_id = u16::from_le_bytes(data[5..7].try_into().ok()?);
     let interval_index = i64::from_le_bytes(data[7..15].try_into().ok()?);
     let frame_number = u32::from_le_bytes(data[15..19].try_into().ok()?);
+    let frame_seq = u32::from_le_bytes(data[19..23].try_into().ok()?);
     let total_frames = if is_final {
-        let opus_len = u16::from_le_bytes(data[19..21].try_into().ok()?) as usize;
+        let opus_len = u16::from_le_bytes(data[23..25].try_into().ok()?) as usize;
         let meta_start = FRAME_HEADER_SIZE + opus_len;
         if data.len() < meta_start + FRAME_FINAL_EXTRA {
             return None;
@@ -184,6 +190,7 @@ pub fn peek_waif_header(data: &[u8]) -> Option<WaifHeaderPeek> {
         interval_index,
         stream_id,
         frame_number,
+        frame_seq,
         is_final,
         total_frames,
     })
@@ -212,6 +219,7 @@ mod tests {
             interval_index: 42,
             stream_id: 3,
             frame_number: 7,
+            frame_seq: 0xDEADBEEF,
             channels: 2,
             opus_data: vec![0xDE, 0xAD, 0xBE, 0xEF],
             is_final: false,
@@ -225,13 +233,14 @@ mod tests {
         let encoded = AudioFrameWire::encode(&frame);
         assert_eq!(&encoded[0..4], b"WAIF");
         assert_eq!(encoded[4], FRAME_FLAG_STEREO); // stereo, not final
-        // Total: 21 header + 4 opus = 25 bytes
-        assert_eq!(encoded.len(), 25);
+        // Total: 25 header + 4 opus = 29 bytes
+        assert_eq!(encoded.len(), 29);
 
         let decoded = AudioFrameWire::decode(&encoded).unwrap();
         assert_eq!(decoded.interval_index, 42);
         assert_eq!(decoded.stream_id, 3);
         assert_eq!(decoded.frame_number, 7);
+        assert_eq!(decoded.frame_seq, 0xDEADBEEF);
         assert_eq!(decoded.channels, 2);
         assert_eq!(decoded.opus_data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
         assert!(!decoded.is_final);
@@ -243,6 +252,7 @@ mod tests {
             interval_index: 10,
             stream_id: 0,
             frame_number: 399,
+            frame_seq: 1_000_000,
             channels: 1,
             opus_data: vec![0xAB],
             is_final: true,
@@ -256,12 +266,13 @@ mod tests {
         let encoded = AudioFrameWire::encode(&frame);
         assert_eq!(&encoded[0..4], b"WAIF");
         assert_eq!(encoded[4], FRAME_FLAG_FINAL); // mono + final
-        // Total: 21 header + 1 opus + 28 final metadata = 50
-        assert_eq!(encoded.len(), 50);
+        // Total: 25 header + 1 opus + 28 final metadata = 54
+        assert_eq!(encoded.len(), 54);
 
         let decoded = AudioFrameWire::decode(&encoded).unwrap();
         assert_eq!(decoded.interval_index, 10);
         assert_eq!(decoded.frame_number, 399);
+        assert_eq!(decoded.frame_seq, 1_000_000);
         assert_eq!(decoded.channels, 1);
         assert!(decoded.is_final);
         assert_eq!(decoded.sample_rate, 48000);
@@ -289,6 +300,7 @@ mod tests {
             interval_index: 0,
             stream_id: 0,
             frame_number: 0,
+            frame_seq: 0,
             channels: 1,
             opus_data: vec![0xAB],
             is_final: true,
@@ -313,6 +325,7 @@ mod tests {
             interval_index: 42,
             stream_id: 3,
             frame_number: 7,
+            frame_seq: 123,
             channels: 2,
             opus_data: vec![0xDE, 0xAD],
             is_final: false,
@@ -326,6 +339,7 @@ mod tests {
         let peek = peek_waif_header(&encoded).unwrap();
         assert_eq!(peek.interval_index, 42);
         assert_eq!(peek.frame_number, 7);
+        assert_eq!(peek.frame_seq, 123);
         assert!(!peek.is_final);
         assert_eq!(peek.total_frames, 0);
     }
@@ -336,6 +350,7 @@ mod tests {
             interval_index: 10,
             stream_id: 0,
             frame_number: 49,
+            frame_seq: 999,
             channels: 1,
             opus_data: vec![0xAB],
             is_final: true,
@@ -349,6 +364,7 @@ mod tests {
         let peek = peek_waif_header(&encoded).unwrap();
         assert_eq!(peek.interval_index, 10);
         assert_eq!(peek.frame_number, 49);
+        assert_eq!(peek.frame_seq, 999);
         assert!(peek.is_final);
         assert_eq!(peek.total_frames, 50);
     }
@@ -371,6 +387,7 @@ mod tests {
             interval_index: 5,
             stream_id: 3,
             frame_number: 7,
+            frame_seq: 42,
             channels: 2,
             opus_data: vec![0xAA; 100],
             is_final: false,
@@ -421,6 +438,7 @@ mod tests {
             interval_index: 5,
             stream_id: 1,
             frame_number: 3,
+            frame_seq: 1001,
             channels: 2,
             opus_data: vec![],
             is_final: false,
@@ -432,13 +450,14 @@ mod tests {
         };
 
         let encoded = AudioFrameWire::encode(&frame);
-        // Header only, no opus bytes: 21 bytes
+        // Header only, no opus bytes: 25 bytes
         assert_eq!(encoded.len(), FRAME_HEADER_SIZE);
 
         let decoded = AudioFrameWire::decode(&encoded).unwrap();
         assert_eq!(decoded.interval_index, 5);
         assert_eq!(decoded.stream_id, 1);
         assert_eq!(decoded.frame_number, 3);
+        assert_eq!(decoded.frame_seq, 1001);
         assert_eq!(decoded.channels, 2);
         assert!(decoded.opus_data.is_empty());
         assert!(!decoded.is_final);

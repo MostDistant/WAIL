@@ -9,7 +9,6 @@ import (
 	"math"
 	"net"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -168,10 +167,6 @@ func sessionLoop(
 	localSendStreams := make(map[int]uint16) // connID → streamIndex
 	localSendActive := make(map[uint16]bool)
 	loggedFirstFrameSent := false
-
-	// Debug frame tracking (per peer:stream, reset per Link interval)
-	debugFrameCounters := make(map[string]uint32)
-	var debugLastInterval int64 = -1
 
 	// Test tone state
 	var testToneBoundaryCh chan IntervalBoundaryInfo
@@ -591,57 +586,23 @@ func sessionLoop(
 				peers.AssignSlot(from, streamID)
 			}
 
-			// Track frame metrics
+			// Track frame metrics and detect packet loss via sequence numbers.
 			if header := PeekWaifHeader(data); header != nil {
-				var dn *string
-				var streamName *string
+				var loss *LossEvent
+				var displayName string
 				peers.WithPeer(from, func(p *PeerState) {
-					p.TotalFramesReceived++
-					var intervalExpected uint64
-					if header.IsFinal {
-						intervalExpected = uint64(header.TotalFrames)
-					} else {
-						intervalExpected = uint64(header.FrameNumber) + 1
-					}
-					prev := p.IntervalFramesExpected[header.IntervalIndex]
-					if intervalExpected > prev {
-						p.TotalFramesExpected += intervalExpected - prev
-						p.IntervalFramesExpected[header.IntervalIndex] = intervalExpected
-					}
-					if header.IsFinal {
-						delete(p.IntervalFramesExpected, header.IntervalIndex)
-					}
-					if lastIntervalIndex != nil && header.IntervalIndex < *lastIntervalIndex-1 {
-						p.LateFrames++
-					}
-					dn = p.DisplayName
-					if n, ok := p.StreamNames[header.StreamID]; ok {
-						streamName = &n
+					loss = recordFrame(p, header)
+					if p.DisplayName != nil {
+						displayName = *p.DisplayName
 					}
 				})
-				var arrivalOffsetMs float64
-				if lastBoundaryTime != nil {
-					arrivalOffsetMs = float64(time.Since(*lastBoundaryTime).Milliseconds())
-				}
-				// Debug: use receiver's Link-aligned interval + own frame counter
-				// (sender's raw interval_index/frame_number may not match Link)
-				if lastIntervalIndex != nil {
-					if *lastIntervalIndex != debugLastInterval {
-						for k := range debugFrameCounters {
-							delete(debugFrameCounters, k)
-						}
-						debugLastInterval = *lastIntervalIndex
+				if loss != nil {
+					shortID := from
+					if len(shortID) > 8 {
+						shortID = shortID[:8]
 					}
-					counterKey := from + ":" + strconv.Itoa(int(header.StreamID))
-					debugFrameNum := debugFrameCounters[counterKey]
-					debugFrameCounters[counterKey] = debugFrameNum + 1
-
-					emitter.Emit("debug:interval-frame", DebugIntervalFrame{
-						PeerID: from, DisplayName: dn, StreamIndex: header.StreamID,
-						StreamName: streamName, IntervalIndex: *lastIntervalIndex,
-						FrameNumber: debugFrameNum, TotalFrames: nil,
-						IsFinal: false, ArrivalOffsetMs: arrivalOffsetMs,
-					})
+					logWarn("packet_loss peer=%s name=%q stream=%d lost=%d expected_seq=%d got_seq=%d interval=%d",
+						shortID, displayName, loss.StreamID, loss.Lost, loss.ExpectedSeq, loss.GotSeq, loss.IntervalIdx)
 				}
 			}
 
@@ -716,7 +677,6 @@ func sessionLoop(
 			case "StateUpdate":
 				mesh.Broadcast(NewStateSnapshot(ev.BPM, ev.Beat, ev.Phase, ev.Quantum, ev.TimestampUs))
 				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh, wavSenderBoundaryCh)
-				emitter.Emit("debug:link-tick", LinkTickEvent{BPM: ev.BPM, Beat: ev.Beat, Phase: ev.Phase})
 			}
 
 		// --- Ping timer ---
@@ -871,18 +831,18 @@ func sessionLoop(
 			perPeer := make(map[string]PeerFrameReport)
 			networkInfos := make([]PeerNetworkInfo, 0, len(connected))
 			for _, p := range connected {
-				var fe, fr, lf uint64
-				var audioRecv uint64
+				var fr, lost, lossEvents, reorderEvents, audioRecv uint64
 				peers.WithPeer(p, func(ps *PeerState) {
-					fe = ps.TotalFramesExpected
 					fr = ps.TotalFramesReceived
-					lf = ps.LateFrames
+					lost = ps.PacketsLost
+					lossEvents = ps.LossEvents
+					reorderEvents = ps.ReorderEvents
 					audioRecv = ps.AudioRecvCount
 				})
 				perPeer[p] = PeerFrameReport{
-					FramesExpected: fe, FramesReceived: fr,
+					FramesExpected: fr + lost, FramesReceived: fr,
 					RTTUs: clock.RTTUs(p), JitterUs: clock.JitterUs(p),
-					LateFrames: lf,
+					LateFrames: reorderEvents,
 				}
 				var dn *string
 				var rttMs *float64
@@ -896,15 +856,11 @@ func sessionLoop(
 					}
 				}
 				status := peers.DeriveStatus(p)
-				var framePct float64
-				if fe > 0 {
-					framePct = float64(fr) / float64(fe) * 100.0
-				}
 				networkInfos = append(networkInfos, PeerNetworkInfo{
 					PeerID: p, DisplayName: dn, Slot: slot,
 					ICEState: status, DCSyncState: status, DCAudioState: status,
 					RTTMs: rttMs, AudioRecv: audioRecv,
-					FramesExpected: fe, FramesReceived: fr, FramePct: framePct,
+					FramesReceived: fr, PacketsLost: lost, LossEvents: lossEvents,
 				})
 			}
 			emitter.Emit("peers:network", PeersNetwork{Peers: networkInfos})

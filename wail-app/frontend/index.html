@@ -121,7 +121,6 @@
       <button type="button" class="tab" id="session-tab-chat">Chat</button>
       <button type="button" class="tab" id="session-tab-logs">Logs <span id="log-count" class="log-badge">0</span></button>
       <button type="button" class="tab" id="session-tab-network">Network</button>
-      <button type="button" class="tab" id="session-tab-debug">Debug</button>
     </div>
 
     <!-- Session tab -->
@@ -204,7 +203,7 @@
             <th>Audio DC</th>
             <th>RTT</th>
             <th>Recv</th>
-            <th>Health</th>
+            <th>Lost</th>
           </tr>
         </thead>
         <tbody id="network-table-body">
@@ -216,12 +215,6 @@
     <!-- Logs tab -->
     <div id="session-tab-logs-content" style="display:none">
       <div id="log-list" class="log-list"></div>
-    </div>
-
-    <!-- Debug tab -->
-    <div id="session-tab-debug-content" style="display:none">
-      <div id="debug-link-info" class="debug-link-info"></div>
-      <canvas id="debug-interval-canvas"></canvas>
     </div>
 
     <button type="button" id="disconnect-btn">Disconnect</button>

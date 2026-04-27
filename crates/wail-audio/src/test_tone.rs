@@ -73,6 +73,9 @@ pub fn encode_test_interval(
             interval_index: index,
             stream_id: 0,
             frame_number: frame_num,
+            // Synthesize a seq from (interval_index, frame_num) so frames across
+            // intervals stay monotonic even though this helper is stateless.
+            frame_seq: (index as u32).wrapping_mul(total_frames).wrapping_add(frame_num),
             channels: 2,
             opus_data,
             is_final,

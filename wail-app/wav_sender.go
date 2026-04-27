@@ -177,6 +177,7 @@ func WavSenderTask(
 	var currentQuantum float64 = 4.0
 	var frameNumber uint32
 	var totalFrames uint32
+	var frameSeq uint32
 	var intervalStart *time.Time
 
 	opusBuf := make([]byte, 4096)
@@ -192,7 +193,8 @@ func WavSenderTask(
 				frame := extractFrame(samples, &readPos, samplesPerFrame)
 				if opusData, n, err := encodeFrame(enc, frame, opusBuf); err == nil {
 					sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
-						totalFrames-1, opusData[:n], true, currentBPM, currentQuantum, currentBars, totalFrames)
+						totalFrames-1, frameSeq, opusData[:n], true, currentBPM, currentQuantum, currentBars, totalFrames)
+					frameSeq++
 				} else {
 					log.Printf("[wav-sender] Encode failed on boundary flush: %v", err)
 				}
@@ -237,8 +239,9 @@ func WavSenderTask(
 
 		isFinal := frameNumber == totalFrames-1
 		sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
-			frameNumber, opusData[:n], isFinal, currentBPM, currentQuantum, currentBars, totalFrames)
+			frameNumber, frameSeq, opusData[:n], isFinal, currentBPM, currentQuantum, currentBars, totalFrames)
 		frameNumber++
+		frameSeq++
 	}
 }
 

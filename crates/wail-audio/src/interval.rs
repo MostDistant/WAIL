@@ -32,6 +32,9 @@ pub struct AudioFrame {
     pub interval_index: i64,
     pub stream_id: u16,
     pub frame_number: u32,
+    /// Monotonic per-(peer, stream) sequence number spanning intervals.
+    /// Used by receivers to detect packet loss as gaps in the sequence.
+    pub frame_seq: u32,
     pub channels: u16,
     pub opus_data: Vec<u8>,
     pub is_final: bool,

@@ -79,19 +79,17 @@ type StatusUpdate struct {
 }
 
 type PeerNetworkInfo struct {
-	PeerID              string   `json:"peer_id"`
-	DisplayName         *string  `json:"display_name,omitempty"`
-	Slot                *uint32  `json:"slot,omitempty"`
-	ICEState            string   `json:"ice_state"`
-	DCSyncState         string   `json:"dc_sync_state"`
-	DCAudioState        string   `json:"dc_audio_state"`
-	RTTMs               *float64 `json:"rtt_ms,omitempty"`
-	AudioRecv           uint64   `json:"audio_recv"`
-	IntervalsSentRemote uint64   `json:"intervals_sent_remote"`
-	IntervalPct         float64  `json:"interval_pct"`
-	FramesExpected      uint64   `json:"frames_expected"`
-	FramesReceived      uint64   `json:"frames_received"`
-	FramePct            float64  `json:"frame_pct"`
+	PeerID         string   `json:"peer_id"`
+	DisplayName    *string  `json:"display_name,omitempty"`
+	Slot           *uint32  `json:"slot,omitempty"`
+	ICEState       string   `json:"ice_state"`
+	DCSyncState    string   `json:"dc_sync_state"`
+	DCAudioState   string   `json:"dc_audio_state"`
+	RTTMs          *float64 `json:"rtt_ms,omitempty"`
+	AudioRecv      uint64   `json:"audio_recv"`
+	FramesReceived uint64   `json:"frames_received"`
+	PacketsLost    uint64   `json:"packets_lost"`
+	LossEvents     uint64   `json:"loss_events"`
 }
 
 type PeersNetwork struct {
@@ -105,19 +103,6 @@ type LogEntry struct {
 	PeerName *string `json:"peer_name,omitempty"`
 }
 
-type DebugIntervalFrame struct {
-	PeerID          string  `json:"peer_id"`
-	DisplayName     *string `json:"display_name,omitempty"`
-	StreamIndex     uint16  `json:"stream_index"`
-	StreamName      *string `json:"stream_name,omitempty"`
-	IntervalIndex   int64   `json:"interval_index"`
-	FrameNumber     uint32  `json:"frame_number"`
-	TotalFrames     *uint32 `json:"total_frames,omitempty"`
-	IsFinal         bool    `json:"is_final"`
-	ArrivalOffsetMs float64 `json:"arrival_offset_ms"`
-	IsLocal         bool    `json:"is_local"`
-}
-
 type ChatMessageEvent struct {
 	SenderName string `json:"sender_name"`
 	IsOwn      bool   `json:"is_own"`
@@ -126,10 +111,4 @@ type ChatMessageEvent struct {
 
 type SessionStale struct {
 	Attempts uint32 `json:"attempts"`
-}
-
-type LinkTickEvent struct {
-	BPM   float64 `json:"bpm"`
-	Beat  float64 `json:"beat"`
-	Phase float64 `json:"phase"`
 }

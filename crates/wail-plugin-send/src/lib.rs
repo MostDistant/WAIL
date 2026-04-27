@@ -30,6 +30,7 @@ struct RawFrame {
     interval_index: i64,
     stream_id: u16,
     frame_number: u32,
+    frame_seq: u32,
     channels: u16,
     is_final: bool,
     // Metadata for the final frame:
@@ -68,6 +69,9 @@ pub struct WailSendPlugin {
     streaming_interval_index: Option<i64>,
     /// Current frame number within the interval (resets at boundary)
     streaming_frame_number: u32,
+    /// Monotonic sequence number assigned to every frame emitted by this stream.
+    /// Never resets at interval boundaries — used by receivers for packet-loss detection.
+    streaming_frame_seq: u32,
     /// Opus frame size in samples per channel (set during initialize)
     opus_frame_size: usize,
     /// Sender for returning cleared interval buffers to IntervalRing (zero-alloc recycling)
@@ -91,6 +95,7 @@ impl Default for WailSendPlugin {
             frame_buffer: Vec::new(),
             streaming_interval_index: None,
             streaming_frame_number: 0,
+            streaming_frame_seq: 0,
             opus_frame_size: 960, // 20ms at 48kHz, updated in initialize
             buf_return_tx: None,
             was_playing: None,
@@ -389,6 +394,7 @@ impl Plugin for WailSendPlugin {
                                     interval_index: prev_idx,
                                     stream_id,
                                     frame_number: self.streaming_frame_number,
+                                    frame_seq: self.streaming_frame_seq,
                                     channels: ch,
                                     is_final: true,
                                     sample_rate: sr,
@@ -399,6 +405,7 @@ impl Plugin for WailSendPlugin {
                                 }).is_err() {
                                     nih_warn!("Send plugin: frame channel full at boundary — dropping audio frame (capacity=512)");
                                 }
+                                self.streaming_frame_seq = self.streaming_frame_seq.wrapping_add(1);
                                 self.streaming_frame_number = 0;
                             }
                         }
@@ -416,6 +423,7 @@ impl Plugin for WailSendPlugin {
                                 interval_index: interval_idx,
                                 stream_id,
                                 frame_number: self.streaming_frame_number,
+                                frame_seq: self.streaming_frame_seq,
                                 channels: ch,
                                 is_final: false,
                                 sample_rate: sr,
@@ -426,6 +434,7 @@ impl Plugin for WailSendPlugin {
                             }).is_err() {
                                 nih_warn!("Send plugin: frame channel full — dropping audio frame (capacity=512)");
                             }
+                            self.streaming_frame_seq = self.streaming_frame_seq.wrapping_add(1);
                             self.streaming_frame_number += 1;
                         }
                     }
@@ -506,6 +515,7 @@ fn ipc_thread_send(
                                     interval_index: raw_frame.interval_index,
                                     stream_id: raw_frame.stream_id,
                                     frame_number: raw_frame.frame_number,
+                                    frame_seq: raw_frame.frame_seq,
                                     channels: raw_frame.channels,
                                     opus_data,
                                     is_final: raw_frame.is_final,
@@ -529,6 +539,7 @@ fn ipc_thread_send(
                                     interval_index: raw_frame.interval_index,
                                     stream_id: raw_frame.stream_id,
                                     frame_number: raw_frame.frame_number,
+                                    frame_seq: raw_frame.frame_seq,
                                     channels: raw_frame.channels,
                                     opus_data: vec![],
                                     is_final: raw_frame.is_final,

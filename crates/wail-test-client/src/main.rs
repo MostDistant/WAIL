@@ -275,6 +275,7 @@ async fn main() -> Result<()> {
     let mut interval_tracker = IntervalTracker::new(args.bars, args.quantum);
     let mut prev_bar: Option<u32> = None;
     let mut frame_in_interval: u32 = 0;
+    let mut frame_seq_counter: u32 = 0;
 
     // --- 20ms frame timer ---
     let mut frame_timer = tokio::time::interval(Duration::from_millis(FRAME_DURATION_MS));
@@ -551,6 +552,7 @@ async fn main() -> Result<()> {
                         interval_index,
                         stream_id: 0,
                         frame_number: frame_in_interval,
+                        frame_seq: frame_seq_counter,
                         channels: CHANNELS,
                         opus_data,
                         is_final,
@@ -567,6 +569,7 @@ async fn main() -> Result<()> {
                     }
 
                     frame_in_interval += 1;
+                    frame_seq_counter = frame_seq_counter.wrapping_add(1);
                 }
 
                 // Print per-peer health and send metrics report every 5 seconds.

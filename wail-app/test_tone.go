@@ -82,6 +82,7 @@ func TestToneTask(
 	var currentQuantum float64 = 4.0
 	var frameNumber uint32
 	var totalFrames uint32
+	var frameSeq uint32
 	var intervalStart *time.Time
 
 	opusBuf := make([]byte, 4096)
@@ -97,7 +98,8 @@ func TestToneTask(
 				samples := GenerateSineFrame(freq, &phase, toneSampleRate, toneChannels)
 				if opusData, n, err := encodeFrame(enc, samples, opusBuf); err == nil {
 					sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
-						totalFrames-1, opusData[:n], true, currentBPM, currentQuantum, currentBars, totalFrames)
+						totalFrames-1, frameSeq, opusData[:n], true, currentBPM, currentQuantum, currentBars, totalFrames)
+					frameSeq++
 				}
 			}
 			currentIdx = boundary.Index
@@ -141,8 +143,9 @@ func TestToneTask(
 
 		isFinal := frameNumber == totalFrames-1
 		sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
-			frameNumber, opusData[:n], isFinal, currentBPM, currentQuantum, currentBars, totalFrames)
+			frameNumber, frameSeq, opusData[:n], isFinal, currentBPM, currentQuantum, currentBars, totalFrames)
 		frameNumber++
+		frameSeq++
 	}
 }
 
@@ -162,12 +165,13 @@ func encodeFrame(enc *opus.Encoder, samples []int16, buf []byte) ([]byte, int, e
 }
 
 func sendWAIFFrame(ch chan<- ipcFrame, connID int, streamIndex uint16, intervalIdx int64,
-	frameNum uint32, opusData []byte, isFinal bool, bpm, quantum float64, bars, totalFrames uint32) {
+	frameNum uint32, frameSeq uint32, opusData []byte, isFinal bool, bpm, quantum float64, bars, totalFrames uint32) {
 
 	frame := &AudioFrame{
 		IntervalIndex: intervalIdx,
 		StreamID:      streamIndex,
 		FrameNumber:   frameNum,
+		FrameSeq:      frameSeq,
 		Channels:      toneChannels,
 		OpusData:      opusData,
 		IsFinal:       isFinal,

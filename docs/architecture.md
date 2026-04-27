@@ -116,7 +116,7 @@ Slot assignment uses **affinity**: when a peer disconnects, their `SlotTable` en
 DAW Track A
   → WAIL Send plugin process() — IntervalRing records input samples
   → Opus encode each 20ms frame (960 samples)
-  → AudioFrameWire.encode() — WAIF streaming frame (21-byte header + Opus data)
+  → AudioFrameWire.encode() — WAIF streaming frame (25-byte header + Opus data)
   → IPC TCP frame (length-prefixed, tag 0x05) to WAIL App A
   → WebSocket binary frame to signaling server → relayed to Peer B
   → WAIL App B receives
@@ -149,6 +149,7 @@ Streaming format: one WAIF frame per 20ms Opus packet. The final frame of an int
 [2 bytes]  stream_id: u16 LE
 [8 bytes]  interval_index: i64 LE
 [4 bytes]  frame_number: u32 LE (0-indexed within interval)
+[4 bytes]  frame_seq: u32 LE (monotonic per (sender, stream_id); used for loss detection)
 [2 bytes]  opus_len: u16 LE
 [N bytes]  opus_data
 

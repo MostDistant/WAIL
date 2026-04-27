@@ -10,7 +10,7 @@ import (
 var frameMagic = [4]byte{'W', 'A', 'I', 'F'}
 
 const (
-	frameHeaderSize = 21 // 4 magic + 1 flags + 2 stream_id + 8 interval_index + 4 frame_number + 2 opus_len
+	frameHeaderSize = 25 // 4 magic + 1 flags + 2 stream_id + 8 interval_index + 4 frame_number + 4 frame_seq + 2 opus_len
 	frameFinalExtra = 28 // 4 sample_rate + 4 total_frames + 8 bpm + 8 quantum + 4 bars
 
 	frameFlagStereo byte = 0x01
@@ -22,8 +22,11 @@ type WaifHeaderPeek struct {
 	IntervalIndex int64
 	StreamID      uint16
 	FrameNumber   uint32
-	IsFinal       bool
-	TotalFrames   uint32 // only valid when IsFinal is true
+	// Monotonic per-(sender, stream) sequence number. Gaps indicate packet loss
+	// on the relay path.
+	FrameSeq    uint32
+	IsFinal     bool
+	TotalFrames uint32 // only valid when IsFinal is true
 }
 
 // PeekWaifHeader extracts header fields from a WAIF frame without full decode.
@@ -40,10 +43,11 @@ func PeekWaifHeader(data []byte) *WaifHeaderPeek {
 	streamID := binary.LittleEndian.Uint16(data[5:7])
 	intervalIndex := int64(binary.LittleEndian.Uint64(data[7:15]))
 	frameNumber := binary.LittleEndian.Uint32(data[15:19])
+	frameSeq := binary.LittleEndian.Uint32(data[19:23])
 
 	var totalFrames uint32
 	if isFinal {
-		opusLen := int(binary.LittleEndian.Uint16(data[19:21]))
+		opusLen := int(binary.LittleEndian.Uint16(data[23:25]))
 		metaStart := frameHeaderSize + opusLen
 		if len(data) < metaStart+frameFinalExtra {
 			return nil
@@ -55,6 +59,7 @@ func PeekWaifHeader(data []byte) *WaifHeaderPeek {
 		IntervalIndex: intervalIndex,
 		StreamID:      streamID,
 		FrameNumber:   frameNumber,
+		FrameSeq:      frameSeq,
 		IsFinal:       isFinal,
 		TotalFrames:   totalFrames,
 	}
@@ -77,6 +82,7 @@ type AudioFrame struct {
 	IntervalIndex int64
 	StreamID      uint16
 	FrameNumber   uint32
+	FrameSeq      uint32
 	Channels      uint16
 	OpusData      []byte
 	IsFinal       bool
@@ -109,8 +115,9 @@ func EncodeAudioFrameWire(f *AudioFrame) []byte {
 	binary.LittleEndian.PutUint16(buf[5:7], f.StreamID)
 	binary.LittleEndian.PutUint64(buf[7:15], uint64(f.IntervalIndex))
 	binary.LittleEndian.PutUint32(buf[15:19], f.FrameNumber)
-	binary.LittleEndian.PutUint16(buf[19:21], uint16(len(f.OpusData)))
-	copy(buf[21:], f.OpusData)
+	binary.LittleEndian.PutUint32(buf[19:23], f.FrameSeq)
+	binary.LittleEndian.PutUint16(buf[23:25], uint16(len(f.OpusData)))
+	copy(buf[25:], f.OpusData)
 
 	if f.IsFinal {
 		off := frameHeaderSize + len(f.OpusData)
@@ -143,7 +150,8 @@ func DecodeAudioFrameWire(data []byte) (*AudioFrame, error) {
 	streamID := binary.LittleEndian.Uint16(data[5:7])
 	intervalIndex := int64(binary.LittleEndian.Uint64(data[7:15]))
 	frameNumber := binary.LittleEndian.Uint32(data[15:19])
-	opusLen := int(binary.LittleEndian.Uint16(data[19:21]))
+	frameSeq := binary.LittleEndian.Uint32(data[19:23])
+	opusLen := int(binary.LittleEndian.Uint16(data[23:25]))
 
 	if len(data) < frameHeaderSize+opusLen {
 		return nil, fmt.Errorf("WAIF frame truncated: need %d opus bytes, got %d", opusLen, len(data)-frameHeaderSize)
@@ -156,6 +164,7 @@ func DecodeAudioFrameWire(data []byte) (*AudioFrame, error) {
 		IntervalIndex: intervalIndex,
 		StreamID:      streamID,
 		FrameNumber:   frameNumber,
+		FrameSeq:      frameSeq,
 		Channels:      channels,
 		OpusData:      opusData,
 		IsFinal:       isFinal,

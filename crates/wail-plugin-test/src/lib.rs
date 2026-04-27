@@ -325,6 +325,7 @@ pub fn make_test_interval_frame(peer_id: &str, interval_index: i64) -> Vec<u8> {
             interval_index,
             stream_id: 0,
             frame_number: frame_number as u32,
+            frame_seq: (interval_index as u32).wrapping_mul(total_frames as u32).wrapping_add(frame_number as u32),
             channels,
             opus_data: packet,
             is_final,
