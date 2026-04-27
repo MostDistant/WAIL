@@ -85,28 +85,62 @@ jobs:
         run: choco install pkgconfiglite -y
         continue-on-error: true
 
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
+
       - name: Build plugin
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
         run: cargo xtask bundle-plugin
 
-      - name: Build Go app (linkstub)
+      - name: Clone abletonlink-go
+        shell: bash
+        run: git clone --recursive https://github.com/DatanoiseTV/abletonlink-go.git "$RUNNER_TEMP/abletonlink-go"
+
+      - name: Build wail desktop app
+        shell: bash
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: go build -tags linkstub -o NUL .
         working-directory: wail-app
-
-      - name: Collect artifacts
-        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist
-          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
-          Copy-Item target\bundled\wail-plugin-send.clap dist\
-          Copy-Item -Recurse target\bundled\wail-plugin-send.vst3 dist\wail-plugin-send.vst3
-          Copy-Item target\bundled\wail-plugin-recv.clap dist\
-          Copy-Item -Recurse target\bundled\wail-plugin-recv.vst3 dist\wail-plugin-recv.vst3
-          Copy-Item dist\opus.dll dist\wail-plugin-send.vst3\Contents\x86_64-win\
-          Copy-Item dist\opus.dll dist\wail-plugin-recv.vst3\Contents\x86_64-win\
+          REPLACE_PATH="${RUNNER_TEMP//\\//}/abletonlink-go"
+          sed -i "s|^replace github.com/DatanoiseTV/abletonlink-go.*|replace github.com/DatanoiseTV/abletonlink-go => $REPLACE_PATH|" go.mod
+          go build -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail.exe" .
+
+      - name: Stage release artifacts
+        shell: bash
+        run: |
+          mkdir -p dist/lib
+          cp target/bundled/wail-plugin-send.clap dist/lib/
+          cp -r target/bundled/wail-plugin-send.vst3 dist/lib/
+          cp target/bundled/wail-plugin-recv.clap dist/lib/
+          cp -r target/bundled/wail-plugin-recv.vst3 dist/lib/
+          cp /c/vcpkg/installed/x64-windows/bin/opus.dll dist/lib/opus.dll
+          cp dist/lib/opus.dll dist/lib/wail-plugin-send.vst3/Contents/x86_64-win/
+          cp dist/lib/opus.dll dist/lib/wail-plugin-recv.vst3/Contents/x86_64-win/
+          cat > dist/README.txt <<'EOF'
+          WAIL — WAN Audio Interchange for Link
+
+          Run:
+            bin\wail.exe
+
+          On first launch the CLAP/VST3 plugins in lib/ are copied to your
+          system CLAP/VST3 directories (%COMMONPROGRAMFILES%\CLAP and
+          %COMMONPROGRAMFILES%\VST3) so your DAW can find them.
+
+          Note: this binary is unsigned. If Windows SmartScreen blocks
+          launch, click "More info" then "Run anyway".
+
+          Documentation: https://github.com/MostDistant/WAIL
+          EOF
 
       - uses: actions/upload-artifact@v7
         with:
