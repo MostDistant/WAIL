@@ -42,7 +42,9 @@ jobs:
         run: cargo build --workspace
 
       - name: Build Go app (linkstub)
-        run: go build -tags linkstub -o /dev/null .
+        # nolibopusfile suppresses unused stream.go in gopkg.in/hraban/opus.v2,
+        # which would otherwise require libopusfile to be installed.
+        run: go build -tags "linkstub,nolibopusfile" -o /dev/null .
         working-directory: wail-app
 
   build-windows:
@@ -89,7 +91,7 @@ jobs:
       - name: Build Go app (linkstub)
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: go build -tags linkstub -o NUL .
+        run: go build -tags "linkstub,nolibopusfile" -o NUL .
         working-directory: wail-app
 
       - name: Collect artifacts
@@ -149,7 +151,7 @@ jobs:
         run: cargo xtask bundle-plugin
 
       - name: Build Go app (linkstub)
-        run: go build -tags linkstub -o /dev/null .
+        run: go build -tags "linkstub,nolibopusfile" -o /dev/null .
         working-directory: wail-app
 
       - name: Collect artifacts

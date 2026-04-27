@@ -75,11 +75,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-opus-x64-windows-v1
+          key: vcpkg-opus-rtmidi-x64-windows-v1
 
-      - name: Install opus via vcpkg
+      - name: Install opus + rtmidi via vcpkg
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
-        run: vcpkg install opus:x64-windows
+        run: vcpkg install opus:x64-windows rtmidi:x64-windows
 
       - name: Install pkg-config
         run: choco install pkgconfiglite -y
@@ -113,7 +113,7 @@ jobs:
         run: |
           REPLACE_PATH="${RUNNER_TEMP//\\//}/abletonlink-go"
           sed -i "s|^replace github.com/DatanoiseTV/abletonlink-go.*|replace github.com/DatanoiseTV/abletonlink-go => $REPLACE_PATH|" go.mod
-          go build -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail.exe" .
+          go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail.exe" .
 
       - name: Stage release artifacts
         shell: bash
@@ -126,15 +126,19 @@ jobs:
           cp /c/vcpkg/installed/x64-windows/bin/opus.dll dist/lib/opus.dll
           cp dist/lib/opus.dll dist/lib/wail-plugin-send.vst3/Contents/x86_64-win/
           cp dist/lib/opus.dll dist/lib/wail-plugin-recv.vst3/Contents/x86_64-win/
+          # rtmidi.dll is required at runtime by abletonlink-go's CGo bindings.
+          # Drop it next to wail.exe so Windows finds it on the default DLL search path.
+          cp /c/vcpkg/installed/x64-windows/bin/rtmidi.dll dist/bin/rtmidi.dll
           cat > dist/README.txt <<'EOF'
           WAIL — WAN Audio Interchange for Link
 
           Run:
             bin\wail.exe
 
-          On first launch the CLAP/VST3 plugins in lib/ are copied to your
-          system CLAP/VST3 directories (%COMMONPROGRAMFILES%\CLAP and
-          %COMMONPROGRAMFILES%\VST3) so your DAW can find them.
+          On first launch the CLAP/VST3 plugins in lib/ are copied to
+          %LOCALAPPDATA%\Programs\Common\CLAP and
+          %LOCALAPPDATA%\Programs\Common\VST3 so your DAW can find them.
+          (No admin rights required.)
 
           Note: this binary is unsigned. If Windows SmartScreen blocks
           launch, click "More info" then "Run anyway".
@@ -174,6 +178,7 @@ jobs:
           sudo apt-get install -y \
             libssl-dev \
             libopus-dev \
+            librtmidi-dev \
             libgl-dev \
             libx11-xcb-dev \
             libxcb1-dev \
@@ -202,7 +207,7 @@ jobs:
       - name: Build wail desktop app
         run: |
           sed -i "s|^replace github.com/DatanoiseTV/abletonlink-go.*|replace github.com/DatanoiseTV/abletonlink-go => $RUNNER_TEMP/abletonlink-go|" go.mod
-          go build -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail" .
+          go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail" .
         working-directory: wail-app
 
       - name: Stage release artifacts
@@ -216,7 +221,7 @@ jobs:
           WAIL — WAN Audio Interchange for Link
 
           Runtime dependencies (Debian/Ubuntu):
-            sudo apt install libwebkit2gtk-4.1-0 libopus0
+            sudo apt install libwebkit2gtk-4.1-0 libopus0 librtmidi6
 
           Run:
             ./bin/wail
