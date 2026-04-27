@@ -6,8 +6,6 @@ WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across 
 
 Download the latest release from the [Releases page](https://github.com/MostDistant/WAIL/releases).
 
-**macOS** — Open the DMG and drag WAIL to Applications. The WAIL Send and Recv plugins are automatically installed to your plugin directories on first launch.
-
 **macOS (Homebrew, from source)** — Build and install directly from source:
 
 ```sh
@@ -23,9 +21,17 @@ wail-install-plugins
 
 Then rescan plugins in your DAW.
 
-**Windows** — Install via Chocolatey: `choco install wail --source <release-url>`. Use `--params "'/VST3Dir:path /CLAPDir:path'"` for custom plugin directories (defaults to `%CommonProgramFiles%\VST3` and `%CommonProgramFiles%\CLAP`). Uninstalling via `choco uninstall wail` also removes the plugins.
+**Windows** — Download `wail-windows-x64-<version>.zip` from the Releases page, extract it, and run `bin\wail.exe`. The WAIL Send and Recv plugins are auto-installed on first launch into `%LOCALAPPDATA%\Programs\Common\{CLAP,VST3}\` (no admin rights required); rescan plugins in your DAW. The binary is unsigned, so SmartScreen will warn on first launch — click "More info" → "Run anyway".
 
-**Linux** — Install the `.deb` package (`sudo dpkg -i wail_*.deb`) or download the AppImage and make it executable (`chmod +x WAIL_*.AppImage`). The WAIL Send and Recv plugins are automatically installed to `~/.clap/` and `~/.vst3/` on first launch.
+**Linux** — Download `wail-linux-x64-<version>.tar.gz` from the Releases page. Install the runtime dependencies, extract, and run:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-0 libopus0   # Debian/Ubuntu runtime deps
+tar -xzf wail-linux-x64-*.tar.gz
+./wail-*/bin/wail
+```
+
+The WAIL Send and Recv plugins are auto-installed to `~/.clap/` and `~/.vst3/` on first launch.
 
 ## Getting Started
 
