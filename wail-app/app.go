@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -39,13 +38,13 @@ func NewApp(instance int) *App {
 	identity := getOrCreateIdentity(dataDir)
 	streamNames := LoadStreamNames(dataDir)
 
-	// Auto-install plugins (skip on Windows — handled by NSIS installer)
+	// Auto-install plugins from the bundled lib/ dir into the user's CLAP/VST3
+	// directories. Plugins ship inside the release archive, so this gives a
+	// single-download install on every platform.
 	var pluginErrors []string
-	if runtime.GOOS != "windows" {
-		pluginDir := FindPluginDir("")
-		if pluginDir != "" {
-			pluginErrors = InstallPluginsIfMissing(pluginDir)
-		}
+	pluginDir := FindPluginDir("")
+	if pluginDir != "" {
+		pluginErrors = InstallPluginsIfMissing(pluginDir)
 	}
 
 	return &App{

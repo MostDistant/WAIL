@@ -36,11 +36,13 @@ func SystemPluginDir(format string) (string, error) {
 		}
 		return filepath.Join(home, ".vst3"), nil
 	case "windows":
-		commonFiles := os.Getenv("COMMONPROGRAMFILES")
-		if commonFiles == "" {
-			commonFiles = filepath.Join("C:", "Program Files", "Common Files")
+		// Use the per-user "Programs\Common" location so first-launch install
+		// works without Administrator rights. DAWs scan this path by default.
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			localAppData = filepath.Join(home, "AppData", "Local")
 		}
-		return filepath.Join(commonFiles, pluginDirName(format)), nil
+		return filepath.Join(localAppData, "Programs", "Common", pluginDirName(format)), nil
 	default:
 		return "", fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
@@ -89,6 +91,7 @@ func hasPlugins(dir string) bool {
 // Returns a list of errors (empty if all succeeded).
 func InstallPluginsIfMissing(pluginDir string) []string {
 	var errors []string
+	installedClap := false
 	for _, p := range pluginBundles {
 		src := filepath.Join(pluginDir, p.name)
 		if _, err := os.Stat(src); err != nil {
@@ -109,10 +112,34 @@ func InstallPluginsIfMissing(pluginDir string) []string {
 		}
 		if err := copyPath(src, dest); err != nil {
 			errors = append(errors, fmt.Sprintf("%s: copy: %v", p.name, err))
-		} else {
-			log.Printf("[plugin-install] Installed %s to %s", p.name, destDir)
+			continue
+		}
+		log.Printf("[plugin-install] Installed %s to %s", p.name, destDir)
+		if p.format == "clap" {
+			installedClap = true
 		}
 	}
+
+	// On Windows the CLAP plugin is a single .dll that depends on opus.dll.
+	// VST3 bundles already carry opus.dll in their Contents folder, but CLAP
+	// has no bundle layout — drop opus.dll alongside the .clap files so the
+	// DAW's LoadLibraryEx finds it via the altered search path.
+	if runtime.GOOS == "windows" && installedClap {
+		opusSrc := filepath.Join(pluginDir, "opus.dll")
+		if _, err := os.Stat(opusSrc); err == nil {
+			if clapDir, err := SystemPluginDir("clap"); err == nil {
+				opusDest := filepath.Join(clapDir, "opus.dll")
+				if _, err := os.Stat(opusDest); err != nil {
+					if err := copyFile(opusSrc, opusDest); err != nil {
+						errors = append(errors, fmt.Sprintf("opus.dll: copy: %v", err))
+					} else {
+						log.Printf("[plugin-install] Installed opus.dll to %s", clapDir)
+					}
+				}
+			}
+		}
+	}
+
 	return errors
 }
 
