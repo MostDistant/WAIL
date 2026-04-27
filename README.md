@@ -26,7 +26,7 @@ Then rescan plugins in your DAW.
 **Linux** — Download `wail-linux-x64-<version>.tar.gz` from the Releases page. Install the runtime dependencies, extract, and run:
 
 ```sh
-sudo apt install libwebkit2gtk-4.1-0 libopus0   # Debian/Ubuntu runtime deps
+sudo apt install libwebkit2gtk-4.1-0 libopus0 librtmidi6   # Debian/Ubuntu runtime deps
 tar -xzf wail-linux-x64-*.tar.gz
 ./wail-*/bin/wail
 ```
