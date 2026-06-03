@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.5 (2026-06-03)
+
+### Fixes
+
+- ci: patch Ableton Link beta header for MinGW GCC name collision (#336)
+
 ## 2.4.4 (2026-06-03)
 
 ### Fixes
