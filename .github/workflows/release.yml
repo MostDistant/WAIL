@@ -99,6 +99,13 @@ jobs:
       - name: Build plugin
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
+          # audiopus_sys builds a vendored Opus from source via CMake on Windows
+          # (pkg-config is compiled out for the MSVC target). The bundled Opus
+          # declares cmake_minimum_required(<3.5), which CMake 4.x (now on the
+          # windows-latest runner image) refuses. This env var tells CMake to
+          # treat the floor as 3.5 so the legacy project still configures.
+          # Tracked follow-up (link the prebuilt vcpkg Opus instead): #329
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: cargo xtask bundle-plugin
 
       - name: Clone abletonlink-go
