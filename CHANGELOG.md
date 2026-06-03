@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.4 (2026-06-03)
+
+### Fixes
+
+- ci: provision pkg-config via vcpkg pkgconf on Windows (#334)
+
 ## 2.4.3 (2026-06-03)
 
 ### Fixes
