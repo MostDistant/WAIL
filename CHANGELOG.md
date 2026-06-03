@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.2 (2026-06-03)
+
+### Fixes
+
+- ci: set CMAKE_POLICY_VERSION_MINIMUM for Windows plugin build (#330)
+
 ## 2.4.1 (2026-04-27)
 
 ### Fixes
