@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.3 (2026-06-03)
+
+### Fixes
+
+- ci: pin Windows builds to windows-2022 for Link-compatible toolchain (#332)
+
 ## 2.4.2 (2026-06-03)
 
 ### Fixes
