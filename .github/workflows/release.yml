@@ -132,6 +132,20 @@ jobs:
         shell: bash
         run: git clone --recursive https://github.com/DatanoiseTV/abletonlink-go.git "$RUNNER_TEMP/abletonlink-go"
 
+      - name: Patch Link beta header for MinGW GCC
+        shell: bash
+        # The Ableton Link 4.0 beta vendored by abletonlink-go has a name
+        # collision in link_audio/Channels.hpp: the SendHandler constructor
+        # parameter `endpoint` shadows the member function `endpoint()`. By the
+        # standard the parameter wins inside the initializer (Linux GCC 11 gets
+        # this right), but the MinGW GCC on the Windows runners mis-resolves it
+        # to the member function and fails with "unresolved overloaded function
+        # type". Rename the parameter to disambiguate. See #329.
+        run: |
+          f="$RUNNER_TEMP/abletonlink-go/vendor/link/include/ableton/link_audio/Channels.hpp"
+          sed -i 's/SendHandler(discovery::UdpEndpoint endpoint,/SendHandler(discovery::UdpEndpoint ep,/; s/: mEndpoint(endpoint)/: mEndpoint(ep)/' "$f"
+          grep -n "SendHandler(discovery::UdpEndpoint ep," "$f" || { echo "patch did not apply"; exit 1; }
+
       - name: Build wail desktop app
         shell: bash
         env:
