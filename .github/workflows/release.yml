@@ -82,15 +82,32 @@ jobs:
           path: C:\vcpkg\installed
           # Bump the suffix whenever the package list below changes, otherwise a
           # stale cache is restored and the new packages are never installed.
-          key: vcpkg-opus-rtmidi-pkgconf-x64-windows-v2
+          key: vcpkg-opus-rtmidi-mingw-static-pkgconf-x64-windows-v3
 
       - name: Install opus + rtmidi + pkgconf via vcpkg
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        shell: bash
         # pkgconf is a drop-in pkg-config that the Go/CGo build needs to locate
         # opus and rtmidi. We get it from vcpkg rather than choco because the
         # choco community feed is flaky (504s) and silently leaves the build to
         # fall back to Strawberry Perl's broken pkg-config.bat stub on PATH.
-        run: vcpkg install opus:x64-windows rtmidi:x64-windows pkgconf:x64-windows
+        #
+        # Triplet choice matters for the CGo desktop-app link:
+        #   - opus is a C library; its C-ABI symbols link cleanly into the
+        #     MinGW-GCC CGo binary even when built by MSVC. The x64-windows
+        #     opus.dll is what the plugins (audiopus) and the staged bundles use.
+        #   - rtmidi is C++; the MSVC build's mangled symbols and C++ runtime are
+        #     ABI-incompatible with MinGW GCC and cannot be linked into the CGo
+        #     binary. So we also build opus + rtmidi for the x64-mingw-static
+        #     triplet (same GCC ABI as the CGo objects) and link the desktop app
+        #     against those, statically. See #329.
+        run: |
+          gcc --version  # the x64-mingw-static triplet builds with this GCC
+          vcpkg install \
+            pkgconf:x64-windows \
+            opus:x64-windows \
+            opus:x64-mingw-static \
+            rtmidi:x64-mingw-static
 
       - name: Configure pkg-config
         shell: pwsh
@@ -167,7 +184,16 @@ jobs:
       - name: Build wail desktop app
         shell: bash
         env:
-          PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
+          # opus + rtmidi for the CGo link come from the MinGW (x64-mingw-static)
+          # prefix so their ABI matches the GCC that compiles the CGo objects.
+          PKG_CONFIG_PATH: C:\vcpkg\installed\x64-mingw-static\lib\pkgconfig
+          # System libs abletonlink-go's cgo LDFLAGS omit: ws2_32 (asio sockets),
+          # winmm (rtmidi WinMM MIDI backend), iphlpapi (GetAdaptersAddresses in
+          # Link's Windows ScanIpIfAddrs). We deliberately do NOT pass
+          # -static-libstdc++: abletonlink-go already links -lstdc++ (the dynamic
+          # import lib), so forcing the static libstdc++.a too yields duplicate
+          # symbol definitions. Keep libstdc++ dynamic and ship the runtime DLLs.
+          CGO_LDFLAGS: -lws2_32 -lwinmm -liphlpapi
         working-directory: wail-app
         run: |
           REPLACE_PATH="${RUNNER_TEMP//\\//}/abletonlink-go"
@@ -185,9 +211,13 @@ jobs:
           cp /c/vcpkg/installed/x64-windows/bin/opus.dll dist/lib/opus.dll
           cp dist/lib/opus.dll dist/lib/wail-plugin-send.vst3/Contents/x86_64-win/
           cp dist/lib/opus.dll dist/lib/wail-plugin-recv.vst3/Contents/x86_64-win/
-          # rtmidi.dll is required at runtime by abletonlink-go's CGo bindings.
-          # Drop it next to wail.exe so Windows finds it on the default DLL search path.
-          cp /c/vcpkg/installed/x64-windows/bin/rtmidi.dll dist/bin/rtmidi.dll
+          # rtmidi + opus are linked statically into wail.exe (x64-mingw-static),
+          # so no rtmidi.dll. But the exe is built with MinGW GCC against a
+          # dynamic libstdc++, so it needs the GCC/C++ runtime DLLs at launch.
+          # Ship them from the same toolchain that built the exe (C:\mingw64).
+          cp /c/mingw64/bin/libstdc++-6.dll dist/bin/
+          cp /c/mingw64/bin/libgcc_s_seh-1.dll dist/bin/
+          cp /c/mingw64/bin/libwinpthread-1.dll dist/bin/
           cat > dist/README.txt <<'EOF'
           WAIL — WAN Audio Interchange for Link
 
