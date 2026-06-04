@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.7 (2026-06-04)
+
+### Fixes
+
+- ci: make Windows release build link (MinGW rtmidi + Winsock/iphlpapi/winmm) (#340)
+
 ## 2.4.6 (2026-06-04)
 
 ### Fixes
