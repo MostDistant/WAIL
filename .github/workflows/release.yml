@@ -187,10 +187,13 @@ jobs:
           # opus + rtmidi for the CGo link come from the MinGW (x64-mingw-static)
           # prefix so their ABI matches the GCC that compiles the CGo objects.
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-mingw-static\lib\pkgconfig
-          # asio (LinkAudio) needs Winsock 2 and rtmidi's WinMM MIDI backend needs
-          # winmm, but abletonlink-go's cgo LDFLAGS declare neither. Statically
-          # link the GCC/C++ runtime so wail.exe doesn't depend on MinGW DLLs.
-          CGO_LDFLAGS: -lws2_32 -lwinmm -static-libgcc -static-libstdc++
+          # System libs abletonlink-go's cgo LDFLAGS omit: ws2_32 (asio sockets),
+          # winmm (rtmidi WinMM MIDI backend), iphlpapi (GetAdaptersAddresses in
+          # Link's Windows ScanIpIfAddrs). We deliberately do NOT pass
+          # -static-libstdc++: abletonlink-go already links -lstdc++ (the dynamic
+          # import lib), so forcing the static libstdc++.a too yields duplicate
+          # symbol definitions. Keep libstdc++ dynamic and ship the runtime DLLs.
+          CGO_LDFLAGS: -lws2_32 -lwinmm -liphlpapi
         working-directory: wail-app
         run: |
           REPLACE_PATH="${RUNNER_TEMP//\\//}/abletonlink-go"
@@ -208,8 +211,13 @@ jobs:
           cp /c/vcpkg/installed/x64-windows/bin/opus.dll dist/lib/opus.dll
           cp dist/lib/opus.dll dist/lib/wail-plugin-send.vst3/Contents/x86_64-win/
           cp dist/lib/opus.dll dist/lib/wail-plugin-recv.vst3/Contents/x86_64-win/
-          # No rtmidi.dll: rtmidi is linked statically into wail.exe from the
-          # x64-mingw-static prefix, and the GCC/C++ runtime is static too.
+          # rtmidi + opus are linked statically into wail.exe (x64-mingw-static),
+          # so no rtmidi.dll. But the exe is built with MinGW GCC against a
+          # dynamic libstdc++, so it needs the GCC/C++ runtime DLLs at launch.
+          # Ship them from the same toolchain that built the exe (C:\mingw64).
+          cp /c/mingw64/bin/libstdc++-6.dll dist/bin/
+          cp /c/mingw64/bin/libgcc_s_seh-1.dll dist/bin/
+          cp /c/mingw64/bin/libwinpthread-1.dll dist/bin/
           cat > dist/README.txt <<'EOF'
           WAIL — WAN Audio Interchange for Link
 
