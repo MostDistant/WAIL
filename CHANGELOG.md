@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.6 (2026-06-04)
+
+### Fixes
+
+- ci: rename Link beta `interface` param for MinGW GCC (#338)
+
 ## 2.4.5 (2026-06-03)
 
 ### Fixes
