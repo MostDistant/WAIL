@@ -65,7 +65,7 @@ signaling-server/
 └── main.go           WebSocket signaling server (Go + SQLite, deployed to fly.io)
 
 vendor/
-└── link/             Ableton Link 4.0.0 beta SDK (git submodule)
+└── link/             Ableton Link 4.0 SDK (git submodule)
 ```
 
 ## Build
