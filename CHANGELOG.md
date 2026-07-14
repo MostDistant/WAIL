@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.8 (2026-07-14)
+
+### Fixes
+
+- docs: design pillars, Link Audio direction, and ADRs (#344)
+
 ## 2.4.7 (2026-06-04)
 
 ### Fixes
