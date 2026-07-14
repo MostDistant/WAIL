@@ -29,7 +29,8 @@ func main() {
 	password := flag.String("password", "", "Room password (optional)")
 	headless := flag.Bool("headless", false, "Run without GUI (CLI mode)")
 	wavFile := flag.String("wav", "", "WAV file to send (headless mode)")
-	instance := flag.Int("instance", 0, "Instance number (port = 9191+N, separate data dir)")
+	testTone := flag.Bool("test-tone", false, "Send a synthetic test tone on stream 0 (headless mode; no DAW/WAV needed)")
+	instance := flag.Int("instance", 0, "Instance number (separate data dir / identity)")
 	flag.Parse()
 
 	// Initialize Honeybadger error reporting
@@ -56,7 +57,7 @@ func main() {
 	log.Printf("App initialized — identity: %s", appBackend.identity)
 
 	if *headless {
-		runHeadless(appBackend, *room, *password, *bpmFlag, *name, *wavFile)
+		runHeadless(appBackend, *room, *password, *bpmFlag, *name, *wavFile, *testTone)
 		return
 	}
 
@@ -116,7 +117,7 @@ func main() {
 	}
 }
 
-func runHeadless(app *App, room, password string, bpm float64, name, wavFile string) {
+func runHeadless(app *App, room, password string, bpm float64, name, wavFile string, testTone bool) {
 	if room == "" {
 		log.Fatal("-room is required in headless mode")
 	}
@@ -148,6 +149,14 @@ func runHeadless(app *App, room, password string, bpm float64, name, wavFile str
 			log.Fatalf("Failed to start WAV sender: %v", err)
 		}
 		log.Printf("WAV sender started: %s", wavFile)
+	}
+
+	if testTone {
+		streamIdx := uint16(0)
+		if err := app.SetTestTone(&streamIdx); err != nil {
+			log.Fatalf("Failed to start test tone: %v", err)
+		}
+		log.Printf("Test tone started on stream 0")
 	}
 
 	// Block until signal
