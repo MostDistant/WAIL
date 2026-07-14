@@ -34,8 +34,6 @@ jobs:
           curl -sSfL "https://github.com/knope-dev/knope/releases/latest/download/knope-x86_64-unknown-linux-musl.tgz" \
             | tar -xz --strip-components=1 -C /usr/local/bin/
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Ensure changeset exists for patch release
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -71,7 +69,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+          VERSION=$(cat VERSION)
           EXISTING_PR=$(gh pr list --head release --base main --json number --jq '.[0].number' 2>/dev/null || echo "")
 
           BODY="Automated release preparation for v${VERSION}.

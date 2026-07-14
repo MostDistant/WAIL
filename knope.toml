@@ -1,5 +1,5 @@
 [package]
-versioned_files = ["Cargo.toml"]
+versioned_files = ["VERSION"]
 changelog = "CHANGELOG.md"
 
 [github]
@@ -11,10 +11,6 @@ name = "prepare-release"
 
 [[workflows.steps]]
 type = "PrepareRelease"
-
-[[workflows.steps]]
-type = "Command"
-command = "cargo update --workspace"
 
 [[workflows.steps]]
 type = "Command"
