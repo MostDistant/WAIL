@@ -87,3 +87,56 @@ func TestLinkAudioControlSurface(t *testing.T) {
 		t.Fatalf("expected no channels on a fresh disabled link, got %d", len(chans))
 	}
 }
+
+// TestCaptureSourceLifecycle validates the capture ring + pure-C source callback
+// compile, link, and are safe to create/drain/destroy. No audio flows (disabled
+// link), so Pop is empty and nothing is dropped — this exercises the C ring's
+// empty path and the source create/destroy sequence.
+func TestCaptureSourceLifecycle(t *testing.T) {
+	l := New(120.0)
+	defer l.Close()
+
+	var zeroID ChannelID // no such channel; source just never receives
+	src := l.NewSource(zeroID, 0, 0)
+	if src == nil {
+		t.Fatal("NewSource returned nil (ring allocation failed?)")
+	}
+	defer src.Close()
+
+	if _, ok := src.Pop(); ok {
+		t.Fatal("Pop on an idle source should be empty")
+	}
+	if d := src.Dropped(); d != 0 {
+		t.Fatalf("Dropped = %d, want 0", d)
+	}
+	if got := src.ChannelID(); got != zeroID {
+		t.Fatalf("ChannelID = %v, want zero", got)
+	}
+}
+
+// TestSinkLifecycle validates the emit sink compiles/links and its deep-queue
+// contract holds: with no subscriber, WriteInterleaved returns false (nothing to
+// send) and never leaks the retained handle.
+func TestSinkLifecycle(t *testing.T) {
+	l := New(120.0)
+	defer l.Close()
+
+	sink := l.NewSink("WAIL · test", 4096)
+	defer sink.Close()
+
+	sink.SetName("WAIL · renamed")
+	if got := sink.MaxNumSamples(); got <= 0 {
+		t.Fatalf("MaxNumSamples = %d, want > 0", got)
+	}
+
+	ss := NewSessionState()
+	defer ss.Close()
+	l.CaptureAppSessionState(ss)
+
+	// No source is subscribed, so the sink withholds a slot: commit path returns
+	// false without sending. Exercises retain→invalid→release (no leak/crash).
+	samples := make([]int16, 960) // 480 stereo frames
+	if ok := sink.WriteInterleaved(samples, ss, 0, 4, 480, 2, 48000); ok {
+		t.Fatal("WriteInterleaved should be false with no subscriber")
+	}
+}
