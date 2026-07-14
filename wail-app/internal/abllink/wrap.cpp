@@ -5,15 +5,18 @@
 // rather than copying it. Include paths and platform defines come from the cgo
 // directives in abllink.go.
 //
-// Windows/MinGW: <windows.h> (dragged in transitively by asio) #defines `interface`
-// as a macro, which collides with the parameter named `interface` in Link's
-// link_audio/Channels.hpp. Pre-include the Windows headers and #undef the macro so
-// the guarded re-includes downstream never redefine it. This is the C-side fix that
-// moves out of the old abletonlink-go clone/patch and into our binding (migration
-// plan precondition §9). Unverified in this environment (macOS only) — Windows CI
-// must confirm.
+// Windows/MinGW: <combaseapi.h> #defines the COM macro `interface` (as `struct`),
+// which collides with the parameter named `interface` in Link's
+// link_audio/Channels.hpp. We pull the Windows headers in first and #undef the
+// macro; include guards keep it gone for the transitive re-includes from asio.
+//
+// Crucially we do NOT define WIN32_LEAN_AND_MEAN — that would make <windows.h>
+// skip <combaseapi.h>, so the macro would be defined only later (by asio) and our
+// #undef would be a no-op (the bug that broke the first Windows CI build). asio
+// still needs <winsock2.h> before <windows.h>. This is the C-side MinGW fix
+// living in our binding (migration plan precondition §9), replacing the old
+// sed-patch of the vendored header.
 #if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <winsock2.h>
 #include <windows.h>
