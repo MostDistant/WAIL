@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -177,6 +179,16 @@ func (e *linkAudioEngine) CaptureChannels() []CaptureChannelInfo {
 			ChannelID: id, Name: ch.name, PeerName: ch.peerName, Enabled: ch.enabled,
 		})
 	}
+	// Grouped by app then alphabetical: primary key is the peer (app) name,
+	// secondary is the channel name — both case-insensitive. Stable so the
+	// send-mixer never reshuffles across status ticks.
+	sort.Slice(out, func(i, j int) bool {
+		pi, pj := strings.ToLower(out[i].PeerName), strings.ToLower(out[j].PeerName)
+		if pi != pj {
+			return pi < pj
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
 	return out
 }
 
@@ -198,7 +210,8 @@ func (e *linkAudioEngine) SetCaptureEnabled(channelID string, on bool) {
 
 // discoveryLoop periodically reconciles discovered local Link Audio channels
 // against our capture map, excluding our own published channels (best-effort, by
-// peer name) to avoid a feedback loop. Discovered channels default to bridged.
+// peer name) to avoid a feedback loop. Discovered channels start disabled — the
+// user opts in per channel via the send-mixer (explicit opt-in, plan Step 1).
 func (e *linkAudioEngine) discoveryLoop() {
 	defer e.wg.Done()
 	t := time.NewTicker(discoveryInterval)
@@ -225,10 +238,11 @@ func (e *linkAudioEngine) reconcileChannels(chans []abllink.Channel) {
 		seen[id] = true
 		ch, ok := e.capture[id]
 		if !ok {
+			// Register discovered channel as available but disabled; the user
+			// enables it via SetCaptureEnabled (explicit opt-in send-mixer).
 			ch = &captureChannel{id: c.ID, name: c.Name, peerName: c.PeerName, streamID: e.nextStreamID}
 			e.nextStreamID++
 			e.capture[id] = ch
-			e.startCaptureLocked(ch) // default: bridge discovered channels (Step 4 adds opt-in UI)
 		} else {
 			ch.name = c.Name
 			ch.peerName = c.PeerName
