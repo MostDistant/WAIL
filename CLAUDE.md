@@ -2,172 +2,174 @@
 
 ## What is this?
 
-WAIL synchronizes Ableton Link sessions across the internet using a WebSocket relay server. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN. Intervalic audio (NINJAM-style) is captured, Opus-encoded, and transmitted via the signaling server. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture) and WAIL Recv (playback).
+WAIL synchronizes Ableton Link sessions across the internet using a WebSocket relay server. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN. WAIL participates as an Ableton **Link Audio** peer: it subscribes to your local Link Audio channels, captures NINJAM-style intervals, Opus-encodes them, and ships them over the relay; on the receiving side it decodes remote intervals, holds them until the interval boundary, and republishes them as Link Audio channels. There are no plugins to install — any Link-Audio-capable app (e.g. Ableton Live 12.3+) works with WAIL.
+
+WAIL is a single-language project: two Go modules, `wail-app/` (the desktop app) and `signaling-server/` (the relay).
 
 ## Project Structure
 
 ```
-wail-app/                Go/Wails desktop app (session orchestration)
-├── main.go               Entry point, Wails window setup, CLI flags
-├── app.go                Frontend-callable methods (JoinRoom, Disconnect, etc.)
+wail-app/                Go/Wails desktop app: session orchestration, Ableton Link
+│                        + Link Audio, Opus codec, relay client, GUI. Needs cgo.
+├── main.go               Entry point, Wails window setup, CLI flags (headless, --wav)
+├── app.go                Frontend-callable methods (JoinRoom, Disconnect, SetTestTone, …)
 ├── session.go            Session state machine (goroutine-based select loop)
-├── signaling.go          WebSocket signaling client + PeerMesh
-├── peers.go              PeerRegistry + IPCWriterPool
-├── ipc.go                TCP IPC protocol (plugin ↔ app framing)
-├── link_real.go          Ableton Link bridge via abletonlink-go (CGo)
+├── signaling.go          WebSocket signaling/relay client + PeerMesh
+├── peers.go              PeerRegistry
+├── link_real.go          Ableton Link sync bridge (via internal/abllink; !linkstub)
 ├── link_stub.go          Link stub for testing (-tags=linkstub)
 ├── link_types.go         Link types, poller, echo guard, tempo detector
+├── audio_engine.go       AudioEngine interface (Link Audio capture + emit path)
+├── audio_engine_real.go  Capture + emit engine (//go:build !linkstub)
+├── audio_engine_stub.go  No-op AudioEngine under -tags linkstub (no audio path)
+├── interval_codec.go     Interval Opus↔WAIF codec (encode/decode, loopback-tested)
 ├── clock.go              NTP-style RTT/clock sync
-├── protocol.go           SyncMessage + SignalMessage types
+├── protocol.go           SyncMessage + SignalMessage types (incl. interval_anchor)
 ├── wire.go               WAIF binary wire format
-├── test_tone.go          Test tone generator (Opus sine wave)
+├── test_tone.go          Test tone generator (Opus sine wave) — GUI/headless injection
+├── wav_sender.go         Headless WAV file sender (--wav)
+├── packet_loss.go        WAN relay loss detection (WAIF frame sequence)
 ├── recorder.go           Local session recording (WAIF frames to disk)
-├── plugin_install.go     Auto-install CLAP/VST3 plugins on startup
 ├── events.go             Frontend event types
 ├── stream_names.go       Persistent per-stream name storage
 ├── filelog.go            Rotating file logger
 ├── wslog.go              WebSocket log broadcaster
 ├── honeybadger.go        Honeybadger crash reporting
+├── internal/
+│   ├── abllink/          cgo binding to Ableton Link's abl_link C API (sync + Link
+│   │                     Audio), compiled against vendor/link. capture.c holds the
+│   │                     pure-C capture callback + lock-free ring (ADR-0002: the
+│   │                     realtime callback is never a Go callback); sink.go/source.go
+│   │                     publish/subscribe Link Audio channels.
+│   ├── interval/         Interval/room-clock math: local↔room index mapping,
+│   │                     RoomClock, RoomLabeler (ADR-0003)
+│   ├── playout/          Hold-until-N+D playout scheduler (interval offset D, default 1)
+│   ├── lanloss/          Link Audio count-gap loss detection (LAN capture hop)
+│   ├── affinity/         (identity, stream) → stable published Link Audio channel
+│   ├── capture/          Interval assembler (buckets capture buffers into intervals)
+│   └── emit/             Reassembler + paced sink reader (playback side)
 └── frontend/             Bundled web UI (HTML/JS/CSS)
 
-Cargo workspace with Rust crates (plugins + shared libraries):
-
-crates/
-├── wail-core/           Core sync library (no networking)
-│   ├── link.rs           Ableton Link bridge via rusty_link
-│   ├── protocol.rs       SyncMessage + SignalMessage types
-│   ├── clock.rs          NTP-like peer RTT estimation (Ping/Pong)
-│   └── interval.rs       NINJAM-style interval tracking
-├── wail-audio/          Audio encoding and intervalic ring buffer
-│   ├── codec.rs          Opus encode/decode (audiopus)
-│   ├── ring.rs           NINJAM-style interval ring buffer (record + playback)
-│   ├── interval.rs       AudioInterval, AudioFrame, IntervalRecorder
-│   ├── wire.rs           Binary wire formats (AudioWire + WAIF AudioFrameWire)
-│   ├── frame_assembler.rs FrameAssembler: collects WAIF frames into intervals
-│   ├── bridge.rs         AudioBridge: wraps ring + Opus codec for send/recv
-│   ├── ipc.rs            IPC framing protocol (length-prefixed messages)
-│   └── pipeline.rs       Encode/decode pipeline (interval → wire → WebSocket relay)
-├── wail-net/            Networking layer
-│   ├── lib.rs            PeerMesh (WebSocket relay wrapper)
-│   └── signaling.rs      WebSocket signaling + data relay client
-├── wail-e2e/            Two-machine end-to-end test binary
-│   └── main.rs           7-phase test: Signaling → Discovery → Sync → Audio → Sustained → Burst → Reconnect
-├── wail-plugin-send/    CLAP/VST3 send plugin (captures DAW audio)
-│   ├── lib.rs            Plugin entry point, send-only IPC thread
-│   └── params.rs         Plugin parameters (empty — defaults hardcoded)
-├── wail-plugin-recv/    CLAP/VST3 receive plugin (plays remote audio)
-│   ├── lib.rs            Plugin entry point, recv-only IPC thread
-│   └── params.rs         Plugin parameters (empty — defaults hardcoded)
-
-xtask/                   Build tasks (build-plugin, install-plugin, etc.)
-
-signaling-server/
-└── main.go           WebSocket signaling server (Go + SQLite, deployed to fly.io)
+signaling-server/         Go WebSocket relay server (deployed to fly.io)
+├── main.go               Relay + room management (SQLite)
+├── roomclock.go          Relay-authoritative room interval clock (ADR-0003)
+├── interval_clock.go     interval_anchor broadcast
+└── cmd/wail-metrics/     CLI metrics client
 
 vendor/
-└── link/             Ableton Link 4.0.0 beta SDK (git submodule)
+└── link/                 Ableton Link 4.0 SDK (git submodule, pinned to Link-4.0)
 ```
 
 ## Build
 
-Requires: Go 1.22+, Rust 1.75+, CMake 3.14+, C++ compiler (for abletonlink-go/Ableton Link SDK), libopus-dev
+Requires: Go 1.26+, a C++ toolchain (cgo, for the Link Audio binding in `internal/abllink`), and libopus + pkg-config (Opus via cgo). CMake is **not** required.
 
 ```sh
-git submodule update --init --recursive   # fetch Link 4 SDK
-cargo build                               # build Rust workspace (plugins + libraries)
-cargo xtask test                          # run all tests (builds plugins if missing)
+git submodule update --init --recursive vendor/link   # fetch Link SDK + its asio submodule
 
-# Plugins (install bundler once)
-cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
-cargo xtask build-plugin                  # → target/bundled/wail-plugin-{send,recv}.{clap,vst3}
-cargo xtask install-plugin                # build + install to system plugin dirs
+cd wail-app && go build                                # build the app (needs cgo)
+cd wail-app && go test ./...                           # run app + internal package tests
 
-# Go/Wails desktop app (handles Link + WebSocket relay + IPC)
-cd wail-app && go build                   # build the app binary
-cd wail-app && go test ./...              # run Go tests
+# Build/test WITHOUT the Link SDK (Link becomes a stub; no audio path):
+cd wail-app && go build -tags linkstub
+cd wail-app && go test -tags linkstub ./...
+
+# Signaling server
+cd signaling-server && go build ./... && go test ./...
 ```
+
+Note: Go needs GOCACHE write access; if you build inside a sandbox you may need to disable it.
 
 ## Key Dependencies
 
 ### Go (wail-app)
-- `wails/v3` - Desktop app framework (webview)
-- `gorilla/websocket` - WebSocket client (signaling + data relay)
-- `abletonlink-go` - Ableton Link via CGo
-- `pion/opus` - Opus codec bindings
+- `wailsapp/wails/v3` - Desktop app framework (webview)
+- `gorilla/websocket` - WebSocket client (signaling + audio relay)
+- `internal/abllink` - our own cgo binding to Ableton Link's `abl_link` C API (sync + Link Audio), compiled directly against `vendor/link`. Replaced the external `abletonlink-go` dependency.
+- `hraban/opus.v2` - Opus codec (cgo, libopus)
+- `google/uuid`, `go-audio/wav` - IDs and headless WAV loading
 
-### Rust (plugins + libraries)
-- `rusty_link` - Ableton Link via C FFI to official SDK
-- `tokio-tungstenite` - WebSocket client (signaling + data relay)
-- `audiopus` - Opus audio codec (libopus bindings)
-- `nih_plug` (git) - CLAP/VST3 plugin framework
-- `tokio` - Async runtime
+### Go (signaling-server)
+- `gorilla/websocket` - WebSocket relay + room management; SQLite for room storage
 
 ## Architecture
 
 ### Sync Flow
 Each WAIL peer:
 1. Joins local Ableton Link session (LAN multicast)
-2. Connects to WebSocket signaling server to join a room (public or password-protected)
+2. Connects to WebSocket relay server to join a room (public or password-protected)
 3. Sync messages (tempo, phase, clock) are relayed through the server to all room peers
 4. Polls Link at 50Hz, broadcasts tempo/phase changes
 5. Applies remote tempo changes to local Link session
-6. Tracks NINJAM-style interval boundaries
+6. The relay owns the authoritative room interval clock and broadcasts an `interval_anchor`; each peer maps its local interval index to the shared room index (ADR-0003)
 
-### Audio Flow (Intervalic)
-NINJAM-style double-buffer pattern with two separate plugins:
-1. **WAIL Send** plugin captures DAW audio into record slot for current interval
-2. At interval boundary: record slot → Opus encode → IPC → wail-app → WebSocket (binary) → server → all room peers
-3. **WAIL Recv** plugin receives remote intervals via IPC, decoded and mixed into playback slot
-4. Playback slot feeds audio output to DAW (main bus + up to 15 per-slot aux outputs)
-5. Latency = exactly 1 interval (by design, like NINJAM)
+### Audio Flow (Link Audio)
+WAIL is an Ableton Link Audio peer. There are no plugins and no IPC — the whole audio path runs inside `wail-app`.
 
-Two WebSocket message types via the signaling server:
-- **sync** (text): JSON messages relayed to all room peers (tempo, beat, phase, clock sync)
+**Capture (send side):**
+1. Subscribe to local Link Audio channels (`LinkAudioSource`). The realtime capture callback is pure C (`internal/abllink/capture.c`) and pushes buffers into a lock-free ring; a Go goroutine drains it off-thread (ADR-0002 invariant: never a Go callback on the audio thread).
+2. `internal/capture` buckets buffers into fixed-length NINJAM intervals (local index).
+3. `interval_codec.go` Opus-encodes the interval into 20ms WAIF frames.
+4. Frames are broadcast over the WebSocket relay (binary) to all room peers.
+
+**Playback (recv side):**
+1. Receive WAIF frames from the relay.
+2. `interval_codec.go` Opus-decodes; `internal/emit` reassembles frames into interval PCM.
+3. `internal/playout` holds each interval until the local boundary labeled N+D (interval offset D, default 1).
+4. `internal/emit` paces the interval into a Link Audio sink (`LinkAudioSink`); `internal/affinity` keeps a reconnecting peer's streams on stable channels.
+5. WAIL republishes remote streams as Link Audio channels — any Link-Audio-capable app plays them.
+
+Latency = the interval offset D (default 1 interval), by design like NINJAM.
+
+Two WebSocket message types via the relay server:
+- **sync** (text): JSON messages relayed to all room peers (tempo, beat, phase, clock sync, `interval_anchor`)
 - **audio** (binary): WAIF wire-format frames broadcast to all room peers (Opus-encoded intervals)
 
 ```
-DAW A → [WAIL Send] → record → Opus encode → IPC → wail-app → WS binary → server → all peers
-        [WAIL Recv] ← play  ← Opus decode  ← IPC ← wail-app ← WS binary ← server ← remote peer
+Link Audio (local channels)     → [capture] → interval → Opus → WAIF → WS relay → server → all peers
+Link Audio (published channels) ← [emit/sink] ← hold N+D ← reassemble ← Opus ← WAIF ← WS relay ← remote peer
 ```
 
-### Wire Format (AudioWire)
-Binary header (48 bytes) + Opus data:
-- Magic "WAIL", version, flags, interval index, sample rate, BPM, quantum, bars
+### Wire Format (WAIF)
+Streaming binary format in `wail-app/wire.go`: one WAIF frame per 20ms Opus packet.
+- 25-byte header: magic "WAIF", flags (stereo, final), stream_id, interval_index, frame_number, frame_seq, opus_len — followed by Opus data.
+- The final frame of an interval appends 28 bytes (sample_rate, total_frames, bpm, quantum, bars) so the receiver can reconstruct the whole interval.
 
-### NINJAM Ring Buffer (IntervalRing)
-- Two slots: record (current interval) and playback (previous interval)
-- At boundary: record → completed queue (for encoding), pending remote → playback
-- Multiple peers' audio mixed (summed) in playback slot
-- Beat-position driven boundaries (from DAW transport / Link)
+### Interval Model (Go engine)
+- Capture assembles fixed-length intervals from Link Audio buffers (`internal/capture`); gaps read as silence and are surfaced as LAN-loss metrics (`internal/lanloss`).
+- Playback reassembles decoded frames per room interval index (`internal/emit`), and the playout scheduler releases each interval one boundary late (offset D) into a Link Audio sink (`internal/playout`).
+- The relay owns the authoritative room interval clock and broadcasts an `interval_anchor`; `internal/interval` maps each peer's local index to the shared room index (ADR-0003).
 
 ## Testing
 
-**Use `cargo xtask test` instead of `cargo test`.** The `wail-plugin-test` crate requires pre-built CLAP plugin bundles. Running `cargo test` directly will deadlock if the bundles are missing, because `build.rs` cannot spawn a nested `cargo` while the outer process holds the workspace lock. `cargo xtask test` handles this automatically — it builds the plugins first if missing, then runs `cargo test`.
+Run tests with `go test`.
 
 ```sh
-cargo xtask test                          # build plugins if needed, run all tests
-cargo xtask test -- -p wail-core          # core library tests only
-cargo xtask test -- -p wail-audio         # audio tests (codec, ring buffer, wire format)
+cd wail-app && go test ./...                    # app + internal package tests
+cd wail-app && go test ./internal/interval      # a single package
+cd wail-app && go test -tags linkstub ./...     # without the Link SDK (no audio path)
+cd signaling-server && go test ./...            # relay server
 ```
 
-**Skip tests for docs-only changes.** If a PR only modifies `.md` files (or other non-code docs), do not run `cargo xtask test` — it builds plugins and is slow. Tests are not needed when no code paths change.
+Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOCACHE write access; in a sandbox you may need to disable it. `-tags linkstub` swaps Link for a stub so the app and its pure logic packages build without the SDK.
+
+**Skip tests for docs-only changes.** If a PR only modifies `.md` files (or other non-code docs), do not run the test suite — building the audio path requires the Link SDK/cgo and is slow. Tests are not needed when no code paths change.
 
 ## Code Conventions
 
-- Async with tokio, channels for cross-task communication
-- `tracing` for structured logging (set RUST_LOG=debug for verbose)
-- Protocol messages are JSON-serialized serde enums (tagged unions)
-- Audio messages use WAIF streaming wire format (AudioFrameWire) over WebSocket relay
+- Goroutines + channels for cross-task communication
+- Structured logging via `log`/`slog`
+- Protocol messages are JSON with a `type` discriminator (tagged unions)
+- Audio messages use the WAIF streaming wire format over the WebSocket relay
 - Echo guard pattern: suppress re-broadcast for 150ms after applying remote changes
-- wail-core has no networking dependencies (reusable from plugin)
-- wail-audio has no networking dependencies (reusable from plugin)
-- TDD: write tests first, especially for ring buffer and codec
+- Pure engine logic lives in `wail-app/internal/{interval,playout,lanloss,affinity,capture,emit}` — no cgo, no networking, fully unit-testable; the cgo Link Audio layer (`internal/abllink`) wraps it
+- TDD: write tests first, especially for the interval/codec logic
 
 ## Versioning and Releases
 
-Managed by [knope](https://github.com/knope-dev/knope) via `knope.toml`. All crates share one version (workspace-level).
+Managed by [knope](https://github.com/knope-dev/knope) via `knope.toml`. Both Go modules share one repo-wide version.
 
-**Versioned files** (kept in sync automatically): `Cargo.toml` (workspace)
+**Versioned files** (kept in sync automatically): `VERSION`
 
 ### Recording changes
 
@@ -196,24 +198,25 @@ Releases are fully automated — no manual `knope` commands needed:
 
 1. **Push to `main`** → `auto-release.yml` runs `knope prepare-release`, which consumes conventional commits (and `.changeset/` files if present as a fallback), bumps versions, updates `CHANGELOG.md`, and opens/updates a PR from the `release` branch → `main`.
 2. **Merge the release PR** → `release-on-merge.yml` runs `knope release` (creates GitHub release + git tag) and dispatches artifact builds.
-3. **`release.yml`** builds platform artifacts (macOS, Windows, Linux — plugins + zip archives + Homebrew source tarball) and uploads them to the GitHub release.
+3. **`release.yml`** builds platform artifacts (macOS, Windows, Linux — app binaries + zip archives + Homebrew source tarball) and uploads them to the GitHub release.
 
 ### Rules for agents
 
 - **Use conventional commits for user-facing work** (`feat:`, `fix:`, `feat!:`). Do NOT also create a changeset file — knope processes both sources and this creates duplicate changelog entries.
-- **Never manually edit version numbers** in `Cargo.toml` — knope handles this.
+- **Never manually edit the version number** in `VERSION` — knope handles this.
 - **Never manually create git tags** for releases — GitHub Actions handles tagging.
 - **Never run `knope release` or `knope prepare-release` locally** — GitHub Actions runs both automatically.
 - **Use the correct conventional commit prefix.** New features MUST use `feat:`, bug fixes MUST use `fix:`, breaking changes MUST use `feat!:` or `fix!:`. Never use `fix:` for a new feature — this causes knope to bump only the patch version instead of minor. Similarly, never use unprefixed or `chore:` commits for user-facing changes — knope ignores them entirely. Get the prefix right; it directly controls the version bump.
 - **Semver is now standard (post-1.0).** `feat:` / `default: minor` → minor bump, `fix:` / `default: patch` → patch bump, `feat!:` / `default: major` → major bump. No pre-1.0 shifting applies.
-- **Keep docs in sync.** For each PR, check whether `README.md` and `docs/architecture.md` need updates to reflect the changes. User-facing features should update README; architectural changes (wire format, IPC protocol, crate structure, new design decisions) should update `docs/architecture.md`.
+- **Keep docs in sync.** For each PR, check whether `README.md` and `docs/architecture.md` need updates to reflect the changes. User-facing features should update README; architectural changes (wire format, Link Audio engine, internal package structure, new design decisions) should update `docs/architecture.md`.
 
 ## Common Tasks
 
-- **Add a new sync message**: Add variant to `SyncMessage` in `crates/wail-core/src/protocol.rs`, handle in `wail-app/session.go` select loop
-- **Change Link polling rate**: `POLL_INTERVAL` in `crates/wail-core/src/link.rs`
-- **Change Opus bitrate**: `AudioBridge::new()` bitrate_kbps param in `crates/wail-audio/src/bridge.rs`
-- **Modify wire format**: `crates/wail-audio/src/wire.rs` (bump version byte)
+- **Add a new sync message**: Add a variant to `SyncMessage` in `wail-app/protocol.go`, handle it in the `wail-app/session.go` select loop
+- **Change Link polling rate**: `linkPollInterval` in `wail-app/link_types.go`
+- **Change Opus bitrate**: `engineBitrateKbps` in `wail-app/audio_engine_real.go` (passed to `NewIntervalEncoder` in `interval_codec.go`)
+- **Change the interval offset D**: `WAIL_INTERVAL_OFFSET` env var (default 1), read in `wail-app/session.go` and applied via `playout.New` in `audio_engine_real.go`
+- **Modify wire format**: `wail-app/wire.go` (bump the flags/format)
 
 
 ## Trade-off Preferences
@@ -240,18 +243,18 @@ Ableton Link 4.0 (final, May 2026) introduces Link Audio — real-time uncompres
 - `LinkAudioSource`: subscribe to remote audio channels
 - Channel discovery via `channels()` and `setChannelsChangedCallback()`
 
-Decided direction (see `CONTEXT.md` pillars and `docs/adr/0001`): WAIL interacts with local audio exclusively as a Link peer — capture subscribes to local Link Audio channels, playback publishes remote streams as Link Audio channels one interval late. The Send/Recv plugins, the TCP IPC protocol, and their supporting crates are to be retired. The sections of this file describing plugins/IPC reflect the current code, not the target.
+Decided direction (see `CONTEXT.md` pillars and `docs/adr/0001`): WAIL interacts with local audio exclusively as a Link peer — capture subscribes to local Link Audio channels, playback publishes remote streams as Link Audio channels one interval late. This is now the implemented reality: the Send/Recv plugins, the TCP IPC protocol, and the entire Rust workspace have been retired.
 
-Note: `vendor/link` is pinned at 4.0.0**b1**, which predates important fixes (source-only peers can't receive audio; peer-name crash). Bump to the final `Link-4.0` tag before any Link Audio work. Research: `docs/link-4-research.md`, `docs/link-audio-research.md`.
+`vendor/link` is pinned to the final `Link-4.0` tag. Research: `docs/link-4-research.md`, `docs/link-audio-research.md`.
 
 ### Migration status (branch `quasor/link-audio-engine`)
 
-Steps 0–3 of `docs/link-audio-migration-plan.md` are implemented and wired, behind a **`WAIL_LINK_AUDIO=1`** flag (offset via `WAIL_INTERVAL_OFFSET`, default 1). The plugin/IPC/Rust path is still the default until Link Audio is validated on hardware. New Go pieces:
+All steps of `docs/link-audio-migration-plan.md` are implemented: the Link Audio engine is the only audio path (no flag), and the plugins, TCP IPC, and Rust workspace are gone. New Go pieces:
 
-- `wail-app/internal/abllink` — cgo `abl_link` binding (sync + Link Audio; pure-C capture ring), against `vendor/link` (now `Link-4.0`). Replaces `abletonlink-go`.
+- `wail-app/internal/abllink` — cgo `abl_link` binding (sync + Link Audio; pure-C capture ring), against `vendor/link` (Link-4.0). Replaced the external `abletonlink-go`.
 - `wail-app/internal/{interval,playout,lanloss,affinity,capture,emit}` — pure, unit-tested engine logic (interval/room clock, hold-until-N+D scheduler, LAN loss, channel affinity, interval assembly/reassembly + paced playout).
 - `wail-app/interval_codec.go` — interval Opus↔WAIF codec (loopback-tested).
 - `wail-app/audio_engine_real.go` — the capture + emit engine (`//go:build !linkstub`; no-op stub otherwise).
 - `signaling-server` — relay-authoritative room interval clock + `interval_anchor` broadcast.
 
-Remaining: hardware validation, then Steps 4 (GUI) and 5 (retire plugins/IPC/Rust, reimplement the test client in Go, CI/Homebrew). Build/test the app with `CGO_ENABLED=1` and the sandbox disabled (GOCACHE writes); `-tags linkstub` builds without the Link SDK.
+Remaining is hardware validation only: run two machines with a Link-Audio DAW to exercise the Source/Sink data path + real-time timing, and confirm the Windows (MinGW) / Linux cgo builds link. The interval offset D is env-configurable (`WAIL_INTERVAL_OFFSET`, default 1); a GUI control for it is a follow-up.
