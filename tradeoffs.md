@@ -82,6 +82,10 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 
 ## Design Decisions
 
+### Link Audio is the only audio interface (retire Send/Recv plugins)
+**Status:** Decided — see `docs/adr/0001-link-audio-is-the-only-audio-interface.md` (ADRs in `docs/adr/` are now the canonical home for architectural decisions)
+**Decision:** WAIL captures and plays local audio exclusively via Ableton Link Audio (Link 4.0); the CLAP/VST3 plugins and TCP IPC protocol are to be retired. Lossless capture narrows to the WAN leg; the LAN hop is best-effort with loss detection surfaced in metrics.
+
 ### Linear crossfade at interval boundaries
 **Status:** Done
 **File:** `crates/wail-audio/src/ring.rs`
