@@ -243,3 +243,15 @@ Ableton Link 4.0 (final, May 2026) introduces Link Audio — real-time uncompres
 Decided direction (see `CONTEXT.md` pillars and `docs/adr/0001`): WAIL interacts with local audio exclusively as a Link peer — capture subscribes to local Link Audio channels, playback publishes remote streams as Link Audio channels one interval late. The Send/Recv plugins, the TCP IPC protocol, and their supporting crates are to be retired. The sections of this file describing plugins/IPC reflect the current code, not the target.
 
 Note: `vendor/link` is pinned at 4.0.0**b1**, which predates important fixes (source-only peers can't receive audio; peer-name crash). Bump to the final `Link-4.0` tag before any Link Audio work. Research: `docs/link-4-research.md`, `docs/link-audio-research.md`.
+
+### Migration status (branch `quasor/link-audio-engine`)
+
+Steps 0–3 of `docs/link-audio-migration-plan.md` are implemented and wired, behind a **`WAIL_LINK_AUDIO=1`** flag (offset via `WAIL_INTERVAL_OFFSET`, default 1). The plugin/IPC/Rust path is still the default until Link Audio is validated on hardware. New Go pieces:
+
+- `wail-app/internal/abllink` — cgo `abl_link` binding (sync + Link Audio; pure-C capture ring), against `vendor/link` (now `Link-4.0`). Replaces `abletonlink-go`.
+- `wail-app/internal/{interval,playout,lanloss,affinity,capture,emit}` — pure, unit-tested engine logic (interval/room clock, hold-until-N+D scheduler, LAN loss, channel affinity, interval assembly/reassembly + paced playout).
+- `wail-app/interval_codec.go` — interval Opus↔WAIF codec (loopback-tested).
+- `wail-app/audio_engine_real.go` — the capture + emit engine (`//go:build !linkstub`; no-op stub otherwise).
+- `signaling-server` — relay-authoritative room interval clock + `interval_anchor` broadcast.
+
+Remaining: hardware validation, then Steps 4 (GUI) and 5 (retire plugins/IPC/Rust, reimplement the test client in Go, CI/Homebrew). Build/test the app with `CGO_ENABLED=1` and the sandbox disabled (GOCACHE writes); `-tags linkstub` builds without the Link SDK.
