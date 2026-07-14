@@ -1001,35 +1001,33 @@ summary:hover {
   margin-top: 16px;
 }
 
-/* Plugin error modal specifics */
-#plugin-error-modal p {
-  padding: 0 20px;
-  font-size: 12px;
-  color: var(--fg-dim);
+/* --- Capture send-mixer --- */
+.capture-mixer {
   margin-top: 12px;
 }
-
-#plugin-error-modal p:first-of-type {
-  margin-top: 16px;
+.capture-mixer > label {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-dim);
+  margin-bottom: 4px;
 }
-
-#plugin-error-modal ul {
-  padding: 8px 20px 0 36px;
+.capture-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.capture-channel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
-  color: var(--state-error);
+  cursor: pointer;
 }
-
-#plugin-error-modal code {
-  background: var(--bg-hover);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-
-#plugin-error-ok-btn {
-  margin: 16px 20px;
-  width: calc(100% - 40px);
+.capture-channel input {
+  width: auto;
+  margin: 0;
 }
 
 /* --- Stats mode toggle --- */

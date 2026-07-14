@@ -16,16 +16,14 @@ const signalingURL = "wss://wail-signal.fly.dev"
 
 // App is the Wails application backend. All exported methods are callable from the frontend.
 type App struct {
-	mu           sync.Mutex
-	session      *SessionHandle
-	emitter      EventEmitter
-	identity     string
-	ipcPort      uint16
-	streamNames  map[uint16]string
-	dataDir      string
-	fileLog      *RotatingFileWriter
-	wsLog        *WsLogWriter
-	pluginErrors []string
+	mu          sync.Mutex
+	session     *SessionHandle
+	emitter     EventEmitter
+	identity    string
+	streamNames map[uint16]string
+	dataDir     string
+	fileLog     *RotatingFileWriter
+	wsLog       *WsLogWriter
 }
 
 // NewApp creates a new App instance. Pass instance=0 for the default instance.
@@ -162,7 +160,6 @@ func (a *App) JoinRoom(
 		BPM:         actualBPM,
 		Bars:        actualBars,
 		Quantum:     actualQuantum,
-		IPCPort:     a.ipcPort,
 		Recording:   recording,
 		StreamCount: actualStreamCount,
 		TestMode:    actualTestMode,
@@ -298,11 +295,16 @@ func (a *App) SetLogSharing(enabled bool) error {
 	return nil
 }
 
-// GetPluginInstallErrors returns any plugin installation errors from startup.
-func (a *App) GetPluginInstallErrors() []string {
+// SetCaptureEnabled toggles whether a discovered local Link Audio channel is
+// bridged (the capture send-mixer). channelID is the hex id from a status
+// update's capture_channels.
+func (a *App) SetCaptureEnabled(channelID string, enabled bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.pluginErrors
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetCaptureEnabled", ChannelID: channelID, Enabled: enabled}
+	}
+	return nil
 }
 
 // RenameStream updates a stream name.

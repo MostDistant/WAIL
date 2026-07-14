@@ -27,7 +27,6 @@ type SessionConfig struct {
 	BPM         float64
 	Bars        uint32
 	Quantum     float64
-	IPCPort     uint16
 	Recording   *RecordingConfig
 	StreamCount uint16
 	TestMode    bool
@@ -35,12 +34,14 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
 	StreamIndex *uint16
 	WavFile     string
+	ChannelID   string // SetCaptureEnabled
+	Enabled     bool   // SetCaptureEnabled
 }
 
 // SessionHandle represents a running session.
@@ -350,6 +351,9 @@ func sessionLoop(
 					logInfo("[WAV] WAV sender stopped")
 				}
 				mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
+			case "SetCaptureEnabled":
+				audioEngine.SetCaptureEnabled(cmd.ChannelID, cmd.Enabled)
+				logInfo("[capture] channel %s enabled=%v", cmd.ChannelID, cmd.Enabled)
 			case "Disconnect":
 				logInfo("Disconnecting...")
 				goto cleanup
@@ -805,6 +809,7 @@ func sessionLoop(
 				AudioDCOpen: dcOpen, PluginConnected: true,
 				Recording: recorder != nil,
 				RecordingSizeBytes: func() uint64 { if recorder != nil { return recorder.BytesWritten() }; return 0 }(),
+				CaptureChannels: audioEngine.CaptureChannels(),
 			})
 
 			// Broadcast audio status

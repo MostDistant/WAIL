@@ -41,7 +41,7 @@
         'get_default_recording_dir': 'main.App.GetDefaultRecordingDir',
         'cleanup_recordings': 'main.App.CleanupRecordings',
         'get_active_session': 'main.App.GetActiveSession',
-        'get_plugin_install_errors': 'main.App.GetPluginInstallErrors',
+        'set_capture_enabled': 'main.App.SetCaptureEnabled',
         'rename_stream': 'main.App.RenameStream',
         'get_app_version': 'main.App.GetAppVersion',
     };
@@ -60,6 +60,7 @@
         'set_log_sharing': ['enabled'],
         'cleanup_recordings': ['directory', 'retentionDays'],
         'rename_stream': ['streamIndex', 'name'],
+        'set_capture_enabled': ['channelID', 'enabled'],
     };
 
     async function invoke(command, args) {

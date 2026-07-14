@@ -76,6 +76,8 @@ type StatusUpdate struct {
 	Recording         bool           `json:"recording"`
 	RecordingSizeBytes uint64        `json:"recording_size_bytes"`
 	TestToneStream    *uint16        `json:"test_tone_stream,omitempty"`
+	// Discovered local Link Audio channels for the capture send-mixer (Step 4).
+	CaptureChannels   []CaptureChannelInfo `json:"capture_channels,omitempty"`
 }
 
 type PeerNetworkInfo struct {

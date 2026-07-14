@@ -53,7 +53,7 @@ func main() {
 		appBackend.wsLog = wsLogWriter
 	}
 
-	log.Printf("App initialized — identity: %s, IPC port: %d", appBackend.identity, appBackend.ipcPort)
+	log.Printf("App initialized — identity: %s", appBackend.identity)
 
 	if *headless {
 		runHeadless(appBackend, *room, *password, *bpmFlag, *name, *wavFile)

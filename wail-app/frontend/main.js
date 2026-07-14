@@ -31,21 +31,38 @@ window.__TAURI__.app.getVersion().then(v => {
   document.getElementById('version-label').textContent = 'v' + v;
 });
 
-// Check for plugin install errors on load
-invoke('get_plugin_install_errors').then(errors => {
-  if (errors.length === 0) return;
-  const modal = document.getElementById('plugin-error-modal');
-  const list = document.getElementById('plugin-error-list');
-  list.innerHTML = errors.map(e => `<li>${escapeHtml(e)}</li>`).join('');
-  modal.style.display = 'flex';
-}).catch(() => {});
+// Capture send-mixer: render discovered local Link Audio channels as checkboxes.
+// Re-renders only when the channel set changes so ticking a box isn't clobbered
+// by the 2s status refresh.
+let _captureSig = '';
+function renderCaptureMixer(channels) {
+  const el = document.getElementById('capture-channels');
+  if (!el) return;
+  const sig = channels.map(c => `${c.channel_id}:${c.enabled}:${c.name}:${c.peer_name}`).join('|');
+  if (sig === _captureSig) return;
+  _captureSig = sig;
+  if (channels.length === 0) {
+    el.innerHTML = '<span class="empty">No local Link Audio channels discovered</span>';
+    return;
+  }
+  el.innerHTML = '';
+  channels.forEach(c => {
+    const row = document.createElement('label');
+    row.className = 'capture-channel';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!c.enabled;
+    cb.addEventListener('change', () => {
+      invoke('set_capture_enabled', { channelID: c.channel_id, enabled: cb.checked }).catch(() => {});
+    });
+    const name = document.createElement('span');
+    name.textContent = c.peer_name ? `${c.peer_name} · ${c.name}` : (c.name || c.channel_id);
+    row.appendChild(cb);
+    row.appendChild(name);
+    el.appendChild(row);
+  });
+}
 
-document.getElementById('plugin-error-close-btn').addEventListener('click', () => {
-  document.getElementById('plugin-error-modal').style.display = 'none';
-});
-document.getElementById('plugin-error-ok-btn').addEventListener('click', () => {
-  document.getElementById('plugin-error-modal').style.display = 'none';
-});
 
 // --- Room Name Generator ---
 // Dictionary 1: synthesis techniques, sound qualities, processing descriptors
@@ -706,10 +723,14 @@ function renderStatus(s) {
     `${formatBytes(bytesSent)} / ${formatBytes(bytesRecv)}`;
 
   document.getElementById('session-interval').textContent = `${s.interval_bars} bar${s.interval_bars !== 1 ? 's' : ''}`;
+
+  // Link Audio engine status: show how many local channels are bridged.
+  const captureChannels = s.capture_channels || [];
+  const bridged = captureChannels.filter(c => c.enabled).length;
   document.getElementById('session-plugin').textContent =
-    s.plugin_connected ? 'connected' : 'disconnected';
-  document.getElementById('session-plugin').className =
-    s.plugin_connected ? 'status-value connected' : 'status-value';
+    bridged > 0 ? `on (${bridged} ch)` : 'on';
+  document.getElementById('session-plugin').className = 'status-value connected';
+  renderCaptureMixer(captureChannels);
 
   // Sync test tone state
   testToneStream = s.test_tone_stream;
@@ -836,16 +857,6 @@ async function setupListeners() {
 
   unlisten.push(await listen('session:ended', () => {
     showJoin();
-  }));
-
-  unlisten.push(await listen('plugin:connected', () => {
-    document.getElementById('session-plugin').textContent = 'connected';
-    document.getElementById('session-plugin').className = 'status-value connected';
-  }));
-
-  unlisten.push(await listen('plugin:disconnected', () => {
-    document.getElementById('session-plugin').textContent = 'disconnected';
-    document.getElementById('session-plugin').className = 'status-value';
   }));
 
   unlisten.push(await listen('log:entry', (event) => {
