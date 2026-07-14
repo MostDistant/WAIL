@@ -233,11 +233,13 @@ When encountering code quality trade-offs, follow these principles (derived from
 ### Trade-off log
 All deferred decisions and remaining code quality items are tracked in `tradeoffs.md` at the repo root. When making a trade-off decision during development, record it there with the rationale.
 
-## Future: Link Audio Integration
+## Direction: Link Audio Is the Only Audio Interface (ADR-0001)
 
-Ableton Link 4.0.0 beta (vendored at `vendor/link`) introduces Link Audio — native audio streaming between Link peers on a LAN. The Link Audio API (LinkAudio.hpp) provides:
+Ableton Link 4.0 (final, May 2026) introduces Link Audio — real-time uncompressed PCM streaming between Link peers on a LAN (unicast UDP, fire-and-forget). The API (LinkAudio.hpp) provides:
 - `LinkAudioSink`: publish audio channels to the network
 - `LinkAudioSource`: subscribe to remote audio channels
 - Channel discovery via `channels()` and `setChannelsChangedCallback()`
 
-This could replace the custom Opus pipeline for LAN scenarios, while WAIL continues to bridge audio over the internet via the WebSocket relay server.
+Decided direction (see `CONTEXT.md` pillars and `docs/adr/0001`): WAIL interacts with local audio exclusively as a Link peer — capture subscribes to local Link Audio channels, playback publishes remote streams as Link Audio channels one interval late. The Send/Recv plugins, the TCP IPC protocol, and their supporting crates are to be retired. The sections of this file describing plugins/IPC reflect the current code, not the target.
+
+Note: `vendor/link` is pinned at 4.0.0**b1**, which predates important fixes (source-only peers can't receive audio; peer-name crash). Bump to the final `Link-4.0` tag before any Link Audio work. Research: `docs/link-4-research.md`, `docs/link-audio-research.md`.
