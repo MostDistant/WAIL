@@ -2,7 +2,7 @@
 name = "wail-audio"
 version.workspace = true
 edition.workspace = true
-description = "Audio interval encoding/decoding for WAIL (Opus over WebRTC DataChannels)"
+description = "Audio interval encoding/decoding for WAIL (Opus over the WAIL relay)"
 
 [dependencies]
 audiopus = "0.3.0-rc.0"

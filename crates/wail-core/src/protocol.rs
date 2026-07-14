@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Messages exchanged between peers over WebRTC DataChannels.
+/// Messages exchanged between peers over the WAIL relay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SyncMessage {
@@ -36,7 +36,7 @@ pub enum SyncMessage {
         bars: u32,
         quantum: f64,
     },
-    /// Greeting on DataChannel open
+    /// Greeting on connect
     Hello {
         peer_id: String,
         /// Human-readable name (e.g. "Ringo"). Old peers omit this field.

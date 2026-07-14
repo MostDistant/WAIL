@@ -727,7 +727,7 @@ func sessionLoop(
 			}
 
 			connected := mesh.ConnectedPeers()
-			dcOpen := mesh.AnyPeersConnected()
+			anyPeersConnected := mesh.AnyPeersConnected()
 
 			// Build peer infos
 			peerInfos := make([]PeerInfo, 0, len(connected))
@@ -740,7 +740,7 @@ func sessionLoop(
 					recvPrev = ps.AudioRecvPrev
 				})
 				isRecv := recvNow > recvPrev
-				isSend := dcOpen && mesh.IsPeerConnected(p)
+				isSend := anyPeersConnected && mesh.IsPeerConnected(p)
 				status := peers.DeriveStatus(p)
 				var rttMs *float64
 				if rtt := clock.RTTUs(p); rtt != nil {
@@ -774,7 +774,7 @@ func sessionLoop(
 							streamName = &n
 						}
 					})
-					isSend = dcOpen && mesh.IsPeerConnected(pid)
+					isSend = anyPeersConnected && mesh.IsPeerConnected(pid)
 				}
 				status := "connecting"
 				if found {
@@ -818,14 +818,14 @@ func sessionLoop(
 				LocalSends: localSends, IntervalBars: intervalBars,
 				AudioSent: audioIntervalsSent, AudioRecv: audioIntervalsReceived,
 				AudioBytesSent: audioBytesSent, AudioBytesRecv: audioBytesRecv,
-				AudioDCOpen: dcOpen, PluginConnected: !ipcPool.IsEmpty() || config.TestMode,
+				AudioDCOpen: anyPeersConnected, PluginConnected: !ipcPool.IsEmpty() || config.TestMode,
 				Recording: recorder != nil,
 				RecordingSizeBytes: func() uint64 { if recorder != nil { return recorder.BytesWritten() }; return 0 }(),
 			})
 
 			// Broadcast audio status
 			audioStatusSeq++
-			mesh.Broadcast(NewAudioStatus(dcOpen, audioIntervalsSent, audioIntervalsReceived, !ipcPool.IsEmpty() || config.TestMode, audioStatusSeq))
+			mesh.Broadcast(NewAudioStatus(anyPeersConnected, audioIntervalsSent, audioIntervalsReceived, !ipcPool.IsEmpty() || config.TestMode, audioStatusSeq))
 
 			// Send metrics + build network event
 			perPeer := make(map[string]PeerFrameReport)
@@ -858,14 +858,14 @@ func sessionLoop(
 				status := peers.DeriveStatus(p)
 				networkInfos = append(networkInfos, PeerNetworkInfo{
 					PeerID: p, DisplayName: dn, Slot: slot,
-					ICEState: status, DCSyncState: status, DCAudioState: status,
+					ConnectionState: status,
 					RTTMs: rttMs, AudioRecv: audioRecv,
 					FramesReceived: fr, PacketsLost: lost, LossEvents: lossEvents,
 				})
 			}
 			emitter.Emit("peers:network", PeersNetwork{Peers: networkInfos})
 			_ = ipcDropCount.Load()
-			mesh.SendMetricsReport(dcOpen, !ipcPool.IsEmpty() || config.TestMode, perPeer, ipcDropCount.Load(), boundaryDriftUs)
+			mesh.SendMetricsReport(anyPeersConnected, !ipcPool.IsEmpty() || config.TestMode, perPeer, ipcDropCount.Load(), boundaryDriftUs)
 		}
 	}
 

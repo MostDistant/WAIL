@@ -81,17 +81,7 @@ bin/dev                  # build plugins + run Go/Wails app in dev mode
 cargo test                    # all tests (~114 unit + integration)
 cargo test -p wail-core       # core library tests
 cargo test -p wail-audio      # audio codec, ring buffer, wire format
-cargo test -p wail-net        # networking + WebRTC integration tests
-```
-
-Some integration tests are marked `#[ignore]` because they require external resources:
-
-```sh
-# Requires internet access — hits the live Metered API and asserts valid TURN credentials are returned
-cargo test -p wail-net -- --ignored fetch_metered_ice_servers_live
-
-# Requires coturn installed (brew install coturn) — full WebRTC path through a local TURN relay
-cargo test -p wail-net -- --ignored two_peers_exchange_audio_via_turn
+cargo test -p wail-net        # networking integration tests
 ```
 
 # TODO

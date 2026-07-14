@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-/// Binary wire format for audio intervals over WebRTC DataChannels.
+/// Binary wire format for audio intervals over the WAIL relay.
 ///
 /// Format (all integers are little-endian):
 /// ```text
@@ -26,7 +26,7 @@ const FRAME_FLAG_STEREO: u8 = 0x01;
 const FRAME_FLAG_FINAL: u8 = 0x02;
 
 
-/// Binary wire format for streaming audio frames over WebRTC DataChannels.
+/// Binary wire format for streaming audio frames over the WAIL relay.
 ///
 /// Each frame carries a single 20ms Opus packet. The final frame of an
 /// interval includes metadata so the receiver can reconstruct an AudioInterval.
