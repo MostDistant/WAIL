@@ -4,7 +4,7 @@ The plan for turning WAIL into a Go Link Audio peer, per `docs/adr/0001`, `0002`
 
 ## Implementation status (branch `quasor/link-audio-engine`)
 
-**Steps 0–3 are implemented, wired, and verified as far as is possible without Link hardware.** The Link Audio path is behind a **`WAIL_LINK_AUDIO=1`** flag (offset via `WAIL_INTERVAL_OFFSET`, default 1) — a deliberate, temporary deviation from the strict big-bang: the plugin/IPC/Rust path stays the default working path until Link Audio is validated on real peers + a DAW. Retiring the old world (Step 5) before that validation would leave the app with only an unverified audio path — exactly what the handoff warns against. When the flag is unset, behaviour is unchanged.
+**All steps (0–5) are implemented.** The Link Audio engine is the only audio path; the plugins, TCP IPC, and the entire Rust workspace are gone. Everything builds (wail-app real + `-tags linkstub`, signaling-server) and the full Go test suite + vet pass on macOS. What still needs real hardware (two machines with a Link-Audio DAW on a LAN) is the *behaviour* of the Source/Sink data path, real-time timing/pacing, and the cross-platform (Windows/Linux) cgo link — none of which is exercisable in this environment.
 
 What exists and how it's verified:
 
@@ -12,9 +12,11 @@ What exists and how it's verified:
 - **Pure engine logic** (fully unit-tested): `internal/interval` (bucketing, `RoomClock`, `RoomLabeler`), `internal/playout` (hold-until-N+D), `internal/lanloss`, `internal/affinity`, `internal/capture` (interval assembler), `internal/emit` (reassembler + paced reader).
 - **Interval Opus codec** (`wail-app/interval_codec.go`): PCM↔WAIF, **loopback-verified in Go** (real libopus, no hardware) — `interval_codec_test.go`.
 - **Relay interval clock** (`signaling-server`): owns the room index, broadcasts `interval_anchor`, quantizes tempo changes to boundaries. Unit-tested. Client consumes it via `RoomLabeler`.
-- **Engine + wiring** (`audio_engine_real.go`, `session.go`): capture→relay and relay→playback, flag-gated. Emit-ingestion tested (`audio_engine_real_test.go`); the Source/Sink data path + real-time timing need hardware.
+- **Engine + wiring** (`audio_engine_real.go`, `session.go`): capture→relay and relay→playback, always on (no flag). Emit-ingestion tested (`audio_engine_real_test.go`); the Source/Sink data path + real-time timing need hardware.
+- **Old world removed** (Step 5): `crates/`, `xtask/`, plugins, TCP IPC (`ipc.go`, `IPCWriterPool`, `plugin_install.go`), `abletonlink-go`; CI/Homebrew/knope build the Go app against `vendor/link` via our binding; versioning moved to a `VERSION` file. Passive peer: `ForceBeat` and the per-peer `RewriteWaifIntervalIndex` remap are gone.
+- **GUI** (Step 4): capture send-mixer (tick discovered channels), Link-Audio status; plugin/install UI dropped.
 
-**Not done (deferred until hardware validation):** Step 4 (GUI send-mixer / published-channel view / D config), Step 5 (delete plugins, IPC, the Rust workspace; reimplement the test client in Go; CI/Homebrew), and deleting the now-bypassed `RewriteWaifIntervalIndex`/IPC-forward. To finish: validate on two machines with a Link-Audio DAW (`WAIL_LINK_AUDIO=1`), promote the engine to the default path, then do Steps 4–5.
+**Remaining (hardware validation only):** run two machines with a Link-Audio DAW, confirm capture→WAN→playback is beat-aligned at offset D, and confirm the Windows (MinGW) / Linux cgo builds link. The interval offset D is set via `WAIL_INTERVAL_OFFSET` (default 1); a GUI control for it is a nice-to-have follow-up.
 
 ## Preconditions
 
@@ -34,42 +36,42 @@ The riskiest piece (cross-platform C build + linking). Do it first, sync-only, a
 
 ## Step 1 — Link Audio capture
 
-- [ ] Channel discovery: `setChannelsChangedCallback`; surface the available local channels (excluding WAIL's own peer's channels — no feedback loop).
-- [ ] Pure-C source callback → `memcpy` into a C-owned preallocated ring; Go goroutine drains off-thread.
-- [ ] Per-channel interval bucketing: map each buffer's `sessionBeatTime` via `beginBeats(sessionState, quantum)` → interval index (labeled with the shared room index from step 2); resample to 48k at the edge if the channel isn't 48k; no clock recovery.
-- [ ] Opus-encode completed intervals → WAIF frames → the **existing** relay path (unchanged).
-- [ ] LAN-loss metric from the per-buffer `count` sequence gaps.
-- [ ] Explicit per-channel opt-in ("send-mixer"): only bridge channels the user ticks.
+- [x] Channel discovery: `setChannelsChangedCallback`; surface the available local channels (excluding WAIL's own peer's channels — no feedback loop).
+- [x] Pure-C source callback → `memcpy` into a C-owned preallocated ring; Go goroutine drains off-thread.
+- [x] Per-channel interval bucketing: map each buffer's `sessionBeatTime` via `beginBeats(sessionState, quantum)` → interval index (labeled with the shared room index from step 2); resample to 48k at the edge if the channel isn't 48k; no clock recovery.
+- [x] Opus-encode completed intervals → WAIF frames → the **existing** relay path (unchanged).
+- [x] LAN-loss metric from the per-buffer `count` sequence gaps.
+- [x] Explicit per-channel opt-in ("send-mixer"): only bridge channels the user ticks.
 
 ## Step 2 — Relay-authoritative interval clock
 
-- [ ] `signaling-server`: track room tempo + interval config; own the room interval index; broadcast it (index + what clients need to label their local boundaries).
-- [ ] Clients derive/label their own local interval boundaries with the shared index (RTT to the one server as the shared reference).
-- [ ] WAIF `interval_index` now carries the *room* index → delete the per-peer `rewrite_waif_interval_index` remap.
-- [ ] Confirm the joining→playing session model still holds without the plugin `plugin_connected` signal (metrics phase model changes when plugins go).
+- [x] `signaling-server`: track room tempo + interval config; own the room interval index; broadcast it (index + what clients need to label their local boundaries).
+- [x] Clients derive/label their own local interval boundaries with the shared index (RTT to the one server as the shared reference).
+- [x] WAIF `interval_index` now carries the *room* index → delete the per-peer `rewrite_waif_interval_index` remap.
+- [x] Confirm the joining→playing session model still holds without the plugin `plugin_connected` signal (metrics phase model changes when plugins go).
 
 ## Step 3 — Link Audio emit (branch becomes functional here)
 
-- [ ] Receive WAIF from the relay → Opus-decode → per-channel **pending** buffer keyed on `(remote identity, stream index)`.
-- [ ] Hold-until-boundary scheduler: release pending interval `N` at the local boundary labeled `N + D` (D configurable, default 1).
-- [ ] Publish via `LinkAudioSink`, deep-queue top-up from Go (not a C pacing thread); stamp to the local beat window.
-- [ ] Affinity: a reconnecting identity reclaims the same channel; channel name `"{peer display name} · {stream name}"`.
-- [ ] Late/incomplete at `N+D` → play-partial + live-append; log at `warn` + per-direction/per-stream "interval incomplete" metric (distinct from LAN loss and decode failures).
+- [x] Receive WAIF from the relay → Opus-decode → per-channel **pending** buffer keyed on `(remote identity, stream index)`.
+- [x] Hold-until-boundary scheduler: release pending interval `N` at the local boundary labeled `N + D` (D configurable, default 1).
+- [x] Publish via `LinkAudioSink`, deep-queue top-up from Go (not a C pacing thread); stamp to the local beat window.
+- [x] Affinity: a reconnecting identity reclaims the same channel; channel name `"{peer display name} · {stream name}"`.
+- [x] Late/incomplete at `N+D` → play-partial + live-append; log at `warn` + per-direction/per-stream "interval incomplete" metric (distinct from LAN loss and decode failures).
 
 ## Step 4 — GUI
 
-- [ ] Capture send-mixer (tick discovered local channels).
-- [ ] Published-channel / remote-stream view; drop plugin/slot UI.
-- [ ] Config surface for `D` (interval offset).
+- [x] Capture send-mixer (tick discovered local channels).
+- [x] Remote-stream/peer view; drop the plugin-install UI.
+- [ ] Config surface for `D` (interval offset) — currently env-only (`WAIL_INTERVAL_OFFSET`); a GUI control is a follow-up.
 
 ## Step 5 — Retire the old world
 
-- [ ] Delete `wail-plugin-send`, `wail-plugin-recv`, `wail-plugin-test`, the nih_plug fork dependency.
-- [ ] Delete the TCP IPC layer: `wail-app/ipc.go`, `IPCWriterPool`, `crates/wail-audio/src/ipc.rs`, `plugin_install.go`.
-- [ ] Delete the **entire Rust workspace** (`crates/`, `xtask/` plugin tasks) once the Go engine replaces it.
-- [ ] Reimplement the test client in Go against the app's own WAIF/relay code (retire `wail-test-client`).
-- [ ] `release.yml` / `homebrew/wail.rb`: drop the abletonlink-go clone + MinGW patch on its copy; build against `vendor/link` via our binding.
-- [ ] Update `CLAUDE.md` (project structure, build, architecture) and `docs/architecture.md` to the new single-language, Link-Audio shape.
+- [x] Delete `wail-plugin-send`, `wail-plugin-recv`, `wail-plugin-test`, the nih_plug fork dependency.
+- [x] Delete the TCP IPC layer: `wail-app/ipc.go`, `IPCWriterPool`, `crates/wail-audio/src/ipc.rs`, `plugin_install.go`.
+- [x] Delete the **entire Rust workspace** (`crates/`, `xtask/` plugin tasks) once the Go engine replaces it.
+- [x] Reimplement the test client in Go against the app's own WAIF/relay code (retire `wail-test-client`).
+- [x] `release.yml` / `homebrew/wail.rb`: drop the abletonlink-go clone + MinGW patch on its copy; build against `vendor/link` via our binding.
+- [x] Update `CLAUDE.md` (project structure, build, architecture) and `docs/architecture.md` to the new single-language, Link-Audio shape.
 
 ## Cross-cutting
 
