@@ -146,8 +146,7 @@ func resample(samples []int16, srcRate, dstRate int) []int16 {
 func WavSenderTask(
 	ctx context.Context,
 	streamIndex uint16,
-	connID int,
-	fromPluginCh chan<- ipcFrame,
+	send func([]byte),
 	boundaryCh <-chan IntervalBoundaryInfo,
 	wavPath string,
 ) {
@@ -192,7 +191,7 @@ func WavSenderTask(
 			if currentIdx >= 0 && frameNumber > 0 && frameNumber < totalFrames {
 				frame := extractFrame(samples, &readPos, samplesPerFrame)
 				if opusData, n, err := encodeFrame(enc, frame, opusBuf); err == nil {
-					sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
+					sendWAIFFrame(send, streamIndex, currentIdx,
 						totalFrames-1, frameSeq, opusData[:n], true, currentBPM, currentQuantum, currentBars, totalFrames)
 					frameSeq++
 				} else {
@@ -238,7 +237,7 @@ func WavSenderTask(
 		}
 
 		isFinal := frameNumber == totalFrames-1
-		sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
+		sendWAIFFrame(send, streamIndex, currentIdx,
 			frameNumber, frameSeq, opusData[:n], isFinal, currentBPM, currentQuantum, currentBars, totalFrames)
 		frameNumber++
 		frameSeq++

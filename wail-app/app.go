@@ -38,21 +38,10 @@ func NewApp(instance int) *App {
 	identity := getOrCreateIdentity(dataDir)
 	streamNames := LoadStreamNames(dataDir)
 
-	// Auto-install plugins from the bundled lib/ dir into the user's CLAP/VST3
-	// directories. Plugins ship inside the release archive, so this gives a
-	// single-download install on every platform.
-	var pluginErrors []string
-	pluginDir := FindPluginDir("")
-	if pluginDir != "" {
-		pluginErrors = InstallPluginsIfMissing(pluginDir)
-	}
-
 	return &App{
-		ipcPort:      uint16(9191 + instance),
-		streamNames:  streamNames,
-		dataDir:      dataDir,
-		identity:     identity,
-		pluginErrors: pluginErrors,
+		streamNames: streamNames,
+		dataDir:     dataDir,
+		identity:    identity,
 	}
 }
 
