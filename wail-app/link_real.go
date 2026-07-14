@@ -99,6 +99,27 @@ func (lb *LinkBridge) Detector() *TempoChangeDetector {
 	return lb.detector
 }
 
+// Link returns the underlying abl_link handle so the Link Audio engine can
+// create sources/sinks on the one shared peer (sync + audio share it).
+func (lb *LinkBridge) Link() *abllink.Link {
+	return lb.link
+}
+
+// EnableLinkAudio enables or disables Link Audio on the shared handle.
+func (lb *LinkBridge) EnableLinkAudio(on bool) {
+	lb.link.EnableLinkAudio(on)
+}
+
+// SetPeerName sets the Link Audio peer name used to label WAIL's channels.
+func (lb *LinkBridge) SetPeerName(name string) {
+	lb.link.SetPeerName(name)
+}
+
+// Quantum returns the Link session quantum.
+func (lb *LinkBridge) Quantum() float64 {
+	return lb.quantum
+}
+
 // SpawnPoller starts a polling goroutine that monitors the Link session.
 func (lb *LinkBridge) SpawnPoller(ctx context.Context) (chan<- LinkCommand, <-chan LinkEvent) {
 	return SpawnLinkPoller(ctx, lb)

@@ -8,7 +8,9 @@ import (
 	"log"
 	"math"
 	"net"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -138,6 +140,26 @@ func sessionLoop(
 	logInfo("Connected to signaling server at %s", config.Server)
 
 	emitter.Emit("session:started", SessionStarted{PeerID: peerID, Room: room, BPM: bpm})
+
+	// Link Audio engine (ADR-0001/0002). Transitional flag while the plugin/IPC
+	// path is retired in Step 5; when unset, behaviour is unchanged. When set,
+	// capture subscribes to local Link Audio channels and playback republishes
+	// remote streams — see audio_engine_real.go.
+	var audioEngine AudioEngine
+	if os.Getenv("WAIL_LINK_AUDIO") == "1" {
+		offsetD := 1
+		if v, err := strconv.Atoi(os.Getenv("WAIL_INTERVAL_OFFSET")); err == nil && v >= 0 {
+			offsetD = v
+		}
+		audioEngine = newAudioEngine(link, displayName, mesh.BroadcastAudio, offsetD)
+		if err := audioEngine.Start(); err != nil {
+			logWarn("Link Audio engine failed to start: %v", err)
+			audioEngine = nil
+		} else {
+			logInfo("Link Audio engine enabled (interval offset D=%d)", offsetD)
+			defer audioEngine.Stop()
+		}
+	}
 
 	// State
 	clock := NewClockSync()
@@ -515,6 +537,13 @@ func sessionLoop(
 			case "Pong":
 				clock.HandlePong(from, msg.PingSentAtUs, msg.PongSentAtUs)
 
+			case "IntervalAnchor":
+				// Relay-authoritative room interval clock (ADR-0003): align the
+				// Link Audio engine's local→room interval labeler.
+				if audioEngine != nil {
+					audioEngine.SetRoomAnchor(msg.Index, msg.BPM, msg.Bars, msg.Quantum)
+				}
+
 			case "TempoChange":
 				var name string
 				peers.WithPeer(from, func(p *PeerState) {
@@ -617,7 +646,28 @@ func sessionLoop(
 				recorder.RecordPeer(from, name, data)
 			}
 
-			// Rewrite interval index
+			// Link Audio playback path: hand the frame to the engine, keyed on
+			// the sender's persistent identity, and skip the legacy IPC forward.
+			// The room index already rides the frame (relay clock), so no rewrite.
+			if audioEngine != nil {
+				var identity, name string
+				peers.WithPeer(from, func(p *PeerState) {
+					if p.Identity != nil {
+						identity = *p.Identity
+					}
+					if p.DisplayName != nil {
+						name = *p.DisplayName
+					}
+				})
+				if identity == "" {
+					identity = from
+				}
+				audioEngine.HandleRemoteAudio(identity, name, data)
+				continue
+			}
+
+			// Rewrite interval index (legacy per-peer remap; retired with the relay
+			// clock once the Link Audio path is the only path — Step 2).
 			if lastIntervalIndex != nil {
 				RewriteWaifIntervalIndex(data, *lastIntervalIndex)
 			}
