@@ -1016,7 +1016,7 @@ summary:hover {
 .capture-channels {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 .capture-channel {
   display: flex;
@@ -1024,6 +1024,11 @@ summary:hover {
   gap: 6px;
   font-size: 12px;
   cursor: pointer;
+  /* Override the global `label` rule (margin-top: 12px) that was spacing rows out. */
+  margin: 0;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
 }
 .capture-channel input {
   width: auto;

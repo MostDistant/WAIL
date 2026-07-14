@@ -13,7 +13,6 @@ const joinError = document.getElementById('join-error');
 const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
 const sessionBpmInput = document.getElementById('session-bpm');
-const testToneSelect = document.getElementById('test-tone-select');
 const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsCloseBtn = document.getElementById('settings-close-btn');
@@ -219,7 +218,6 @@ document.getElementById('generate-room-btn').addEventListener('click', () => {
 
 // State
 let unlisten = [];
-let testToneStream = null; // null or stream index number
 let roomRefreshTimer = null;
 
 // Rolling stats window state
@@ -273,7 +271,7 @@ function saveRememberEnabled(enabled) {
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['room', 'password', 'bars', 'quantum', 'test-tone', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
+const rememberFields = ['room', 'password', 'bars', 'quantum', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
 
 function loadSettings() {
   try {
@@ -425,7 +423,6 @@ async function joinPublicRoom(room) {
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
-    testTone: document.getElementById('test-tone').checked,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
     recordingStems: document.getElementById('recording-stems').checked,
@@ -581,13 +578,8 @@ function showSession(room) {
   document.getElementById('session-plugin').className = 'status-value';
   document.getElementById('session-link-peers').textContent = '0';
   document.getElementById('session-interval').textContent = '-';
-  testToneStream = document.getElementById('test-tone').checked ? 0 : null;
   document.getElementById('recording-stat').style.display =
     document.getElementById('recording-enabled').checked ? '' : 'none';
-}
-
-function updateTestToneUI() {
-  testToneSelect.value = testToneStream != null ? String(testToneStream) : '';
 }
 
 function showError(el, msg) {
@@ -614,7 +606,6 @@ joinForm.addEventListener('submit', async (e) => {
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
-    testTone: document.getElementById('test-tone').checked,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
     recordingStems: document.getElementById('recording-stems').checked,
@@ -662,19 +653,6 @@ sessionBpmInput.addEventListener('keydown', (e) => {
 });
 
 sessionBpmInput.addEventListener('change', applyBpm);
-
-// --- Test Tone Toggle ---
-testToneSelect.addEventListener('change', async () => {
-  const val = testToneSelect.value;
-  const streamIndex = val === '' ? null : parseInt(val, 10);
-  try {
-    await invoke('set_test_tone', { streamIndex });
-    testToneStream = streamIndex;
-  } catch (err) {
-    console.error('Test tone error:', err);
-    updateTestToneUI(); // revert
-  }
-});
 
 // --- Stats mode toggle click handlers ---
 document.getElementById('stats-mode-btn').addEventListener('click', toggleStatsMode);
@@ -732,10 +710,6 @@ function renderStatus(s) {
   document.getElementById('session-plugin').className = 'status-value connected';
   renderCaptureMixer(captureChannels);
 
-  // Sync test tone state
-  testToneStream = s.test_tone_stream;
-  updateTestToneUI();
-
   // Update recording status
   if (s.recording) {
     document.getElementById('recording-stat').style.display = '';
@@ -745,8 +719,7 @@ function renderStatus(s) {
 
   // Update slot list (local sends first, then remote slots)
   const slotList = document.getElementById('peer-list');
-  // Filter out test tone entries that aren't actively sending
-  const localSends = (s.local_sends || []).filter(ls => !ls.is_test_tone || ls.is_sending);
+  const localSends = (s.local_sends || []);
   const slots = (s.slots || []).slice().sort((a, b) => a.slot - b.slot);
   if (localSends.length === 0 && slots.length === 0) {
     slotList.innerHTML = '<span class="empty">No peers connected</span>';

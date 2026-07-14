@@ -60,11 +60,6 @@
             <label for="quantum">Quantum</label>
             <input type="number" id="quantum" value="4" min="1" max="16" step="0.1">
 
-            <div class="remember-row" style="margin-top:8px">
-              <input type="checkbox" id="test-tone">
-              <label for="test-tone" class="remember-label">Enable test tone (no plugin needed)</label>
-            </div>
-
             <div class="recording-section">
               <div class="remember-row">
                 <input type="checkbox" id="recording-enabled">
@@ -159,13 +154,6 @@
             <label>Audio <button type="button" id="stats-mode-btn" class="stats-mode-toggle">all time</button></label>
             <span class="status-value" id="session-audio">0 / 0</span>
             <span id="session-audio-bytes" class="audio-bytes">0 B / 0 B</span>
-          </div>
-          <div class="status-cell">
-            <label>Test Tone</label>
-            <select id="test-tone-select" class="small-select">
-              <option value="">None</option>
-              <option value="0">Test Tone</option>
-            </select>
           </div>
           <div class="status-cell" id="recording-stat" style="display:none">
             <label>Recording</label>
