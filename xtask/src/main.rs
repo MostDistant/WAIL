@@ -19,7 +19,6 @@ TASKS:
   install-plugin  Build (optional) and install to system plugin directories
   package-plugin  Create a macOS .pkg installer (macOS only)
   test            Build plugins if missing, then run cargo test
-  run-turn        Start a local coturn TURN server
   test-client     Run the test tone client
 
 OPTIONS (install):
@@ -38,12 +37,6 @@ OPTIONS (install-plugin):
 OPTIONS (package-plugin):
   --no-build      Skip the build step; package existing bundles
 
-OPTIONS (run-turn):
-  --port <PORT>   Listening port          (default: 3478)
-  --user <U:P>    Username:password       (default: wail:wailpass)
-  --min-port <N>  Relay port range start  (default: 49152)
-  --max-port <N>  Relay port range end    (default: 49252)
-
 OPTIONS (test-client):
   All arguments are forwarded to wail-test-client.
   See `cargo xtask test-client -- --help` for available options.
@@ -61,7 +54,6 @@ EXAMPLES:
   cargo xtask package-plugin --no-build
   cargo xtask test
   cargo xtask test -- -p wail-net --ignored
-  cargo xtask run-turn
 ";
 
 // ---------------------------------------------------------------------------
@@ -95,10 +87,6 @@ fn main() -> Result<()> {
         Some("test") => {
             args.remove(0);
             run_test(&args)
-        }
-        Some("run-turn") => {
-            args.remove(0);
-            run_turn(&args)
         }
         Some("test-client") => {
             args.remove(0);
@@ -498,78 +486,6 @@ fn run_test(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn run_turn(args: &[String]) -> Result<()> {
-    // Parse optional flags
-    let get_flag = |flag: &str, default: &str| -> String {
-        args.windows(2)
-            .find(|w| w[0] == flag)
-            .map(|w| w[1].clone())
-            .unwrap_or_else(|| default.to_string())
-    };
-
-    let port = get_flag("--port", "3478");
-    let user = get_flag("--user", "wail:wailpass");
-    let min_port = get_flag("--min-port", "49152");
-    let max_port = get_flag("--max-port", "49252");
-    let realm = "wail";
-
-    // Detect local IP
-    let local_ip = detect_local_ip().unwrap_or_else(|| "0.0.0.0".to_string());
-
-    // Detect public IP
-    println!("Detecting public IP...");
-    let public_ip = detect_public_ip().unwrap_or_else(|| {
-        eprintln!("Warning: Could not detect public IP. Using local IP.");
-        local_ip.clone()
-    });
-
-    let username = user.split(':').next().unwrap_or("wail");
-    let password = user.split(':').nth(1).unwrap_or("wailpass");
-
-    println!("Local IP:  {local_ip}");
-    println!("Public IP: {public_ip}");
-    println!("TURN port: {port}");
-    println!("Relay ports: {min_port}-{max_port}");
-    println!("Credentials: {username}:{password}");
-    println!();
-    println!("Configure your WAIL client with:");
-    println!("  TURN Server:   turn:{public_ip}:{port}");
-    println!("  TURN Username: {username}");
-    println!("  TURN Password: {password}");
-    println!();
-    println!("Make sure to forward ports {port} (TCP+UDP) and {min_port}-{max_port} (UDP) on your router.");
-    println!();
-
-    // Compute lt-cred-mech key: MD5(username:realm:password)
-    let key = {
-        use std::io::Write;
-        let mut ctx = md5::Context::new();
-        write!(ctx, "{username}:{realm}:{password}").unwrap();
-        format!("0x{:x}", ctx.compute())
-    };
-
-    // Find turnserver binary
-    let turnserver = which_turnserver()?;
-
-    let mut cmd = Command::new(turnserver);
-    cmd.arg("-n") // no config file
-        .arg("--log-file=stdout")
-        .arg("--verbose")
-        .arg(format!("--listening-port={port}"))
-        .arg(format!("--listening-ip={local_ip}"))
-        .arg(format!("--external-ip={public_ip}/{local_ip}"))
-        .arg(format!("--realm={realm}"))
-        .arg(format!("--user={username}:{key}"))
-        .arg("--lt-cred-mech")
-        .arg("--no-tls")
-        .arg("--no-dtls")
-        .arg(format!("--min-port={min_port}"))
-        .arg(format!("--max-port={max_port}"));
-
-    println!("Starting coturn TURN server...\n");
-    run_cmd(cmd)
-}
-
 fn run_test_client(args: &[String]) -> Result<()> {
     println!("Building and running wail-test-client...");
     let mut cmd = Command::new(env!("CARGO"));
@@ -577,89 +493,6 @@ fn run_test_client(args: &[String]) -> Result<()> {
     cmd.args(args);
     cmd.current_dir(workspace_dir());
     run_cmd(cmd)
-}
-
-fn which_turnserver() -> Result<String> {
-    // Check common locations
-    for path in &[
-        "/opt/homebrew/opt/coturn/bin/turnserver",
-        "/opt/homebrew/bin/turnserver",
-        "/usr/local/bin/turnserver",
-        "/usr/bin/turnserver",
-    ] {
-        if Path::new(path).exists() {
-            return Ok(path.to_string());
-        }
-    }
-    // Try PATH
-    let output = Command::new("which")
-        .arg("turnserver")
-        .output()
-        .context("Could not locate turnserver")?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
-    }
-    #[cfg(target_os = "macos")]
-    bail!("coturn not found. Install with: brew install coturn");
-    #[cfg(target_os = "linux")]
-    bail!("coturn not found. Install with: sudo apt install coturn");
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    bail!("coturn not found. See https://github.com/coturn/coturn for installation instructions.")
-}
-
-fn detect_local_ip() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        // Try en0 first (Wi-Fi on macOS), then en1
-        for iface in &["en0", "en1"] {
-            let output = Command::new("ipconfig")
-                .args(["getifaddr", iface])
-                .output()
-                .ok()?;
-            if output.status.success() {
-                let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !ip.is_empty() {
-                    return Some(ip);
-                }
-            }
-        }
-        None
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // hostname -I returns space-separated non-loopback IPs
-        let output = Command::new("hostname").arg("-I").output().ok()?;
-        if output.status.success() {
-            let ips = String::from_utf8_lossy(&output.stdout);
-            if let Some(ip) = ips.split_whitespace().next() {
-                if !ip.is_empty() {
-                    return Some(ip.to_string());
-                }
-            }
-        }
-        None
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        None
-    }
-}
-
-fn detect_public_ip() -> Option<String> {
-    // Try IPv4 first
-    let output = Command::new("curl")
-        .args(["-s", "-4", "--max-time", "5", "https://api.ipify.org"])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !ip.is_empty() && !ip.contains(':') {
-            return Some(ip);
-        }
-    }
-    None
 }
 
 fn install_all(args: &[String]) -> Result<()> {

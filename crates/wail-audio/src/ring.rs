@@ -2208,9 +2208,9 @@ mod tests {
         assert_eq!(output[32], 0.0);
     }
 
-    // --- Tests: reconnect with same peer_id (WebRTC-level reconnect, no new peer_id) ---
+    // --- Tests: reconnect with same peer_id (transport-level reconnect, no new peer_id) ---
 
-    /// When the WebRTC connection drops and reconnects without a new peer_id
+    /// When the transport connection drops and reconnects without a new peer_id
     /// (session retries the same connection), no PeerLeft IPC is sent.
     /// The session sends PeerJoined again with the same peer_id and identity.
     /// The ring must keep the peer on the same slot — the slot was never freed.
@@ -2232,7 +2232,7 @@ mod tests {
             .unwrap()
             .0;
 
-        // WebRTC reconnect: PeerJoined IPC re-sent with same peer_id/identity,
+        // Transport reconnect: PeerJoined IPC re-sent with same peer_id/identity,
         // but NO PeerLeft was sent (slot is still active)
         ring.notify_peer_joined("peer-a", "identity-alice");
 
