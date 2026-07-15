@@ -67,6 +67,14 @@ Building without the Link SDK (Link becomes a stub, no audio path):
 cd wail-app && go build -tags linkstub
 ```
 
+**Windows (MinGW) only:** MinGW's COM headers `#define interface`, which collides with a parameter named `interface` in Link's `link_audio/Channels.hpp`. Before building on Windows, rename it:
+
+```sh
+sed -i 's/\binterface\b/iface/g' vendor/link/include/ableton/link_audio/Channels.hpp
+```
+
+(The Windows CI jobs do this automatically; macOS/Linux don't need it.)
+
 ### Desktop App (dev mode)
 
 ```sh

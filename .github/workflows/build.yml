@@ -87,6 +87,18 @@ jobs:
           Write-Host "Using PKG_CONFIG=$($pkgconf.FullName)"
           & $pkgconf.FullName --version
 
+      - name: Rename Link `interface` param for MinGW
+        shell: pwsh
+        # MinGW's COM headers #define `interface`, colliding with the `interface`
+        # parameter in Link's link_audio/Channels.hpp. Rename it (the only
+        # identifier use — Interface/mpInterface are untouched; other files use
+        # the word only in a comment/string). Undef-ing the macro from our cgo
+        # wrapper proved unreliable on MinGW.
+        run: |
+          (Get-Content vendor/link/include/ableton/link_audio/Channels.hpp) `
+            -replace '\binterface\b', 'iface' `
+            | Set-Content vendor/link/include/ableton/link_audio/Channels.hpp
+
       - name: Build Go app
         env:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-mingw-static\lib\pkgconfig

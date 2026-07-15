@@ -5,24 +5,20 @@
 // rather than copying it. Include paths and platform defines come from the cgo
 // directives in abllink.go.
 //
-// Windows/MinGW: <combaseapi.h> #defines the COM macro `interface` (as `struct`),
-// which collides with the parameter named `interface` in Link's
-// link_audio/Channels.hpp. We pull the Windows headers in first and #undef the
-// macro; include guards keep it gone for the transitive re-includes from asio.
+// Windows/MinGW: asio wants <winsock2.h> included before <windows.h>. NOMINMAX
+// avoids the min/max macros.
 //
-// Crucially we do NOT define WIN32_LEAN_AND_MEAN — that would make <windows.h>
-// skip <combaseapi.h>, so the macro would be defined only later (by asio) and our
-// #undef would be a no-op (the bug that broke the first Windows CI build). asio
-// still needs <winsock2.h> before <windows.h>. This is the C-side MinGW fix
-// living in our binding (migration plan precondition §9), replacing the old
-// sed-patch of the vendored header.
+// Separately, MinGW's COM header #defines `interface` as a macro, which collides
+// with the `interface` parameter in Link's link_audio/Channels.hpp. Undef-ing
+// the macro from here proved unreliable (windows.h doesn't pull the definer on
+// MinGW; asio pulls it after our #undef), so that collision is fixed
+// deterministically by renaming the parameter in the vendored header at build
+// time — see the "Rename Link `interface` param for MinGW" step in the Windows
+// CI jobs and DEVELOPMENT.md. (macOS/Linux need neither.)
 #if defined(_WIN32)
 #define NOMINMAX
 #include <winsock2.h>
 #include <windows.h>
-#ifdef interface
-#undef interface
-#endif
 #endif
 
 #include "abl_link.cpp"

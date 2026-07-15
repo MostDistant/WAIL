@@ -114,6 +114,13 @@ jobs:
           fi
           echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Rename Link `interface` param for MinGW
+        shell: bash
+        # MinGW's COM headers #define `interface`, colliding with the `interface`
+        # parameter in Link's link_audio/Channels.hpp. Rename that identifier (the
+        # only real use; Interface/mpInterface are untouched by \b).
+        run: sed -i 's/\binterface\b/iface/g' vendor/link/include/ableton/link_audio/Channels.hpp
+
       - name: Build wail desktop app
         shell: bash
         env:
