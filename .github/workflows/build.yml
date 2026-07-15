@@ -94,9 +94,12 @@ jobs:
         # identifier use — Interface/mpInterface are untouched; other files use
         # the word only in a comment/string). Undef-ing the macro from our cgo
         # wrapper proved unreliable on MinGW.
+        # -creplace is case-SENSITIVE: rename only lowercase `interface`, never the
+        # `Interface` template parameter (PowerShell's -replace is case-insensitive
+        # and would collapse both into `iface`, shadowing the template param).
         run: |
           (Get-Content vendor/link/include/ableton/link_audio/Channels.hpp) `
-            -replace '\binterface\b', 'iface' `
+            -creplace '\binterface\b', 'iface' `
             | Set-Content vendor/link/include/ableton/link_audio/Channels.hpp
 
       - name: Build Go app
