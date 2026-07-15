@@ -3,23 +3,26 @@ package main
 import (
 	"math"
 	"testing"
+
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 )
 
 func TestFramesPerInterval(t *testing.T) {
+	cfg := interval.Config{Bars: 4, Quantum: 4.0}
 	// 120 BPM, 4 bars, quantum 4 → 16 beats → 8 seconds → 400 frames
-	fps := FramesPerInterval(120.0, 4, 4.0)
+	fps := FramesPerInterval(120.0, cfg)
 	if fps != 400 {
 		t.Fatalf("expected 400, got %d", fps)
 	}
 
 	// 60 BPM, 4 bars, quantum 4 → 16 seconds → 800 frames
-	fps = FramesPerInterval(60.0, 4, 4.0)
+	fps = FramesPerInterval(60.0, cfg)
 	if fps != 800 {
 		t.Fatalf("expected 800, got %d", fps)
 	}
 
 	// 0 BPM should return 0 (guard against division by zero)
-	fps = FramesPerInterval(0.0, 4, 4.0)
+	fps = FramesPerInterval(0.0, cfg)
 	if fps != 0 {
 		t.Fatalf("expected 0 for zero BPM, got %d", fps)
 	}

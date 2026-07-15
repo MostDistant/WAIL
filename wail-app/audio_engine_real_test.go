@@ -39,8 +39,26 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 	if len(le.emit) != 1 {
 		t.Fatalf("expected 1 emit stream, got %d", len(le.emit))
 	}
-	if le.sinks.Len() != 1 {
-		t.Fatalf("expected 1 published sink, got %d", le.sinks.Len())
+	var st *emitStream
+	for _, s := range le.emit {
+		st = s
+	}
+	if st.sink == nil {
+		t.Fatal("expected the stream to publish a Link Audio sink")
+	}
+
+	// Reconnect: same identity+stream, renamed peer → reuse the same stream and
+	// channel (affinity), just refresh the name. Must not mint a new stream/sink.
+	firstSink := st.sink
+	eng.HandleRemoteAudio("identity-A", "Alice (reconnected)", "guitar", frames[0])
+	if len(le.emit) != 1 {
+		t.Fatalf("reconnect minted a new stream: %d", len(le.emit))
+	}
+	if st.sink != firstSink {
+		t.Fatal("reconnect replaced the sink — channel affinity broken")
+	}
+	if st.lastDisplayName != "Alice (reconnected)" {
+		t.Fatalf("name not refreshed on reconnect: %q", st.lastDisplayName)
 	}
 
 	// A malformed frame must be ignored without creating a stream or panicking.
@@ -58,9 +76,9 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 		t.Fatal("no capture channels expected before discovery runs")
 	}
 
-	// Stop without Start must be safe and must tear down the sink.
+	// Stop without Start must be safe and must tear down the streams (+ sinks).
 	eng.Stop()
-	if le.sinks.Len() != 0 {
-		t.Fatalf("Stop should remove sinks, still have %d", le.sinks.Len())
+	if len(le.emit) != 0 {
+		t.Fatalf("Stop should clear emit streams, still have %d", len(le.emit))
 	}
 }

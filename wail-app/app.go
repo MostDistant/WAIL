@@ -98,7 +98,6 @@ func (a *App) JoinRoom(
 	recordingStems *bool,
 	recordingRetentionDays *uint32,
 	streamCount *uint16,
-	testMode *bool,
 ) (*JoinResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -122,10 +121,6 @@ func (a *App) JoinRoom(
 	actualStreamCount := uint16(1)
 	if streamCount != nil {
 		actualStreamCount = *streamCount
-	}
-	actualTestMode := false
-	if testMode != nil {
-		actualTestMode = *testMode
 	}
 
 	var recording *RecordingConfig
@@ -162,7 +157,6 @@ func (a *App) JoinRoom(
 		Quantum:     actualQuantum,
 		Recording:   recording,
 		StreamCount: actualStreamCount,
-		TestMode:    actualTestMode,
 	}
 
 	handle, err := SpawnSession(a.emitter, config)

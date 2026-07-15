@@ -29,7 +29,6 @@ type SessionConfig struct {
 	Quantum     float64
 	Recording   *RecordingConfig
 	StreamCount uint16
-	TestMode    bool
 }
 
 // SessionCommand represents commands from the UI to the session.
@@ -154,15 +153,9 @@ func sessionLoop(
 	}
 
 	var lastIntervalIndex *int64
-	intervalBars := bars
-	intervalQuantum := quantum
+	intervalCfg := interval.Config{Bars: bars, Quantum: quantum}
 	lastBroadcastBPM := bpm
 	localStreamNames := make(map[uint16]string)
-
-	// Client-side room interval labeler (relay-authoritative clock, ADR-0003):
-	// aligned from interval_anchor, it maps local boundaries to the room index
-	// that in-app senders (test tone / WAV) tag their frames with.
-	var roomLabeler interval.RoomLabeler
 
 	// Audio stats
 	var audioIntervalsSent, audioIntervalsReceived uint64
@@ -232,6 +225,56 @@ func sessionLoop(
 	var reconnect *sigReconnect
 	reconnectTimer := time.NewTimer(time.Hour)
 	reconnectTimer.Stop()
+
+	// handleBoundary fires on each Link event: if the given beat crossed into a
+	// new local interval, it logs the boundary, records timing drift, and hands
+	// the room-labeled boundary to the in-app senders (test tone / WAV). It closes
+	// over sessionLoop state (interval config, frame counters, drift, sender
+	// channels) so the call sites pass only the beat.
+	handleBoundary := func(beat float64) {
+		// idx is the local interval index (drives boundary detection); roomIdx is
+		// the shared room index it maps to (relay clock) — what senders tag with.
+		idx := intervalCfg.IndexAtBeat(beat)
+		if lastIntervalIndex != nil && idx <= *lastIntervalIndex {
+			return
+		}
+		newIdx := idx
+		lastIntervalIndex = &newIdx
+
+		roomIdx := idx
+		if ri, ok := audioEngine.RoomIndex(idx); ok {
+			roomIdx = ri
+		}
+
+		log.Printf("[session] >>> INTERVAL local=%d room=%d <<< beat=%.1f sent=%d recv=%d", idx, roomIdx, beat, intervalFramesSent, intervalFramesRecv)
+		intervalFramesSent = 0
+		intervalFramesRecv = 0
+		intervalBytesSent = 0
+		intervalBytesRecv = 0
+
+		if lastBoundaryTime != nil && lastBroadcastBPM > 0 {
+			gap := time.Since(*lastBoundaryTime)
+			expectedUs := int64(intervalCfg.BeatsPerInterval() / (lastBroadcastBPM / 60.0) * 1_000_000.0)
+			drift := gap.Microseconds() - expectedUs
+			boundaryDriftUs = &drift
+		}
+		now := time.Now()
+		lastBoundaryTime = &now
+
+		info := IntervalBoundaryInfo{Index: roomIdx, BPM: lastBroadcastBPM, Cfg: intervalCfg}
+		if testToneBoundaryCh != nil {
+			select {
+			case testToneBoundaryCh <- info:
+			default:
+			}
+		}
+		if wavSenderBoundaryCh != nil {
+			select {
+			case wavSenderBoundaryCh <- info:
+			default:
+			}
+		}
+	}
 
 	// Signaling event goroutine → channel
 	sigEventCh := make(chan *MeshEvent, 64)
@@ -509,11 +552,10 @@ func sessionLoop(
 
 			case "IntervalAnchor":
 				// Relay-authoritative room interval clock (ADR-0003): align the
-				// engine's labeler and the session's own labeler (used by in-app
-				// senders) to the room index.
+				// engine's labeler to the room index. The session reads that same
+				// labeler back via audioEngine.RoomIndex for boundary logging and
+				// in-app-sender tagging (one source of truth).
 				audioEngine.SetRoomAnchor(msg.Index, msg.BPM, msg.Bars, msg.Quantum)
-				localIdx := interval.Config{Bars: intervalBars, Quantum: intervalQuantum}.IndexAtBeat(link.State().Beat)
-				roomLabeler.Align(msg.Index, localIdx)
 
 			case "TempoChange":
 				var name string
@@ -541,8 +583,7 @@ func sessionLoop(
 
 			case "IntervalConfig":
 				logInfo("Remote interval config: %d bars, quantum %.0f", msg.Bars, msg.Quantum)
-				intervalBars = msg.Bars
-				intervalQuantum = msg.Quantum
+				intervalCfg = interval.Config{Bars: msg.Bars, Quantum: msg.Quantum}
 
 			case "AudioStatus":
 				peers.WithPeer(from, func(p *PeerState) {
@@ -656,11 +697,11 @@ func sessionLoop(
 					mesh.Broadcast(NewTempoChange(ev.BPM, quantum, ev.TimestampUs))
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &lastIntervalIndex, &lastBoundaryTime, &roomLabeler, testToneBoundaryCh, wavSenderBoundaryCh)
+				handleBoundary(ev.Beat)
 
 			case "StateUpdate":
 				mesh.Broadcast(NewStateSnapshot(ev.BPM, ev.Beat, ev.Phase, ev.Quantum, ev.TimestampUs))
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &lastIntervalIndex, &lastBoundaryTime, &roomLabeler, testToneBoundaryCh, wavSenderBoundaryCh)
+				handleBoundary(ev.Beat)
 			}
 
 		// --- Ping timer ---
@@ -799,7 +840,7 @@ func sessionLoop(
 			emitter.Emit("status:update", StatusUpdate{
 				BPM: state.BPM, Beat: state.Beat, Phase: state.Phase,
 				LinkPeers: state.NumPeers, Peers: peerInfos, Slots: slotInfos,
-				LocalSends: localSends, IntervalBars: intervalBars,
+				LocalSends: localSends, IntervalBars: intervalCfg.Bars,
 				AudioSent: audioIntervalsSent, AudioRecv: audioIntervalsReceived,
 				AudioBytesSent: audioBytesSent, AudioBytesRecv: audioBytesRecv,
 				AudioDCOpen: dcOpen, PluginConnected: true,
@@ -876,65 +917,6 @@ func connectMesh(ctx context.Context, config SessionConfig, peerID string) (*Pee
 	}
 	mesh := NewPeerMesh(peerID, client, channels, config.StreamCount, peerNames)
 	return mesh, channels.SyncCh, channels.AudioCh, nil
-}
-
-func handleIntervalBoundary(
-	beat float64, bars uint32, quantum float64,
-	lastIdx *int64, bpm float64, lastBoundary *time.Time,
-	boundaryDriftUs **int64,
-	framesSent, framesRecv, bytesSent, bytesRecv *uint64,
-	lastIntervalIndex **int64, lastBoundaryTime **time.Time,
-	roomLabeler *interval.RoomLabeler,
-	testToneBoundaryCh chan IntervalBoundaryInfo,
-	wavSenderBoundaryCh chan IntervalBoundaryInfo,
-) {
-	// idx is the local interval index (drives boundary detection); roomIdx is the
-	// shared room index it maps to (relay clock) — what in-app senders tag with.
-	cfg := interval.Config{Bars: bars, Quantum: quantum}
-	idx := cfg.IndexAtBeat(beat)
-	if lastIdx != nil && idx <= *lastIdx {
-		return
-	}
-	newIdx := idx
-	*lastIntervalIndex = &newIdx
-
-	roomIdx := idx
-	if ri, ok := roomLabeler.RoomIndex(idx); ok {
-		roomIdx = ri
-	}
-
-	log.Printf("[session] >>> INTERVAL local=%d room=%d <<< beat=%.1f sent=%d recv=%d", idx, roomIdx, beat, *framesSent, *framesRecv)
-	*framesSent = 0
-	*framesRecv = 0
-	*bytesSent = 0
-	*bytesRecv = 0
-
-	if lastBoundary != nil {
-		gap := time.Since(*lastBoundary)
-		if bpm > 0 {
-			beats := cfg.BeatsPerInterval()
-			expectedUs := int64(beats / (bpm / 60.0) * 1_000_000.0)
-			actualUs := gap.Microseconds()
-			drift := actualUs - expectedUs
-			*boundaryDriftUs = &drift
-		}
-	}
-	now := time.Now()
-	*lastBoundaryTime = &now
-
-	info := IntervalBoundaryInfo{Index: roomIdx, BPM: bpm, Bars: bars, Quantum: quantum}
-	if testToneBoundaryCh != nil {
-		select {
-		case testToneBoundaryCh <- info:
-		default:
-		}
-	}
-	if wavSenderBoundaryCh != nil {
-		select {
-		case wavSenderBoundaryCh <- info:
-		default:
-		}
-	}
 }
 
 func min64(a, b uint64) uint64 {

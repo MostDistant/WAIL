@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-audio/wav"
 	"github.com/nicholasgasior/wail/wail-app/internal/dsp"
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 	"gopkg.in/hraban/opus.v2"
 )
 
@@ -143,8 +144,7 @@ func WavSenderTask(
 	readPos := 0 // position in interleaved samples
 	var currentIdx int64 = -1
 	var currentBPM float64 = 120.0
-	var currentBars uint32 = 4
-	var currentQuantum float64 = 4.0
+	currentCfg := interval.Config{Bars: 4, Quantum: 4.0}
 	var frameNumber uint32
 	var totalFrames uint32
 	var frameSeq uint32
@@ -163,7 +163,7 @@ func WavSenderTask(
 				frame := extractFrame(samples, &readPos, samplesPerFrame)
 				if opusData, n, err := encodeFrame(enc, frame, opusBuf); err == nil {
 					sendWAIFFrame(send, streamIndex, currentIdx,
-						totalFrames-1, frameSeq, opusData[:n], true, currentBPM, currentQuantum, currentBars, totalFrames)
+						totalFrames-1, frameSeq, opusData[:n], true, currentBPM, currentCfg.Quantum, currentCfg.Bars, totalFrames)
 					frameSeq++
 				} else {
 					log.Printf("[wav-sender] Encode failed on boundary flush: %v", err)
@@ -171,10 +171,9 @@ func WavSenderTask(
 			}
 			currentIdx = boundary.Index
 			currentBPM = boundary.BPM
-			currentBars = boundary.Bars
-			currentQuantum = boundary.Quantum
+			currentCfg = boundary.Cfg
 			frameNumber = 0
-			totalFrames = FramesPerInterval(currentBPM, currentBars, currentQuantum)
+			totalFrames = FramesPerInterval(currentBPM, currentCfg)
 			now := time.Now()
 			intervalStart = &now
 		default:
@@ -209,7 +208,7 @@ func WavSenderTask(
 
 		isFinal := frameNumber == totalFrames-1
 		sendWAIFFrame(send, streamIndex, currentIdx,
-			frameNumber, frameSeq, opusData[:n], isFinal, currentBPM, currentQuantum, currentBars, totalFrames)
+			frameNumber, frameSeq, opusData[:n], isFinal, currentBPM, currentCfg.Quantum, currentCfg.Bars, totalFrames)
 		frameNumber++
 		frameSeq++
 	}

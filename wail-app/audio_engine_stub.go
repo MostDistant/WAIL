@@ -11,9 +11,10 @@ func newAudioEngine(_ *LinkBridge, _ string, _ func(waif []byte), _ int) AudioEn
 	return &stubAudioEngine{}
 }
 
-func (s *stubAudioEngine) Start() error                                             { return nil }
-func (s *stubAudioEngine) Stop()                                                    {}
-func (s *stubAudioEngine) HandleRemoteAudio(_, _, _ string, _ []byte)               {}
-func (s *stubAudioEngine) SetRoomAnchor(_ int64, _ float64, _ uint32, _ float64)    {}
-func (s *stubAudioEngine) CaptureChannels() []CaptureChannelInfo                    { return nil }
-func (s *stubAudioEngine) SetCaptureEnabled(_ string, _ bool)                       {}
+func (s *stubAudioEngine) Start() error                                          { return nil }
+func (s *stubAudioEngine) Stop()                                                 {}
+func (s *stubAudioEngine) HandleRemoteAudio(_, _, _ string, _ []byte)            {}
+func (s *stubAudioEngine) SetRoomAnchor(_ int64, _ float64, _ uint32, _ float64) {}
+func (s *stubAudioEngine) RoomIndex(_ int64) (int64, bool)                       { return 0, false }
+func (s *stubAudioEngine) CaptureChannels() []CaptureChannelInfo                 { return nil }
+func (s *stubAudioEngine) SetCaptureEnabled(_ string, _ bool)                    {}

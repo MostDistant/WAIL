@@ -64,7 +64,6 @@ type linkAudioEngine struct {
 
 	capture      map[string]*captureChannel // by channel-id hex
 	emit         map[affinity.Key]*emitStream
-	sinks        *affinity.Registry[*abllink.Sink]
 	nextStreamID uint16
 }
 
@@ -89,6 +88,10 @@ type emitStream struct {
 	dec      *IntervalDecoder
 	reasm    *emit.Reassembler
 	sched    *playout.Scheduler
+	sink     *abllink.Sink // published Link Audio channel; the emit map keyed by
+	// affinity.Key IS the affinity (a reconnecting identity reuses this stream +
+	// channel), so no separate registry is needed.
+
 	// Last raw name inputs; recompute + rename the channel only when these change
 	// (avoids per-frame name formatting on the hot path).
 	lastDisplayName string
@@ -116,7 +119,6 @@ func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), off
 		tempoBPM: 120,
 		capture:  make(map[string]*captureChannel),
 		emit:     make(map[affinity.Key]*emitStream),
-		sinks:    affinity.New[*abllink.Sink](),
 	}
 }
 
@@ -148,9 +150,9 @@ func (e *linkAudioEngine) Stop() {
 		}
 	}
 	e.capture = make(map[string]*captureChannel)
-	for _, k := range e.sinks.Keys() {
-		if h, ok := e.sinks.Remove(k); ok && h != nil {
-			h.Close()
+	for _, st := range e.emit {
+		if st.sink != nil {
+			st.sink.Close()
 		}
 	}
 	e.emit = make(map[affinity.Key]*emitStream)
@@ -181,6 +183,12 @@ func (e *linkAudioEngine) SetRoomAnchor(currentIndex int64, bpm float64, bars ui
 	}
 	localIdx := e.cfg.IndexAtBeat(localBeat)
 	e.labeler.Align(currentIndex, localIdx)
+}
+
+func (e *linkAudioEngine) RoomIndex(localIndex int64) (int64, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.labeler.RoomIndex(localIndex)
 }
 
 func (e *linkAudioEngine) CaptureChannels() []CaptureChannelInfo {
@@ -415,20 +423,16 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			dec:             dec,
 			reasm:           emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
 			sched:           playout.New(e.offsetD),
+			sink:            e.link.NewSink(affinity.FormatName(displayName, label), engineInternalRate*2),
 			lastDisplayName: displayName,
 			lastStreamName:  streamName,
 		}
 		e.emit[key] = st
-		e.sinks.Resolve(key, displayName, label, func() *abllink.Sink {
-			return e.link.NewSink(affinity.FormatName(displayName, label), engineInternalRate*2)
-		})
 	} else if st.lastDisplayName != displayName || st.lastStreamName != streamName {
 		// Name became known / changed: rename the existing channel in place, don't
 		// re-mint it (affinity preserves the channel).
-		desiredName := affinity.FormatName(displayName, streamLabel(streamName, f.StreamID))
-		if ent, ok := e.sinks.Get(key); ok && ent.Handle != nil {
-			ent.Handle.SetName(desiredName)
-			ent.Name = desiredName
+		if st.sink != nil {
+			st.sink.SetName(affinity.FormatName(displayName, streamLabel(streamName, f.StreamID)))
 		}
 		st.lastDisplayName = displayName
 		st.lastStreamName = streamName
@@ -533,17 +537,13 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, quantum float64, 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, st := range e.emit {
-		if st.reader == nil {
-			continue
-		}
-		ent, ok := e.sinks.Get(st.key)
-		if !ok || ent.Handle == nil {
+		if st.reader == nil || st.sink == nil {
 			continue
 		}
 		samples, beat, done := st.reader.Next(emitChunkFrames)
 		if len(samples) > 0 {
 			frames := len(samples) / st.channels
-			ent.Handle.WriteInterleaved(samples, ss, beat, quantum, frames, st.channels, engineInternalRate)
+			st.sink.WriteInterleaved(samples, ss, beat, quantum, frames, st.channels, engineInternalRate)
 		}
 		if done {
 			st.reader = nil

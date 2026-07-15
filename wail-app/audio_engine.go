@@ -22,6 +22,11 @@ type AudioEngine interface {
 	// SetRoomAnchor applies a fresh relay interval_anchor: aligns the local→room
 	// interval labeler and adopts the room tempo/config.
 	SetRoomAnchor(currentIndex int64, bpm float64, bars uint32, quantum float64)
+	// RoomIndex maps a local interval index to the shared room index via the
+	// labeler aligned by SetRoomAnchor; ok is false until an anchor has arrived.
+	// The session uses it for boundary logging and to tag in-app-sender frames,
+	// so there is a single source of truth for the local→room mapping.
+	RoomIndex(localIndex int64) (roomIndex int64, ok bool)
 	// CaptureChannels lists discovered local Link Audio channels for the
 	// send-mixer UI, marking which are currently bridged.
 	CaptureChannels() []CaptureChannelInfo
