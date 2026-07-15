@@ -2,7 +2,7 @@
 
 WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across the internet using a WebSocket relay server. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN, with intervalic audio (NINJAM-style) captured, Opus-encoded, and transmitted via the server.
 
-WAIL is an Ableton **Link Audio** peer — it captures and plays audio directly over Link, so there are no plugins to install. Any Link-Audio-capable app (e.g. Ableton Live 12.3+) works with WAIL.
+WAIL is an Ableton **Link Audio** peer — it captures and plays audio directly over Link, so there are no WAIL plugins to install. Ableton Live 12.3+ supports Link Audio natively; with any other DAW you can bridge audio in and out of Link Audio using the third-party [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst).
 
 ## Install
 
@@ -31,11 +31,9 @@ tar -xzf wail-linux-x64-*.tar.gz
 
 1. **Launch the WAIL app.**
 
-2. **Enable Ableton Link and Link Audio in your DAW.** WAIL relies on Link for tempo/phase sync and on Link Audio to exchange audio (e.g. Ableton Live 12.3+).
-   - *Ableton Live:* Preferences > Link, Tempo, MIDI > turn on "Show Link Toggle", then enable Link in the transport bar.
-   - *Bitwig Studio:* Settings > Synchronization > enable Link.
-   - *REAPER:* Install [ReaBlink](https://github.com/ak5k/reablink), which adds Ableton Link support via a REAPER extension.
-   - Other DAWs — check your DAW's documentation for Link and Link Audio support.
+2. **Enable Ableton Link (tempo/phase) and Link Audio (the audio exchange) in your DAW.** These are two separate things: Link sync is widely supported; Link Audio is newer.
+   - *Ableton Live 12.3+* — the only DAW with **native Link Audio** today. Preferences > Link, Tempo, MIDI > turn on "Show Link Toggle", then enable Link in the transport bar.
+   - *Any other DAW (Bitwig, REAPER, etc.)* — enable Ableton **Link** for tempo/phase sync (Bitwig: Settings > Synchronization; REAPER: install [ReaBlink](https://github.com/ak5k/reablink)), and to send/receive **Link Audio** use the third-party [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst), which bridges your DAW's audio to and from Link Audio channels that WAIL can capture and publish.
 
 3. **Route audio to Link Audio.** Send the tracks or busses you want to share to Link Audio output channels in your DAW. WAIL captures those channels, so anything you route there is streamed to your peers. You can share several independent streams (e.g. drums on one channel, synth on another).
 
@@ -64,6 +62,8 @@ WAIL can run without the GUI for scripted or automated use. The `-headless` flag
 
 Stop with Ctrl+C or SIGTERM for clean shutdown.
 
+By default WAIL connects to the hosted relay. Set the `WAIL_SIGNAL_URL` environment variable (e.g. `WAIL_SIGNAL_URL=ws://localhost:8899`) to point at a self-hosted or local relay instead.
+
 ## Components
 
 WAIL has two components that work together:
@@ -83,7 +83,7 @@ WAIL has two components that work together:
 
 **No sync / peers not connecting** — Make sure Ableton Link is enabled in your DAW. WAIL relies on Link for tempo and phase sync.
 
-**No audio from remote peers** — Make sure Link Audio is enabled in your DAW, that you've routed audio to a Link Audio output channel and added a track that takes its input from WAIL's published Link Audio channels, and that the WAIL app is running and connected to the same room.
+**No audio from remote peers** — Make sure Link Audio is available in your DAW (native in Ableton Live 12.3+, or via the [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst) in other DAWs), that you've routed audio to a Link Audio output channel and added a track that takes its input from WAIL's published Link Audio channels, and that the WAIL app is running and connected to the same room.
 
 **Changing tempo mid-jam** — Not recommended. WAIL uses NINJAM-style intervals, so audio is recorded and played back in full interval chunks. If you change the tempo, the current interval must finish before the new tempo takes effect. If you do need to change tempo, agree on it beforehand and have one person change it — Link will propagate it to all peers within a few seconds.
 
