@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.0.0 (2026-07-15)
+
+### Breaking Changes
+
+- WAIL no longer uses CLAP/VST3 plugins or TCP IPC; audio flows
+exclusively over Ableton Link Audio. Builds (real + linkstub), vet, and the full
+Go test suite pass on macOS. The live audio path needs Link peers + a DAW to
+exercise.
+
+### Features
+
+- land Link Audio engine on main — WAIL is a Link Audio peer (retire plugins, IPC, Rust) (#347)
+
 ## 2.4.7 (2026-06-04)
 
 ### Fixes
