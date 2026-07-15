@@ -33,7 +33,7 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 		t.Fatalf("expected >= 2 WAIF frames, got %d", len(frames))
 	}
 	for _, f := range frames {
-		eng.HandleRemoteAudio("identity-A", "Alice", f)
+		eng.HandleRemoteAudio("identity-A", "Alice", "guitar", f)
 	}
 
 	if len(le.emit) != 1 {
@@ -44,7 +44,7 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 	}
 
 	// A malformed frame must be ignored without creating a stream or panicking.
-	eng.HandleRemoteAudio("identity-B", "Bob", []byte{'x', 'y', 'z'})
+	eng.HandleRemoteAudio("identity-B", "Bob", "bass", []byte{'x', 'y', 'z'})
 	if len(le.emit) != 1 {
 		t.Fatalf("malformed frame created a stream: %d", len(le.emit))
 	}

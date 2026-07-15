@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log"
+
 	"gopkg.in/hraban/opus.v2"
 )
 
@@ -34,7 +36,9 @@ func NewIntervalEncoder(channels, sampleRate, bitrateKbps int) (*IntervalEncoder
 		return nil, err
 	}
 	if bitrateKbps > 0 {
-		_ = enc.SetBitrate(bitrateKbps * 1000)
+		if err := enc.SetBitrate(bitrateKbps * 1000); err != nil {
+			log.Printf("[audio] warn: set Opus bitrate %dkbps failed, using default: %v", bitrateKbps, err)
+		}
 	}
 	spf := samplesPerWaifFrame(sampleRate)
 	return &IntervalEncoder{

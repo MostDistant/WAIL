@@ -619,20 +619,24 @@ func sessionLoop(
 
 			// Link Audio playback: hand the frame to the engine, keyed on the
 			// sender's persistent identity. The room index already rides the frame
-			// (relay clock), so there is no per-peer remap.
-			var identity, name string
-			peers.WithPeer(from, func(p *PeerState) {
-				if p.Identity != nil {
-					identity = *p.Identity
-				}
-				if p.DisplayName != nil {
-					name = *p.DisplayName
-				}
-			})
+			// (relay clock), so there is no per-peer remap. streamName (from the
+			// StreamNames sync) labels the republished channel "{peer} · {stream}".
+			var identity, name, streamName string
+			if hdr := PeekWaifHeader(data); hdr != nil {
+				peers.WithPeer(from, func(p *PeerState) {
+					if p.Identity != nil {
+						identity = *p.Identity
+					}
+					if p.DisplayName != nil {
+						name = *p.DisplayName
+					}
+					streamName = p.StreamNames[hdr.StreamID]
+				})
+			}
 			if identity == "" {
 				identity = from
 			}
-			audioEngine.HandleRemoteAudio(identity, name, data)
+			audioEngine.HandleRemoteAudio(identity, name, streamName, data)
 
 		// --- Audio from in-app senders (test tone / WAV) → relay ---
 		case wireData := <-localWaifCh:

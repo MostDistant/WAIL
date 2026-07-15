@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nicholasgasior/wail/wail-app/internal/abllink"
@@ -53,6 +54,8 @@ type linkAudioEngine struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	wireDecodeFailures atomic.Uint64 // WAIF wire-decode errors (pre-Opus)
+
 	mu       sync.Mutex
 	labeler  interval.RoomLabeler
 	cfg      interval.Config
@@ -85,10 +88,17 @@ type emitStream struct {
 	dec      *IntervalDecoder
 	reasm    *emit.Reassembler
 	sched    *playout.Scheduler
+	sinkName string // last name set on the published channel (for live rename)
 
 	playing   int64 // room index currently playing
 	hasReader bool
 	reader    *emit.PacedReader
+
+	// Observability (ADR-0003 / pillar 8), read via Stats(). Atomic because
+	// decodeFailures is bumped on the session goroutine and intervalsIncomplete
+	// on the emit-loop goroutine.
+	decodeFailures      atomic.Uint64 // Opus decode errors
+	intervalsIncomplete atomic.Uint64 // intervals not fully delivered by their N+D boundary
 }
 
 func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), offsetD int) AudioEngine {
@@ -365,16 +375,29 @@ func (e *linkAudioEngine) emitCaptured(ch *captureChannel, done *capture.Complet
 
 // --- emit ---
 
-func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName string, waif []byte) {
-	h := PeekWaifHeader(waif)
-	if h == nil {
+// HandleRemoteAudio is called on the session goroutine. streamName is the
+// sender's human-readable name for this stream (from StreamNames sync); the
+// published channel is named "{peer} · {stream}" (ADR-0002). It may be empty
+// early (before names arrive) — we fall back to "stream N" and rename the
+// channel in place once the real name is known (affinity preserves the channel).
+func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamName string, waif []byte) {
+	if PeekWaifHeader(waif) == nil {
 		return
 	}
 	f, err := DecodeAudioFrameWire(waif)
 	if err != nil {
+		n := e.wireDecodeFailures.Add(1)
+		if n == 1 || n%100 == 0 {
+			log.Printf("[audio] warn: WAIF decode failed from %s (%d total): %v", fromIdentity, n, err)
+		}
 		return
 	}
 	key := affinity.Key{Identity: fromIdentity, Stream: f.StreamID}
+	label := streamName
+	if label == "" {
+		label = fmt.Sprintf("stream %d", f.StreamID)
+	}
+	desiredName := affinity.FormatName(displayName, label)
 
 	e.mu.Lock()
 	st, ok := e.emit[key]
@@ -395,29 +418,42 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName string, wa
 			dec:      dec,
 			reasm:    emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
 			sched:    playout.New(e.offsetD),
+			sinkName: desiredName,
 		}
 		e.emit[key] = st
-		// Ensure a published sink exists for this stream (affinity).
-		streamName := fmt.Sprintf("stream %d", f.StreamID)
-		e.sinks.Resolve(key, displayName, streamName, func() *abllink.Sink {
-			return e.link.NewSink(affinity.FormatName(displayName, streamName), engineInternalRate*2)
+		e.sinks.Resolve(key, displayName, label, func() *abllink.Sink {
+			return e.link.NewSink(desiredName, engineInternalRate*2)
 		})
+	} else if st.sinkName != desiredName {
+		// Name became known / changed: rename the existing channel, don't re-mint it.
+		if ent, ok := e.sinks.Get(key); ok && ent.Handle != nil {
+			ent.Handle.SetName(desiredName)
+			ent.Name = desiredName
+		}
+		st.sinkName = desiredName
 	}
-	sched := st.sched
+	dec := st.dec // st.dec is only touched on this (session) goroutine
 	e.mu.Unlock()
 
-	// Decode + place. Disposition tells us whether it's future, live-append, or late.
-	pcm, derr := st.dec.DecodeFrame(f.OpusData)
+	// Decode off-lock (heavy); place under the lock (reasm/sched are shared with
+	// the emit-loop goroutine).
+	pcm, derr := dec.DecodeFrame(f.OpusData)
 	if derr != nil {
+		n := st.decodeFailures.Add(1)
+		if n == 1 || n%100 == 0 {
+			log.Printf("[audio] warn: Opus decode failed on %v (%d total): %v", key, n, derr)
+		}
 		return
 	}
-	switch sched.OnFrame(f.IntervalIndex) {
+	e.mu.Lock()
+	switch st.sched.OnFrame(f.IntervalIndex) {
 	case playout.TooLate:
-		return // interval already finished playing
+		// interval already finished playing; drop
 	default:
-		// Buffer or LiveAppend: both place the frame; the paced reader picks it up.
+		// Buffer or LiveAppend: place the frame; the paced reader picks it up.
 		st.reasm.Add(f.IntervalIndex, int(f.FrameNumber), pcm, f.IsFinal, int(f.TotalFrames))
 	}
+	e.mu.Unlock()
 }
 
 // emitLoop detects local interval boundaries and paces released intervals into
@@ -472,6 +508,17 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 		}
 		idx := release
 		st.playing = idx
+		// Late/incomplete at the N+D boundary → play-partial (below) + warn +
+		// per-stream "interval incomplete" metric, distinct from LAN loss and
+		// decode failures (ADR-0003).
+		if !st.reasm.Complete(idx) {
+			n := st.intervalsIncomplete.Add(1)
+			if n == 1 || n%50 == 0 {
+				_, recv, total, _ := st.reasm.Interval(idx)
+				log.Printf("[audio] warn: interval %d incomplete at boundary for %v (%d/%d frames, %d total) — playing partial",
+					idx, st.key, recv, total, n)
+			}
+		}
 		st.reasm.Drop(idx - 1) // intervals before the one we're releasing can never play
 		reasm := st.reasm
 		st.reader = emit.NewPacedReader(

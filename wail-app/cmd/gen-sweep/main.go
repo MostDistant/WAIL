@@ -61,7 +61,12 @@ func main() {
 	k := math.Log(*f1 / *f0)
 	peak := *amp * 32767.0
 	buf := make([]byte, 0, 65536)
-	flush := func() { f.Write(buf); buf = buf[:0] }
+	flush := func() {
+		if _, err := f.Write(buf); err != nil {
+			log.Fatalf("write samples: %v", err)
+		}
+		buf = buf[:0]
+	}
 	for i := 0; i < nFrames; i++ {
 		t := float64(i) / float64(sr)
 		phase := 2 * math.Pi * (*f0) * (*dur) / k * (math.Exp(k*t/(*dur)) - 1)

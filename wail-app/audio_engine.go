@@ -16,7 +16,9 @@ type AudioEngine interface {
 	Stop()
 	// HandleRemoteAudio feeds one WAIF frame received from a remote peer into the
 	// playback path, keyed on the sender's persistent identity and stream.
-	HandleRemoteAudio(fromIdentity, displayName string, waif []byte)
+	// streamName is the sender's display name for the stream (may be empty until
+	// StreamNames sync arrives); it labels the republished channel.
+	HandleRemoteAudio(fromIdentity, displayName, streamName string, waif []byte)
 	// SetRoomAnchor applies a fresh relay interval_anchor: aligns the local→room
 	// interval labeler and adopts the room tempo/config.
 	SetRoomAnchor(currentIndex int64, bpm float64, bars uint32, quantum float64)
