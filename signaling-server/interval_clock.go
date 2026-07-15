@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"time"
 
@@ -40,6 +41,12 @@ type anchorMsg struct {
 // config, it updates the room clock and returns the anchor to broadcast. The
 // returned bool is false for payloads that don't affect the clock.
 func (r *room) observeSync(payload json.RawMessage) (anchorMsg, bool) {
+	// Cheap pre-filter: the vast majority of relayed sync traffic is Ping/Pong/
+	// StateSnapshot, which never re-anchors. Skip the unmarshal unless the payload
+	// could be one of the two anchor-bearing types.
+	if !bytes.Contains(payload, []byte(`"TempoChange"`)) && !bytes.Contains(payload, []byte(`"IntervalConfig"`)) {
+		return anchorMsg{}, false
+	}
 	var p syncPayloadPeek
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return anchorMsg{}, false

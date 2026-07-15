@@ -16,6 +16,7 @@ import (
 	"github.com/nicholasgasior/wail/wail-app/internal/abllink"
 	"github.com/nicholasgasior/wail/wail-app/internal/affinity"
 	"github.com/nicholasgasior/wail/wail-app/internal/capture"
+	"github.com/nicholasgasior/wail/wail-app/internal/dsp"
 	"github.com/nicholasgasior/wail/wail-app/internal/emit"
 	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 	"github.com/nicholasgasior/wail/wail-app/internal/lanloss"
@@ -34,11 +35,11 @@ import (
 // unit-tested (internal/*, interval_codec_test.go), but the Source/Sink data
 // path and real-time behaviour need Link peers + a DAW on a LAN to exercise.
 const (
-	engineInternalRate  = 48000
-	engineTickInterval  = 5 * time.Millisecond
-	engineBitrateKbps   = 128
-	discoveryInterval   = 1 * time.Second
-	emitChunkFrames     = engineInternalRate * 5 / 1000 // ~5ms per paced write
+	engineInternalRate = 48000
+	engineTickInterval = 5 * time.Millisecond
+	engineBitrateKbps  = 128
+	discoveryInterval  = 1 * time.Second
+	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
 )
 
 type linkAudioEngine struct {
@@ -61,9 +62,9 @@ type linkAudioEngine struct {
 	cfg      interval.Config
 	tempoBPM float64
 
-	capture map[string]*captureChannel // by channel-id hex
-	emit    map[affinity.Key]*emitStream
-	sinks   *affinity.Registry[*abllink.Sink]
+	capture      map[string]*captureChannel // by channel-id hex
+	emit         map[affinity.Key]*emitStream
+	sinks        *affinity.Registry[*abllink.Sink]
 	nextStreamID uint16
 }
 
@@ -88,15 +89,17 @@ type emitStream struct {
 	dec      *IntervalDecoder
 	reasm    *emit.Reassembler
 	sched    *playout.Scheduler
-	sinkName string // last name set on the published channel (for live rename)
+	// Last raw name inputs; recompute + rename the channel only when these change
+	// (avoids per-frame name formatting on the hot path).
+	lastDisplayName string
+	lastStreamName  string
 
-	playing   int64 // room index currently playing
-	hasReader bool
-	reader    *emit.PacedReader
+	reader *emit.PacedReader
 
-	// Observability (ADR-0003 / pillar 8), read via Stats(). Atomic because
-	// decodeFailures is bumped on the session goroutine and intervalsIncomplete
-	// on the emit-loop goroutine.
+	// Observability (ADR-0003 / pillar 8), currently surfaced only via
+	// rate-limited logs. Atomic so a future Stats() sampler on another goroutine
+	// can read them race-free: decodeFailures is bumped on the session goroutine,
+	// intervalsIncomplete on the emit-loop goroutine.
 	decodeFailures      atomic.Uint64 // Opus decode errors
 	intervalsIncomplete atomic.Uint64 // intervals not fully delivered by their N+D boundary
 }
@@ -326,6 +329,7 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 			return
 		case <-t.C:
 			e.link.CaptureAppSessionState(ss)
+			quantum := e.quantumSnapshot() // stable within a tick; snapshot once, not per buffer
 			for {
 				buf, ok := ch.source.Pop()
 				if !ok {
@@ -335,13 +339,13 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 					log.Printf("[audio] LAN loss on %q: %d buffers (count %d→%d)",
 						ch.name, gap.LostBuffers, gap.ExpectedCount, gap.GotCount)
 				}
-				beat, mapped := ch.source.BeginBeats(&buf, ss, e.quantumSnapshot())
+				beat, mapped := ch.source.BeginBeats(&buf, ss, quantum)
 				if !mapped {
 					continue // cross-session buffer; can't place it
 				}
 				pcm := buf.Samples
 				if buf.SampleRate != engineInternalRate {
-					pcm = resampleLinearInterleaved(pcm, buf.NumChannels, int(buf.SampleRate), engineInternalRate)
+					pcm = dsp.ResampleLinearInterleaved(pcm, buf.NumChannels, int(buf.SampleRate), engineInternalRate)
 				}
 				nFrames := len(pcm) / max1(buf.NumChannels)
 				if done := ch.asm.Add(beat, buf.TempoBPM, pcm, nFrames); done != nil {
@@ -381,9 +385,6 @@ func (e *linkAudioEngine) emitCaptured(ch *captureChannel, done *capture.Complet
 // early (before names arrive) — we fall back to "stream N" and rename the
 // channel in place once the real name is known (affinity preserves the channel).
 func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamName string, waif []byte) {
-	if PeekWaifHeader(waif) == nil {
-		return
-	}
 	f, err := DecodeAudioFrameWire(waif)
 	if err != nil {
 		n := e.wireDecodeFailures.Add(1)
@@ -393,11 +394,6 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		return
 	}
 	key := affinity.Key{Identity: fromIdentity, Stream: f.StreamID}
-	label := streamName
-	if label == "" {
-		label = fmt.Sprintf("stream %d", f.StreamID)
-	}
-	desiredName := affinity.FormatName(displayName, label)
 
 	e.mu.Lock()
 	st, ok := e.emit[key]
@@ -412,25 +408,30 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			log.Printf("[audio] decoder init failed for %v: %v", key, derr)
 			return
 		}
+		label := streamLabel(streamName, f.StreamID)
 		st = &emitStream{
-			key:      key,
-			channels: channels,
-			dec:      dec,
-			reasm:    emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
-			sched:    playout.New(e.offsetD),
-			sinkName: desiredName,
+			key:             key,
+			channels:        channels,
+			dec:             dec,
+			reasm:           emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
+			sched:           playout.New(e.offsetD),
+			lastDisplayName: displayName,
+			lastStreamName:  streamName,
 		}
 		e.emit[key] = st
 		e.sinks.Resolve(key, displayName, label, func() *abllink.Sink {
-			return e.link.NewSink(desiredName, engineInternalRate*2)
+			return e.link.NewSink(affinity.FormatName(displayName, label), engineInternalRate*2)
 		})
-	} else if st.sinkName != desiredName {
-		// Name became known / changed: rename the existing channel, don't re-mint it.
+	} else if st.lastDisplayName != displayName || st.lastStreamName != streamName {
+		// Name became known / changed: rename the existing channel in place, don't
+		// re-mint it (affinity preserves the channel).
+		desiredName := affinity.FormatName(displayName, streamLabel(streamName, f.StreamID))
 		if ent, ok := e.sinks.Get(key); ok && ent.Handle != nil {
 			ent.Handle.SetName(desiredName)
 			ent.Name = desiredName
 		}
-		st.sinkName = desiredName
+		st.lastDisplayName = displayName
+		st.lastStreamName = streamName
 	}
 	dec := st.dec // st.dec is only touched on this (session) goroutine
 	e.mu.Unlock()
@@ -507,7 +508,6 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 			continue
 		}
 		idx := release
-		st.playing = idx
 		// Late/incomplete at the N+D boundary → play-partial (below) + warn +
 		// per-stream "interval incomplete" metric, distinct from LAN loss and
 		// decode failures (ADR-0003).
@@ -525,7 +525,6 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 			func() []int16 { s, _, _, _ := reasm.Interval(idx); return s },
 			st.channels, engineInternalRate, tempo, startBeat, totalFrames,
 		)
-		st.hasReader = true
 	}
 }
 
@@ -534,7 +533,7 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, quantum float64, 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, st := range e.emit {
-		if !st.hasReader || st.reader == nil {
+		if st.reader == nil {
 			continue
 		}
 		ent, ok := e.sinks.Get(st.key)
@@ -547,9 +546,9 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, quantum float64, 
 			ent.Handle.WriteInterleaved(samples, ss, beat, quantum, frames, st.channels, engineInternalRate)
 		}
 		if done {
-			st.hasReader = false
 			st.reader = nil
-			st.reasm.Drop(st.playing)
+			playing, _ := st.sched.Playing()
+			st.reasm.Drop(playing)
 		}
 	}
 }
@@ -561,6 +560,15 @@ func (e *linkAudioEngine) quantumSnapshot() float64 {
 }
 
 // --- small helpers ---
+
+// streamLabel is the stream half of a channel name, falling back to "stream N"
+// before the sender's StreamNames sync arrives.
+func streamLabel(name string, id uint16) string {
+	if name == "" {
+		return fmt.Sprintf("stream %d", id)
+	}
+	return name
+}
 
 func max1(n int) int {
 	if n < 1 {
@@ -574,34 +582,4 @@ func roundUp(n, multiple int) int {
 		return n
 	}
 	return ((n + multiple - 1) / multiple) * multiple
-}
-
-// resampleLinearInterleaved resamples interleaved int16 audio from srcRate to
-// dstRate with linear interpolation. Basic but adequate for a jam on-ramp; a
-// higher-quality resampler is a follow-up (migration-plan open question §68).
-func resampleLinearInterleaved(src []int16, channels, srcRate, dstRate int) []int16 {
-	if channels < 1 {
-		channels = 1
-	}
-	if srcRate == dstRate || srcRate <= 0 || len(src) == 0 {
-		return src
-	}
-	srcFrames := len(src) / channels
-	dstFrames := srcFrames * dstRate / srcRate
-	out := make([]int16, dstFrames*channels)
-	ratio := float64(srcRate) / float64(dstRate)
-	for i := 0; i < dstFrames; i++ {
-		pos := float64(i) * ratio
-		j := int(pos)
-		frac := pos - float64(j)
-		for c := 0; c < channels; c++ {
-			a := int(src[j*channels+c])
-			b := a
-			if (j+1)*channels+c < len(src) {
-				b = int(src[(j+1)*channels+c])
-			}
-			out[i*channels+c] = int16(float64(a) + frac*float64(b-a))
-		}
-	}
-	return out
 }

@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"time"
 
 	"github.com/go-audio/wav"
+	"github.com/nicholasgasior/wail/wail-app/internal/dsp"
 	"gopkg.in/hraban/opus.v2"
 )
 
@@ -52,7 +52,7 @@ func loadWAV(path string) ([]int16, error) {
 
 	// Resample to 48kHz if needed
 	if srcRate != wavTargetSampleRate {
-		samples16 = resample(samples16, srcRate, wavTargetSampleRate)
+		samples16 = dsp.ResampleLinearInterleaved(samples16, wavTargetChannels, srcRate, wavTargetSampleRate)
 	}
 
 	durationSec := float64(len(samples16)/wavTargetChannels) / float64(wavTargetSampleRate)
@@ -107,35 +107,6 @@ func toStereo(samples []int16, srcChannels int) []int16 {
 		for i := 0; i < srcFrames; i++ {
 			out[i*2] = samples[i*srcChannels]
 			out[i*2+1] = samples[i*srcChannels+1]
-		}
-	}
-	return out
-}
-
-// resample performs linear interpolation resampling of interleaved stereo samples.
-func resample(samples []int16, srcRate, dstRate int) []int16 {
-	srcFrames := len(samples) / 2
-	if srcFrames < 2 {
-		return samples
-	}
-	dstFrames := int(math.Round(float64(srcFrames) * float64(dstRate) / float64(srcRate)))
-	out := make([]int16, dstFrames*2)
-	ratio := float64(srcRate) / float64(dstRate)
-
-	for i := 0; i < dstFrames; i++ {
-		srcPos := float64(i) * ratio
-		srcIdx := int(srcPos)
-		frac := srcPos - float64(srcIdx)
-
-		if srcIdx+1 >= srcFrames {
-			srcIdx = srcFrames - 2
-			frac = 1.0
-		}
-
-		for ch := 0; ch < 2; ch++ {
-			a := float64(samples[srcIdx*2+ch])
-			b := float64(samples[(srcIdx+1)*2+ch])
-			out[i*2+ch] = int16(a + frac*(b-a))
 		}
 	}
 	return out

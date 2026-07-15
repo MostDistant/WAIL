@@ -90,15 +90,6 @@ func generateShortID() string {
 	return uuid.New().String()[:8]
 }
 
-func computeIntervalIndex(beat float64, bars uint32, quantum float64) int64 {
-	beatsPerInterval := float64(bars) * quantum
-	return int64(math.Floor(beat / beatsPerInterval))
-}
-
-func beatsPerInterval(bars uint32, quantum float64) float64 {
-	return float64(bars) * quantum
-}
-
 func sessionLoop(
 	ctx context.Context,
 	emitter EventEmitter,
@@ -390,7 +381,7 @@ func sessionLoop(
 					name = ev.PeerID
 				}
 				logInfo("Peer %s left", name)
-				removePeerFully(peers, ev.PeerID)
+				peers.Remove(ev.PeerID)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: ev.PeerID})
 
 			case "PeerListReceived":
@@ -487,7 +478,7 @@ func sessionLoop(
 					// Evict stale peer
 					if oldPID, found := peers.FindByIdentity(rid); found && oldPID != msg.PeerID {
 						logInfo("Peer %s reconnected (old=%s, new=%s) — evicting stale", nameDisplay, oldPID, msg.PeerID)
-						removePeerFully(peers, oldPID)
+						peers.Remove(oldPID)
 						mesh.RemovePeer(oldPID)
 						emitter.Emit("peer:left", PeerLeftEvent{PeerID: oldPID})
 					}
@@ -521,7 +512,7 @@ func sessionLoop(
 				// engine's labeler and the session's own labeler (used by in-app
 				// senders) to the room index.
 				audioEngine.SetRoomAnchor(msg.Index, msg.BPM, msg.Bars, msg.Quantum)
-				localIdx := computeIntervalIndex(link.State().Beat, intervalBars, intervalQuantum)
+				localIdx := interval.Config{Bars: intervalBars, Quantum: intervalQuantum}.IndexAtBeat(link.State().Beat)
 				roomLabeler.Align(msg.Index, localIdx)
 
 			case "TempoChange":
@@ -587,7 +578,8 @@ func sessionLoop(
 			}
 
 			// Track frame metrics and detect packet loss via sequence numbers.
-			if header := PeekWaifHeader(data); header != nil {
+			header := PeekWaifHeader(data)
+			if header != nil {
 				var loss *LossEvent
 				var displayName string
 				peers.WithPeer(from, func(p *PeerState) {
@@ -622,7 +614,7 @@ func sessionLoop(
 			// (relay clock), so there is no per-peer remap. streamName (from the
 			// StreamNames sync) labels the republished channel "{peer} · {stream}".
 			var identity, name, streamName string
-			if hdr := PeekWaifHeader(data); hdr != nil {
+			if header != nil {
 				peers.WithPeer(from, func(p *PeerState) {
 					if p.Identity != nil {
 						identity = *p.Identity
@@ -630,7 +622,7 @@ func sessionLoop(
 					if p.DisplayName != nil {
 						name = *p.DisplayName
 					}
-					streamName = p.StreamNames[hdr.StreamID]
+					streamName = p.StreamNames[header.StreamID]
 				})
 			}
 			if identity == "" {
@@ -664,11 +656,11 @@ func sessionLoop(
 					mesh.Broadcast(NewTempoChange(ev.BPM, quantum, ev.TimestampUs))
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, &roomLabeler, testToneBoundaryCh, wavSenderBoundaryCh)
+				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &lastIntervalIndex, &lastBoundaryTime, &roomLabeler, testToneBoundaryCh, wavSenderBoundaryCh)
 
 			case "StateUpdate":
 				mesh.Broadcast(NewStateSnapshot(ev.BPM, ev.Beat, ev.Phase, ev.Quantum, ev.TimestampUs))
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, &roomLabeler, testToneBoundaryCh, wavSenderBoundaryCh)
+				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &lastIntervalIndex, &lastBoundaryTime, &roomLabeler, testToneBoundaryCh, wavSenderBoundaryCh)
 			}
 
 		// --- Ping timer ---
@@ -689,7 +681,7 @@ func sessionLoop(
 					name = deadID
 				}
 				logWarn("Peer %s timed out", name)
-				removePeerFully(peers, deadID)
+				peers.Remove(deadID)
 				mesh.RemovePeer(deadID)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: deadID})
 			}
@@ -704,7 +696,7 @@ func sessionLoop(
 			}
 			for _, pid := range hardPeers {
 				logWarn("Peer %s no identity after 15s — removing", pid)
-				removePeerFully(peers, pid)
+				peers.Remove(pid)
 				mesh.RemovePeer(pid)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: pid})
 			}
@@ -812,7 +804,12 @@ func sessionLoop(
 				AudioBytesSent: audioBytesSent, AudioBytesRecv: audioBytesRecv,
 				AudioDCOpen: dcOpen, PluginConnected: true,
 				Recording: recorder != nil,
-				RecordingSizeBytes: func() uint64 { if recorder != nil { return recorder.BytesWritten() }; return 0 }(),
+				RecordingSizeBytes: func() uint64 {
+					if recorder != nil {
+						return recorder.BytesWritten()
+					}
+					return 0
+				}(),
 				CaptureChannels: audioEngine.CaptureChannels(),
 			})
 
@@ -857,7 +854,7 @@ func sessionLoop(
 				})
 			}
 			emitter.Emit("peers:network", PeersNetwork{Peers: networkInfos})
-						mesh.SendMetricsReport(dcOpen, true, perPeer, localDropCount.Load(), boundaryDriftUs)
+			mesh.SendMetricsReport(dcOpen, true, perPeer, localDropCount.Load(), boundaryDriftUs)
 		}
 	}
 
@@ -885,9 +882,7 @@ func handleIntervalBoundary(
 	beat float64, bars uint32, quantum float64,
 	lastIdx *int64, bpm float64, lastBoundary *time.Time,
 	boundaryDriftUs **int64,
-	mesh *PeerMesh,
 	framesSent, framesRecv, bytesSent, bytesRecv *uint64,
-	totalSent, totalRecv *uint64,
 	lastIntervalIndex **int64, lastBoundaryTime **time.Time,
 	roomLabeler *interval.RoomLabeler,
 	testToneBoundaryCh chan IntervalBoundaryInfo,
@@ -895,7 +890,8 @@ func handleIntervalBoundary(
 ) {
 	// idx is the local interval index (drives boundary detection); roomIdx is the
 	// shared room index it maps to (relay clock) — what in-app senders tag with.
-	idx := computeIntervalIndex(beat, bars, quantum)
+	cfg := interval.Config{Bars: bars, Quantum: quantum}
+	idx := cfg.IndexAtBeat(beat)
 	if lastIdx != nil && idx <= *lastIdx {
 		return
 	}
@@ -916,7 +912,7 @@ func handleIntervalBoundary(
 	if lastBoundary != nil {
 		gap := time.Since(*lastBoundary)
 		if bpm > 0 {
-			beats := beatsPerInterval(bars, quantum)
+			beats := cfg.BeatsPerInterval()
 			expectedUs := int64(beats / (bpm / 60.0) * 1_000_000.0)
 			actualUs := gap.Microseconds()
 			drift := actualUs - expectedUs
@@ -939,10 +935,6 @@ func handleIntervalBoundary(
 		default:
 		}
 	}
-}
-
-func removePeerFully(peers *PeerRegistry, peerID string) {
-	peers.Remove(peerID)
 }
 
 func min64(a, b uint64) uint64 {

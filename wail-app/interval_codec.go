@@ -142,13 +142,13 @@ func NewIntervalDecoder(channels, sampleRate int) (*IntervalDecoder, error) {
 }
 
 // DecodeFrame decodes one WAIF frame's Opus payload to interleaved PCM. The
-// returned slice is freshly allocated (safe to retain).
+// returned slice aliases an internal buffer and is only valid until the next
+// DecodeFrame call on this decoder — copy it to retain it. (Reassembler.Add,
+// the sole production consumer, copies immediately.)
 func (d *IntervalDecoder) DecodeFrame(opusData []byte) ([]int16, error) {
 	n, err := d.dec.Decode(opusData, d.out)
 	if err != nil {
 		return nil, err
 	}
-	pcm := make([]int16, n*d.channels)
-	copy(pcm, d.out[:n*d.channels])
-	return pcm, nil
+	return d.out[:n*d.channels], nil
 }

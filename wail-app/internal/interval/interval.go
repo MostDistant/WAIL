@@ -14,10 +14,9 @@ import "math"
 // per the repo trade-off prefs we clamp bad numeric inputs to safe minimums
 // rather than panic or propagate errors.
 const (
-	minTempo           = 1.0 // BPM
-	minBars            = 1
-	minQuantum         = 1.0
-	internalSampleRate = 48000 // WAIL works internally at 48 kHz (ADR-0003)
+	minTempo   = 1.0 // BPM
+	minBars    = 1
+	minQuantum = 1.0
 )
 
 // Config describes an interval as a beat window: Bars × Quantum beats.
@@ -88,7 +87,3 @@ func (c Config) FrameOffset(beatAtBufferBegin float64, index int64, sampleRate u
 	}
 	return off
 }
-
-// InternalSampleRate is the rate WAIL assembles intervals at; capture channels at
-// other rates are resampled at the edge (ADR-0003).
-func InternalSampleRate() uint32 { return internalSampleRate }
