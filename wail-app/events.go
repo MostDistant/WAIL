@@ -81,17 +81,15 @@ type StatusUpdate struct {
 }
 
 type PeerNetworkInfo struct {
-	PeerID         string   `json:"peer_id"`
-	DisplayName    *string  `json:"display_name,omitempty"`
-	Slot           *uint32  `json:"slot,omitempty"`
-	ICEState       string   `json:"ice_state"`
-	DCSyncState    string   `json:"dc_sync_state"`
-	DCAudioState   string   `json:"dc_audio_state"`
-	RTTMs          *float64 `json:"rtt_ms,omitempty"`
-	AudioRecv      uint64   `json:"audio_recv"`
-	FramesReceived uint64   `json:"frames_received"`
-	PacketsLost    uint64   `json:"packets_lost"`
-	LossEvents     uint64   `json:"loss_events"`
+	PeerID          string   `json:"peer_id"`
+	DisplayName     *string  `json:"display_name,omitempty"`
+	Slot            *uint32  `json:"slot,omitempty"`
+	ConnectionState string   `json:"connection_state"`
+	RTTMs           *float64 `json:"rtt_ms,omitempty"`
+	AudioRecv       uint64   `json:"audio_recv"`
+	FramesReceived  uint64   `json:"frames_received"`
+	PacketsLost     uint64   `json:"packets_lost"`
+	LossEvents      uint64   `json:"loss_events"`
 }
 
 type PeersNetwork struct {

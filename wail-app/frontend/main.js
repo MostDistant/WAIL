@@ -795,9 +795,7 @@ function renderNetwork(peers) {
     return `<tr>
       <td>${name}</td>
       <td>${slot}</td>
-      <td class="net-state net-${escapeHtml(p.ice_state)}">${escapeHtml(p.ice_state)}</td>
-      <td class="net-state net-${escapeHtml(p.dc_sync_state)}">${escapeHtml(p.dc_sync_state)}</td>
-      <td class="net-state net-${escapeHtml(p.dc_audio_state)}">${escapeHtml(p.dc_audio_state)}</td>
+      <td class="net-state net-${escapeHtml(p.connection_state)}">${escapeHtml(p.connection_state)}</td>
       <td>${rtt}</td>
       <td>${fr}</td>
       <td class="${lostClass}">${lost}</td>

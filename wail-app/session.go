@@ -889,8 +889,8 @@ func sessionLoop(
 				status := peers.DeriveStatus(p)
 				networkInfos = append(networkInfos, PeerNetworkInfo{
 					PeerID: p, DisplayName: dn, Slot: slot,
-					ICEState: status, DCSyncState: status, DCAudioState: status,
-					RTTMs: rttMs, AudioRecv: audioRecv,
+					ConnectionState: status,
+					RTTMs:           rttMs, AudioRecv: audioRecv,
 					FramesReceived: fr, PacketsLost: lost, LossEvents: lossEvents,
 				})
 			}
