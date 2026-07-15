@@ -4,16 +4,17 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log"
 	"math"
-	"net"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 )
 
 // SessionConfig holds configuration for a session.
@@ -26,20 +27,20 @@ type SessionConfig struct {
 	BPM         float64
 	Bars        uint32
 	Quantum     float64
-	IPCPort     uint16
 	Recording   *RecordingConfig
 	StreamCount uint16
-	TestMode    bool
 }
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
 	StreamIndex *uint16
 	WavFile     string
+	ChannelID   string // SetCaptureEnabled
+	Enabled     bool   // SetCaptureEnabled
 }
 
 // SessionHandle represents a running session.
@@ -88,15 +89,6 @@ func generateShortID() string {
 	return uuid.New().String()[:8]
 }
 
-func computeIntervalIndex(beat float64, bars uint32, quantum float64) int64 {
-	beatsPerInterval := float64(bars) * quantum
-	return int64(math.Floor(beat / beatsPerInterval))
-}
-
-func beatsPerInterval(bars uint32, quantum float64) float64 {
-	return float64(bars) * quantum
-}
-
 func sessionLoop(
 	ctx context.Context,
 	emitter EventEmitter,
@@ -139,19 +131,30 @@ func sessionLoop(
 
 	emitter.Emit("session:started", SessionStarted{PeerID: peerID, Room: room, BPM: bpm})
 
+	// Link Audio engine (ADR-0001/0002) — the only audio path: capture subscribes
+	// to local Link Audio channels and playback republishes remote streams one
+	// interval late (see audio_engine_real.go; a no-op stub under -tags linkstub).
+	offsetD := 1
+	if v, err := strconv.Atoi(os.Getenv("WAIL_INTERVAL_OFFSET")); err == nil && v >= 0 {
+		offsetD = v
+	}
+	audioEngine := newAudioEngine(link, displayName, mesh.BroadcastAudio, offsetD)
+	if err := audioEngine.Start(); err != nil {
+		logWarn("Link Audio engine failed to start: %v", err)
+	}
+	defer audioEngine.Stop()
+	logInfo("Link Audio engine enabled (interval offset D=%d)", offsetD)
+
 	// State
 	clock := NewClockSync()
 	peers := NewPeerRegistry()
 	if names := mesh.TakeInitialPeerNames(); names != nil {
 		peers.SeedNames(names)
 	}
-	ipcPool := NewIPCWriterPool()
 
 	var lastIntervalIndex *int64
-	intervalBars := bars
-	intervalQuantum := quantum
+	intervalCfg := interval.Config{Bars: bars, Quantum: quantum}
 	lastBroadcastBPM := bpm
-	var initialBeatSynced, isJoiner bool
 	localStreamNames := make(map[uint16]string)
 
 	// Audio stats
@@ -160,11 +163,13 @@ func sessionLoop(
 	var audioStatusSeq uint64
 	var intervalFramesSent, intervalFramesRecv uint64
 	var intervalBytesSent, intervalBytesRecv uint64
-	var ipcDropCount atomic.Uint64
+	var localDropCount atomic.Uint64
 	var boundaryDriftUs *int64
 
-	// Local send tracking
-	localSendStreams := make(map[int]uint16) // connID → streamIndex
+	// Local send tracking: localSendStreams is the persistent set of in-app
+	// senders (test tone / WAV) for the UI; localSendActive flags which sent a
+	// frame in the current status tick and is reset each tick.
+	localSendStreams := make(map[uint16]bool)
 	localSendActive := make(map[uint16]bool)
 	loggedFirstFrameSent := false
 
@@ -178,11 +183,17 @@ func sessionLoop(
 	var wavSenderCancelFn context.CancelFunc
 	var wavSenderStream *uint16
 
-	// IPC
-	ipcFromPluginCh := make(chan ipcFrame, 64)
-	ipcDisconnectCh := make(chan int, 16)
-	ipcSendRegCh := make(chan ipcSendRegistration, 16) // send stream registrations from IPC goroutine
-	var nextConnID int
+	// In-app senders (test tone / WAV) push completed WAIF frames here; the loop
+	// forwards them to the relay. Real capture goes straight through the Link
+	// Audio engine (audio_engine_real.go).
+	localWaifCh := make(chan []byte, 64)
+	sendWaif := func(w []byte) {
+		select {
+		case localWaifCh <- w:
+		default:
+			localDropCount.Add(1)
+		}
+	}
 
 	// Recording
 	var recorder *SessionRecorder
@@ -195,21 +206,6 @@ func sessionLoop(
 			logInfo("Recording enabled: %s", config.Recording.Directory)
 		}
 	}
-
-	// Start IPC listener
-	bindPort := config.IPCPort
-	if config.TestMode {
-		bindPort = 0
-	}
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", bindPort))
-	if err != nil {
-		return fmt.Errorf("IPC listen: %w", err)
-	}
-	defer listener.Close()
-	logInfo("IPC listening on %s", listener.Addr())
-
-	// Accept IPC connections in goroutine
-	go acceptIPCConnections(ctx, listener, ipcFromPluginCh, ipcDisconnectCh, ipcSendRegCh, ipcPool, peers, &nextConnID, &ipcDropCount, emitter, logInfo, logWarn)
 
 	// Timers
 	pingTicker := time.NewTicker(time.Duration(PingIntervalMs) * time.Millisecond)
@@ -229,6 +225,56 @@ func sessionLoop(
 	var reconnect *sigReconnect
 	reconnectTimer := time.NewTimer(time.Hour)
 	reconnectTimer.Stop()
+
+	// handleBoundary fires on each Link event: if the given beat crossed into a
+	// new local interval, it logs the boundary, records timing drift, and hands
+	// the room-labeled boundary to the in-app senders (test tone / WAV). It closes
+	// over sessionLoop state (interval config, frame counters, drift, sender
+	// channels) so the call sites pass only the beat.
+	handleBoundary := func(beat float64) {
+		// idx is the local interval index (drives boundary detection); roomIdx is
+		// the shared room index it maps to (relay clock) — what senders tag with.
+		idx := intervalCfg.IndexAtBeat(beat)
+		if lastIntervalIndex != nil && idx <= *lastIntervalIndex {
+			return
+		}
+		newIdx := idx
+		lastIntervalIndex = &newIdx
+
+		roomIdx := idx
+		if ri, ok := audioEngine.RoomIndex(idx); ok {
+			roomIdx = ri
+		}
+
+		log.Printf("[session] >>> INTERVAL local=%d room=%d <<< beat=%.1f sent=%d recv=%d", idx, roomIdx, beat, intervalFramesSent, intervalFramesRecv)
+		intervalFramesSent = 0
+		intervalFramesRecv = 0
+		intervalBytesSent = 0
+		intervalBytesRecv = 0
+
+		if lastBoundaryTime != nil && lastBroadcastBPM > 0 {
+			gap := time.Since(*lastBoundaryTime)
+			expectedUs := int64(intervalCfg.BeatsPerInterval() / (lastBroadcastBPM / 60.0) * 1_000_000.0)
+			drift := gap.Microseconds() - expectedUs
+			boundaryDriftUs = &drift
+		}
+		now := time.Now()
+		lastBoundaryTime = &now
+
+		info := IntervalBoundaryInfo{Index: roomIdx, BPM: lastBroadcastBPM, Cfg: intervalCfg}
+		if testToneBoundaryCh != nil {
+			select {
+			case testToneBoundaryCh <- info:
+			default:
+			}
+		}
+		if wavSenderBoundaryCh != nil {
+			select {
+			case wavSenderBoundaryCh <- info:
+			default:
+			}
+		}
+	}
 
 	// Signaling event goroutine → channel
 	sigEventCh := make(chan *MeshEvent, 64)
@@ -280,6 +326,7 @@ func sessionLoop(
 				testToneBoundaryCh = nil
 				if testToneStream != nil {
 					delete(localStreamNames, *testToneStream)
+					delete(localSendStreams, *testToneStream)
 				}
 				testToneStream = nil
 
@@ -290,9 +337,7 @@ func sessionLoop(
 					boundaryCh := make(chan IntervalBoundaryInfo, 4)
 					testToneBoundaryCh = boundaryCh
 					testToneStream = &si
-
-					connID := int(^uint(0)>>1) - int(si)
-					localSendStreams[connID] = si
+					localSendStreams[si] = true
 
 					toneName := "Test Tone"
 					if displayName != "" {
@@ -300,7 +345,7 @@ func sessionLoop(
 					}
 					localStreamNames[si] = toneName
 
-					go TestToneTask(toneCtx, si, connID, ipcFromPluginCh, boundaryCh)
+					go TestToneTask(toneCtx, si, sendWaif, boundaryCh)
 					logInfo("[TEST] Test tone started on Send %d", si)
 				} else {
 					logInfo("[TEST] Test tone stopped")
@@ -315,6 +360,7 @@ func sessionLoop(
 				wavSenderBoundaryCh = nil
 				if wavSenderStream != nil {
 					delete(localStreamNames, *wavSenderStream)
+					delete(localSendStreams, *wavSenderStream)
 				}
 				wavSenderStream = nil
 
@@ -325,9 +371,7 @@ func sessionLoop(
 					boundaryCh := make(chan IntervalBoundaryInfo, 4)
 					wavSenderBoundaryCh = boundaryCh
 					wavSenderStream = &si
-
-					connID := int(^uint(0)>>1) - 100 - int(si) // offset from test tone connIDs
-					localSendStreams[connID] = si
+					localSendStreams[si] = true
 
 					wavName := "WAV Sender"
 					if displayName != "" {
@@ -335,12 +379,15 @@ func sessionLoop(
 					}
 					localStreamNames[si] = wavName
 
-					go WavSenderTask(wavCtx, si, connID, ipcFromPluginCh, boundaryCh, cmd.WavFile)
+					go WavSenderTask(wavCtx, si, sendWaif, boundaryCh, cmd.WavFile)
 					logInfo("[WAV] WAV sender started on Send %d: %s", si, cmd.WavFile)
 				} else {
 					logInfo("[WAV] WAV sender stopped")
 				}
 				mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
+			case "SetCaptureEnabled":
+				audioEngine.SetCaptureEnabled(cmd.ChannelID, cmd.Enabled)
+				logInfo("[capture] channel %s enabled=%v", cmd.ChannelID, cmd.Enabled)
 			case "Disconnect":
 				logInfo("Disconnecting...")
 				goto cleanup
@@ -361,9 +408,6 @@ func sessionLoop(
 				hello := NewHello(peerID, &displayName, &identity)
 				mesh.Broadcast(hello)
 				mesh.Broadcast(NewIntervalConfig(bars, quantum))
-				if lastIntervalIndex != nil {
-					mesh.Broadcast(NewIntervalBoundary(*lastIntervalIndex))
-				}
 				mesh.Broadcast(NewAudioCapabilities([]uint32{48000}, []uint16{1, 2}, true, true))
 				if len(localStreamNames) > 0 {
 					mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
@@ -380,12 +424,11 @@ func sessionLoop(
 					name = ev.PeerID
 				}
 				logInfo("Peer %s left", name)
-				removePeerFully(peers, ipcPool, ev.PeerID)
+				peers.Remove(ev.PeerID)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: ev.PeerID})
 
 			case "PeerListReceived":
 				peers.SeedLastSeen()
-				isJoiner = ev.PeerCount > 0
 				logInfo("Joined room with %d peer(s)", ev.PeerCount)
 			}
 
@@ -478,7 +521,7 @@ func sessionLoop(
 					// Evict stale peer
 					if oldPID, found := peers.FindByIdentity(rid); found && oldPID != msg.PeerID {
 						logInfo("Peer %s reconnected (old=%s, new=%s) — evicting stale", nameDisplay, oldPID, msg.PeerID)
-						removePeerFully(peers, ipcPool, oldPID)
+						peers.Remove(oldPID)
 						mesh.RemovePeer(oldPID)
 						emitter.Emit("peer:left", PeerLeftEvent{PeerID: oldPID})
 					}
@@ -488,14 +531,6 @@ func sessionLoop(
 					})
 					peers.RekeyPeerSlots(msg.PeerID, rid)
 					peers.AssignSlot(msg.PeerID, 0)
-
-					// Notify recv plugins
-					if !ipcPool.IsEmpty() {
-						ipcPool.Broadcast(EncodeFrame(EncodePeerJoinedMsg(msg.PeerID, rid)))
-						if msg.DisplayName != nil {
-							ipcPool.Broadcast(EncodeFrame(EncodePeerNameMsg(msg.PeerID, *msg.DisplayName)))
-						}
-					}
 				}
 
 				if peers.MarkHelloSent(from) {
@@ -515,6 +550,13 @@ func sessionLoop(
 			case "Pong":
 				clock.HandlePong(from, msg.PingSentAtUs, msg.PongSentAtUs)
 
+			case "IntervalAnchor":
+				// Relay-authoritative room interval clock (ADR-0003): align the
+				// engine's labeler to the room index. The session reads that same
+				// labeler back via audioEngine.RoomIndex for boundary logging and
+				// in-app-sender tagging (one source of truth).
+				audioEngine.SetRoomAnchor(msg.Index, msg.BPM, msg.Bars, msg.Quantum)
+
 			case "TempoChange":
 				var name string
 				peers.WithPeer(from, func(p *PeerState) {
@@ -531,18 +573,9 @@ func sessionLoop(
 				emitter.Emit("tempo:changed", TempoChangedEvent{BPM: msg.BPM, Source: "remote"})
 
 			case "StateSnapshot":
-				if !initialBeatSynced {
-					initialBeatSynced = true
-					if isJoiner {
-						logInfo("Beat sync — snapped to beat %.2f", msg.Beat)
-						rttUs := clock.RTTUs(from)
-						linkCmdCh <- LinkCommand{Type: "ForceBeat", Beat: msg.Beat, RTTUs: rttUs}
-						newIdx := computeIntervalIndex(msg.Beat, intervalBars, intervalQuantum)
-						lastIntervalIndex = &newIdx
-					} else {
-						logInfo("Beat sync — we are room owner, skipping ForceBeat")
-					}
-				}
+				// Passive peer (ADR-0003): adopt tempo but never ForceBeat the local
+				// transport. Within-bar alignment comes from the local LAN's Link
+				// phase; the room interval index comes from the relay anchor.
 				if math.Abs(msg.BPM-lastBroadcastBPM) > 0.01 {
 					lastBroadcastBPM = msg.BPM
 					linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
@@ -550,8 +583,7 @@ func sessionLoop(
 
 			case "IntervalConfig":
 				logInfo("Remote interval config: %d bars, quantum %.0f", msg.Bars, msg.Quantum)
-				intervalBars = msg.Bars
-				intervalQuantum = msg.Quantum
+				intervalCfg = interval.Config{Bars: msg.Bars, Quantum: msg.Quantum}
 
 			case "AudioStatus":
 				peers.WithPeer(from, func(p *PeerState) {
@@ -587,7 +619,8 @@ func sessionLoop(
 			}
 
 			// Track frame metrics and detect packet loss via sequence numbers.
-			if header := PeekWaifHeader(data); header != nil {
+			header := PeekWaifHeader(data)
+			if header != nil {
 				var loss *LossEvent
 				var displayName string
 				peers.WithPeer(from, func(p *PeerState) {
@@ -617,32 +650,33 @@ func sessionLoop(
 				recorder.RecordPeer(from, name, data)
 			}
 
-			// Rewrite interval index
-			if lastIntervalIndex != nil {
-				RewriteWaifIntervalIndex(data, *lastIntervalIndex)
+			// Link Audio playback: hand the frame to the engine, keyed on the
+			// sender's persistent identity. The room index already rides the frame
+			// (relay clock), so there is no per-peer remap. streamName (from the
+			// StreamNames sync) labels the republished channel "{peer} · {stream}".
+			var identity, name, streamName string
+			if header != nil {
+				peers.WithPeer(from, func(p *PeerState) {
+					if p.Identity != nil {
+						identity = *p.Identity
+					}
+					if p.DisplayName != nil {
+						name = *p.DisplayName
+					}
+					streamName = p.StreamNames[header.StreamID]
+				})
 			}
+			if identity == "" {
+				identity = from
+			}
+			audioEngine.HandleRemoteAudio(identity, name, streamName, data)
 
-			// Forward to recv plugins
-			if !ipcPool.IsEmpty() {
-				ipcPool.Broadcast(EncodeFrame(EncodeAudioMsg(from, data)))
-			}
-
-		// --- Audio from plugins ---
-		case frame := <-ipcFromPluginCh:
-			wireData, ok := DecodeAudioFrameMsg(frame.data)
-			if !ok {
-				continue
-			}
-			if lastIntervalIndex == nil {
-				continue
-			}
-
-			// Track active stream
+		// --- Audio from in-app senders (test tone / WAV) → relay ---
+		case wireData := <-localWaifCh:
 			if len(wireData) >= 7 && wireData[0] == 'W' && wireData[1] == 'A' {
 				streamID := binary.LittleEndian.Uint16(wireData[5:7])
 				localSendActive[streamID] = true
 			}
-
 			mesh.BroadcastAudio(wireData)
 			audioBytesSent += uint64(len(wireData))
 			audioIntervalsSent++
@@ -650,17 +684,8 @@ func sessionLoop(
 			intervalFramesSent++
 			if !loggedFirstFrameSent {
 				loggedFirstFrameSent = true
-				logInfo("audio: first WAIF frame sent (%d bytes, interval=%v)", len(wireData), lastIntervalIndex)
+				logInfo("audio: first WAIF frame sent (%d bytes)", len(wireData))
 			}
-
-		// --- IPC send stream registration ---
-		case reg := <-ipcSendRegCh:
-			localSendStreams[reg.ConnID] = reg.StreamIndex
-
-		// --- IPC disconnect ---
-		case connID := <-ipcDisconnectCh:
-			ipcPool.Remove(connID)
-			delete(localSendStreams, connID)
 
 		// --- Link events ---
 		case ev := <-linkEventCh:
@@ -672,11 +697,11 @@ func sessionLoop(
 					mesh.Broadcast(NewTempoChange(ev.BPM, quantum, ev.TimestampUs))
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh, wavSenderBoundaryCh)
+				handleBoundary(ev.Beat)
 
 			case "StateUpdate":
 				mesh.Broadcast(NewStateSnapshot(ev.BPM, ev.Beat, ev.Phase, ev.Quantum, ev.TimestampUs))
-				handleIntervalBoundary(ev.Beat, intervalBars, intervalQuantum, lastIntervalIndex, lastBroadcastBPM, lastBoundaryTime, &boundaryDriftUs, mesh, &intervalFramesSent, &intervalFramesRecv, &intervalBytesSent, &intervalBytesRecv, &audioIntervalsSent, &audioIntervalsReceived, &lastIntervalIndex, &lastBoundaryTime, testToneBoundaryCh, wavSenderBoundaryCh)
+				handleBoundary(ev.Beat)
 			}
 
 		// --- Ping timer ---
@@ -697,7 +722,7 @@ func sessionLoop(
 					name = deadID
 				}
 				logWarn("Peer %s timed out", name)
-				removePeerFully(peers, ipcPool, deadID)
+				peers.Remove(deadID)
 				mesh.RemovePeer(deadID)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: deadID})
 			}
@@ -712,7 +737,7 @@ func sessionLoop(
 			}
 			for _, pid := range hardPeers {
 				logWarn("Peer %s no identity after 15s — removing", pid)
-				removePeerFully(peers, ipcPool, pid)
+				peers.Remove(pid)
 				mesh.RemovePeer(pid)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: pid})
 			}
@@ -796,7 +821,7 @@ func sessionLoop(
 
 			// Build local sends
 			localSends := make([]LocalSendInfo, 0, len(localSendStreams))
-			for _, streamIdx := range localSendStreams {
+			for streamIdx := range localSendStreams {
 				var sn *string
 				if n, ok := localStreamNames[streamIdx]; ok {
 					sn = &n
@@ -815,17 +840,23 @@ func sessionLoop(
 			emitter.Emit("status:update", StatusUpdate{
 				BPM: state.BPM, Beat: state.Beat, Phase: state.Phase,
 				LinkPeers: state.NumPeers, Peers: peerInfos, Slots: slotInfos,
-				LocalSends: localSends, IntervalBars: intervalBars,
+				LocalSends: localSends, IntervalBars: intervalCfg.Bars,
 				AudioSent: audioIntervalsSent, AudioRecv: audioIntervalsReceived,
 				AudioBytesSent: audioBytesSent, AudioBytesRecv: audioBytesRecv,
-				AudioDCOpen: dcOpen, PluginConnected: !ipcPool.IsEmpty() || config.TestMode,
+				AudioDCOpen: dcOpen, PluginConnected: true,
 				Recording: recorder != nil,
-				RecordingSizeBytes: func() uint64 { if recorder != nil { return recorder.BytesWritten() }; return 0 }(),
+				RecordingSizeBytes: func() uint64 {
+					if recorder != nil {
+						return recorder.BytesWritten()
+					}
+					return 0
+				}(),
+				CaptureChannels: audioEngine.CaptureChannels(),
 			})
 
 			// Broadcast audio status
 			audioStatusSeq++
-			mesh.Broadcast(NewAudioStatus(dcOpen, audioIntervalsSent, audioIntervalsReceived, !ipcPool.IsEmpty() || config.TestMode, audioStatusSeq))
+			mesh.Broadcast(NewAudioStatus(dcOpen, audioIntervalsSent, audioIntervalsReceived, true, audioStatusSeq))
 
 			// Send metrics + build network event
 			perPeer := make(map[string]PeerFrameReport)
@@ -864,8 +895,7 @@ func sessionLoop(
 				})
 			}
 			emitter.Emit("peers:network", PeersNetwork{Peers: networkInfos})
-			_ = ipcDropCount.Load()
-			mesh.SendMetricsReport(dcOpen, !ipcPool.IsEmpty() || config.TestMode, perPeer, ipcDropCount.Load(), boundaryDriftUs)
+			mesh.SendMetricsReport(dcOpen, true, perPeer, localDropCount.Load(), boundaryDriftUs)
 		}
 	}
 
@@ -875,16 +905,6 @@ cleanup:
 		logInfo("Recording finalized")
 	}
 	return nil
-}
-
-type ipcFrame struct {
-	connID int
-	data   []byte
-}
-
-type ipcSendRegistration struct {
-	ConnID      int
-	StreamIndex uint16
 }
 
 func connectMesh(ctx context.Context, config SessionConfig, peerID string) (*PeerMesh, <-chan FromPeerSync, <-chan FromPeerAudio, error) {
@@ -897,175 +917,6 @@ func connectMesh(ctx context.Context, config SessionConfig, peerID string) (*Pee
 	}
 	mesh := NewPeerMesh(peerID, client, channels, config.StreamCount, peerNames)
 	return mesh, channels.SyncCh, channels.AudioCh, nil
-}
-
-func acceptIPCConnections(
-	ctx context.Context,
-	listener net.Listener,
-	fromPluginCh chan<- ipcFrame,
-	disconnectCh chan<- int,
-	sendRegCh chan<- ipcSendRegistration,
-	pool *IPCWriterPool,
-	peers *PeerRegistry,
-	nextID *int,
-	dropCounter *atomic.Uint64,
-	emitter EventEmitter,
-	logInfo func(string, ...any),
-	logWarn func(string, ...any),
-) {
-	var mu sync.Mutex
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				logWarn("IPC accept failed: %v", err)
-				continue
-			}
-		}
-
-		mu.Lock()
-		connID := *nextID
-		*nextID++
-		mu.Unlock()
-
-		logInfo("Plugin connected (conn %d)", connID)
-
-		go func(connID int, conn net.Conn) {
-			defer func() {
-				conn.Close()
-				disconnectCh <- connID
-				emitter.Emit("plugin:disconnected", nil)
-			}()
-
-			// Read role byte
-			roleBuf := make([]byte, 1)
-			if _, err := io.ReadFull(conn, roleBuf); err != nil {
-				logWarn("Plugin (conn %d): failed to read role byte", connID)
-				return
-			}
-			role := roleBuf[0]
-
-			var streamIndex uint16
-			if role != IPCRoleRecv {
-				siBuf := make([]byte, 2)
-				conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-				if _, err := io.ReadFull(conn, siBuf); err == nil {
-					streamIndex = binary.LittleEndian.Uint16(siBuf)
-				}
-				conn.SetReadDeadline(time.Time{})
-			}
-
-			if role == IPCRoleRecv {
-				pool.Add(connID, conn)
-				// Replay existing peer state so the recv plugin knows about
-				// peers that joined before it connected.
-				for _, snap := range peers.SnapshotForRecvReplay() {
-					if err := WriteFrame(conn, EncodePeerJoinedMsg(snap.PeerID, snap.Identity)); err != nil {
-						logWarn("Plugin (conn %d): failed to replay PeerJoined for %s: %v", connID, snap.PeerID, err)
-					}
-					if snap.DisplayName != "" {
-						if err := WriteFrame(conn, EncodePeerNameMsg(snap.PeerID, snap.DisplayName)); err != nil {
-							logWarn("Plugin (conn %d): failed to replay PeerName for %s: %v", connID, snap.PeerID, err)
-						}
-					}
-				}
-				logInfo("Plugin (conn %d) identified as recv", connID)
-			} else {
-				sendRegCh <- ipcSendRegistration{ConnID: connID, StreamIndex: streamIndex}
-				logInfo("Plugin (conn %d) identified as send, stream_index=%d", connID, streamIndex)
-			}
-			emitter.Emit("plugin:connected", nil)
-
-			// Read loop
-			recvBuf := NewIPCRecvBuffer()
-			buf := make([]byte, 65536)
-			for {
-				n, err := conn.Read(buf)
-				if err != nil {
-					logInfo("Plugin disconnected (conn %d)", connID)
-					return
-				}
-				if role != IPCRoleRecv {
-					recvBuf.Push(buf[:n])
-					for {
-						frame := recvBuf.NextFrame()
-						if frame == nil {
-							break
-						}
-						select {
-						case fromPluginCh <- ipcFrame{connID: connID, data: frame}:
-						default:
-							dropCounter.Add(1)
-						}
-					}
-				}
-			}
-		}(connID, conn)
-	}
-}
-
-func handleIntervalBoundary(
-	beat float64, bars uint32, quantum float64,
-	lastIdx *int64, bpm float64, lastBoundary *time.Time,
-	boundaryDriftUs **int64,
-	mesh *PeerMesh,
-	framesSent, framesRecv, bytesSent, bytesRecv *uint64,
-	totalSent, totalRecv *uint64,
-	lastIntervalIndex **int64, lastBoundaryTime **time.Time,
-	testToneBoundaryCh chan IntervalBoundaryInfo,
-	wavSenderBoundaryCh chan IntervalBoundaryInfo,
-) {
-	idx := computeIntervalIndex(beat, bars, quantum)
-	if lastIdx != nil && idx <= *lastIdx {
-		return
-	}
-	newIdx := idx
-	*lastIntervalIndex = &newIdx
-
-	log.Printf("[session] >>> INTERVAL %d <<< beat=%.1f sent=%d recv=%d", idx, beat, *framesSent, *framesRecv)
-	*framesSent = 0
-	*framesRecv = 0
-	*bytesSent = 0
-	*bytesRecv = 0
-
-	if lastBoundary != nil {
-		gap := time.Since(*lastBoundary)
-		if bpm > 0 {
-			beats := beatsPerInterval(bars, quantum)
-			expectedUs := int64(beats / (bpm / 60.0) * 1_000_000.0)
-			actualUs := gap.Microseconds()
-			drift := actualUs - expectedUs
-			*boundaryDriftUs = &drift
-		}
-	}
-	now := time.Now()
-	*lastBoundaryTime = &now
-
-	mesh.Broadcast(NewIntervalBoundary(idx))
-
-	info := IntervalBoundaryInfo{Index: idx, BPM: bpm, Bars: bars, Quantum: quantum}
-	if testToneBoundaryCh != nil {
-		select {
-		case testToneBoundaryCh <- info:
-		default:
-		}
-	}
-	if wavSenderBoundaryCh != nil {
-		select {
-		case wavSenderBoundaryCh <- info:
-		default:
-		}
-	}
-}
-
-func removePeerFully(peers *PeerRegistry, pool *IPCWriterPool, peerID string) {
-	if !pool.IsEmpty() {
-		pool.Broadcast(EncodeFrame(EncodePeerLeftMsg(peerID)))
-	}
-	peers.Remove(peerID)
 }
 
 func min64(a, b uint64) uint64 {

@@ -29,7 +29,8 @@ func main() {
 	password := flag.String("password", "", "Room password (optional)")
 	headless := flag.Bool("headless", false, "Run without GUI (CLI mode)")
 	wavFile := flag.String("wav", "", "WAV file to send (headless mode)")
-	instance := flag.Int("instance", 0, "Instance number (port = 9191+N, separate data dir)")
+	testTone := flag.Bool("test-tone", false, "Send a synthetic test tone on stream 0 (headless mode; no DAW/WAV needed)")
+	instance := flag.Int("instance", 0, "Instance number (separate data dir / identity)")
 	flag.Parse()
 
 	// Initialize Honeybadger error reporting
@@ -53,10 +54,10 @@ func main() {
 		appBackend.wsLog = wsLogWriter
 	}
 
-	log.Printf("App initialized — identity: %s, IPC port: %d", appBackend.identity, appBackend.ipcPort)
+	log.Printf("App initialized — identity: %s", appBackend.identity)
 
 	if *headless {
-		runHeadless(appBackend, *room, *password, *bpmFlag, *name, *wavFile)
+		runHeadless(appBackend, *room, *password, *bpmFlag, *name, *wavFile, *testTone)
 		return
 	}
 
@@ -94,13 +95,12 @@ func main() {
 		}
 		log.Printf("Auto-joining room %q as %q at %.0f BPM", *room, displayName, *bpmFlag)
 		bpm := *bpmFlag
-		testMode := true
 		var pw *string
 		if *password != "" {
 			pw = password
 		}
 		go func() {
-			result, err := appBackend.JoinRoom(*room, pw, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil, &testMode)
+			result, err := appBackend.JoinRoom(*room, pw, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil)
 			if err != nil {
 				log.Printf("Failed to auto-join room: %v", err)
 				return
@@ -116,7 +116,7 @@ func main() {
 	}
 }
 
-func runHeadless(app *App, room, password string, bpm float64, name, wavFile string) {
+func runHeadless(app *App, room, password string, bpm float64, name, wavFile string, testTone bool) {
 	if room == "" {
 		log.Fatal("-room is required in headless mode")
 	}
@@ -132,11 +132,10 @@ func runHeadless(app *App, room, password string, bpm float64, name, wavFile str
 	if password != "" {
 		pw = &password
 	}
-	testMode := true
 
 	log.Printf("Headless mode: joining room %q as %q at %.0f BPM", room, displayName, bpm)
 
-	result, err := app.JoinRoom(room, pw, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil, &testMode)
+	result, err := app.JoinRoom(room, pw, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		log.Fatalf("Failed to join room: %v", err)
 	}
@@ -148,6 +147,14 @@ func runHeadless(app *App, room, password string, bpm float64, name, wavFile str
 			log.Fatalf("Failed to start WAV sender: %v", err)
 		}
 		log.Printf("WAV sender started: %s", wavFile)
+	}
+
+	if testTone {
+		streamIdx := uint16(0)
+		if err := app.SetTestTone(&streamIdx); err != nil {
+			log.Fatalf("Failed to start test tone: %v", err)
+		}
+		log.Printf("Test tone started on stream 0")
 	}
 
 	// Block until signal

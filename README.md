@@ -2,6 +2,8 @@
 
 WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across the internet using a WebSocket relay server. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN, with intervalic audio (NINJAM-style) captured, Opus-encoded, and transmitted via the server.
 
+WAIL is an Ableton **Link Audio** peer — it captures and plays audio directly over Link, so there are no WAIL plugins to install. Ableton Live 12.3+ supports Link Audio natively; with any other DAW you can bridge audio in and out of Link Audio using the third-party [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst).
+
 ## Install
 
 Download the latest release from the [Releases page](https://github.com/MostDistant/WAIL/releases).
@@ -13,39 +15,29 @@ brew tap MostDistant/wail
 brew install MostDistant/wail/wail
 ```
 
-This builds the WAIL binary and DAW plugins from source. After installation, run the plugin installer to copy the CLAP and VST3 bundles into your DAW's plugin directories:
+This builds and installs the WAIL binary from source. WAIL captures and plays audio as an Ableton Link Audio peer, so there are no plugins to install.
 
-```sh
-wail-install-plugins
-```
-
-Then rescan plugins in your DAW.
-
-**Windows** — Download `wail-windows-x64-<version>.zip` from the Releases page, extract it, and run `bin\wail.exe`. The WAIL Send and Recv plugins are auto-installed on first launch into `%LOCALAPPDATA%\Programs\Common\{CLAP,VST3}\` (no admin rights required); rescan plugins in your DAW. The binary is unsigned, so SmartScreen will warn on first launch — click "More info" → "Run anyway".
+**Windows** — Download `wail-windows-x64-<version>.zip` from the Releases page, extract it, and run `bin\wail.exe`. The binary is unsigned, so SmartScreen will warn on first launch — click "More info" → "Run anyway".
 
 **Linux** — Download `wail-linux-x64-<version>.tar.gz` from the Releases page. Install the runtime dependencies, extract, and run:
 
 ```sh
-sudo apt install libwebkit2gtk-4.1-0 libopus0 librtmidi6   # Debian/Ubuntu runtime deps
+sudo apt install libwebkit2gtk-4.1-0 libopus0   # Debian/Ubuntu runtime deps
 tar -xzf wail-linux-x64-*.tar.gz
 ./wail-*/bin/wail
 ```
-
-The WAIL Send and Recv plugins are auto-installed to `~/.clap/` and `~/.vst3/` on first launch.
 
 ## Getting Started
 
 1. **Launch the WAIL app.**
 
-2. **Enable Ableton Link in your DAW.** WAIL relies on Link for tempo and phase sync.
-   - *Ableton Live:* Preferences > Link, Tempo, MIDI > turn on "Show Link Toggle", then enable Link in the transport bar.
-   - *Bitwig Studio:* Settings > Synchronization > enable Link.
-   - *REAPER:* Install [ReaBlink](https://github.com/ak5k/reablink), which adds Ableton Link support via a REAPER extension.
-   - Other DAWs — check your DAW's documentation for Link support.
+2. **Enable Ableton Link (tempo/phase) and Link Audio (the audio exchange) in your DAW.** These are two separate things: Link sync is widely supported; Link Audio is newer.
+   - *Ableton Live 12.3+* — the only DAW with **native Link Audio** today. Preferences > Link, Tempo, MIDI > turn on "Show Link Toggle", then enable Link in the transport bar.
+   - *Any other DAW (Bitwig, REAPER, etc.)* — enable Ableton **Link** for tempo/phase sync (Bitwig: Settings > Synchronization; REAPER: install [ReaBlink](https://github.com/ak5k/reablink)), and to send/receive **Link Audio** use the third-party [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst), which bridges your DAW's audio to and from Link Audio channels that WAIL can capture and publish.
 
-3. **Load WAIL Send** on each track or bus you want to share. Each instance captures audio and sends it to your peers at each interval boundary. Use the **Stream Index** parameter (0–14) to assign each instance a unique stream — e.g., drums on stream 0, synth on stream 1.
+3. **Route audio to Link Audio.** Send the tracks or busses you want to share to Link Audio output channels in your DAW. WAIL captures those channels, so anything you route there is streamed to your peers. You can share several independent streams (e.g. drums on one channel, synth on another).
 
-4. **Load WAIL Recv** on a separate track to hear remote peers. It decodes incoming audio and provides a main mix output plus up to 15 per-slot auxiliary outputs (one per unique peer/stream combination).
+4. **Bring in remote peers.** WAIL republishes each remote peer's audio as a Link Audio channel. Add a track in your DAW whose input is a Link Audio channel to hear them — one channel per peer/stream.
 
 5. **Join a room** in the WAIL app. On first launch, you'll be prompted to enter a display name (you can change it later via the settings gear icon). Enter a room name and optionally set a password to create a private room, or leave it blank for a public room. You can also browse existing public rooms from the "Public Rooms" tab.
 
@@ -70,15 +62,15 @@ WAIL can run without the GUI for scripted or automated use. The `-headless` flag
 
 Stop with Ctrl+C or SIGTERM for clean shutdown.
 
+By default WAIL connects to the hosted relay. Set the `WAIL_SIGNAL_URL` environment variable (e.g. `WAIL_SIGNAL_URL=ws://localhost:8899`) to point at a self-hosted or local relay instead.
+
 ## Components
 
-WAIL has three components that work together:
+WAIL has two components that work together:
 
-- **WAIL app** — The desktop app that handles networking. It connects to the signaling server, which relays sync and audio data between the DAW plugins and remote peers.
+- **WAIL app** — The desktop app you run alongside your DAW. It joins your local Ableton Link session, captures the Link Audio channels you route to it, Opus-encodes them per interval, and relays them to your peers. Incoming audio is decoded, held one interval, and republished as Link Audio channels for your DAW to play back.
 
-- **WAIL Send** (CLAP/VST3 plugin) — Place this on a track or bus in your DAW to capture audio. At each interval boundary, the recorded audio is Opus-encoded and sent to all connected peers via the WAIL app. You can load multiple instances with different Stream Index values to send separate audio streams (e.g., drums and synth independently).
-
-- **WAIL Recv** (CLAP/VST3 plugin) — Place this on a track in your DAW to hear remote peers. It receives and decodes incoming audio intervals, mixing them into the main output with up to 15 auxiliary outputs (one per unique peer/stream slot).
+- **Signaling server** — A lightweight WebSocket relay that connects rooms of peers, forwarding sync messages and audio between everyone in the room.
 
 ## Settings
 
@@ -91,7 +83,7 @@ WAIL has three components that work together:
 
 **No sync / peers not connecting** — Make sure Ableton Link is enabled in your DAW. WAIL relies on Link for tempo and phase sync.
 
-**No audio from remote peers** — Verify that both WAIL Send and WAIL Recv plugins are loaded and the WAIL app is running and connected to the same room.
+**No audio from remote peers** — Make sure Link Audio is available in your DAW (native in Ableton Live 12.3+, or via the [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst) in other DAWs), that you've routed audio to a Link Audio output channel and added a track that takes its input from WAIL's published Link Audio channels, and that the WAIL app is running and connected to the same room.
 
 **Changing tempo mid-jam** — Not recommended. WAIL uses NINJAM-style intervals, so audio is recorded and played back in full interval chunks. If you change the tempo, the current interval must finish before the new tempo takes effect. If you do need to change tempo, agree on it beforehand and have one person change it — Link will propagate it to all peers within a few seconds.
 
@@ -104,8 +96,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for build instructions, project structure, 
 WAIL's intervalic audio model is directly inspired by [NINJAM](https://www.ninjam.com/), created by Justin Frankel at [Cockos](https://www.cockos.com/). The idea that you can jam with anyone in the world by accepting one interval of latency changed everything.
 
 Built on the shoulders of great open-source projects:
-[Ableton Link](https://www.ableton.com/link/) (tempo/phase sync),
-[nih-plug](https://github.com/robbert-vdh/nih-plug) (CLAP/VST3 plugin framework),
+[Ableton Link](https://www.ableton.com/link/) (tempo/phase sync and Link Audio),
 [Opus](https://opus-codec.org/) (audio codec),
 [Wails](https://wails.io/) (desktop app framework).
 

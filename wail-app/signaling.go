@@ -248,6 +248,17 @@ func ConnectSignaling(
 				case syncCh <- FromPeerSync{From: msg.From, Msg: syncMsg}:
 				default:
 				}
+			case "interval_anchor":
+				// Relay-authoritative room interval clock (ADR-0003). Delivered
+				// on the existing sync channel as a synthetic IntervalAnchor so it
+				// rides the reconnect-aware sync plumbing. From is empty (server).
+				select {
+				case syncCh <- FromPeerSync{From: "", Msg: SyncMessage{
+					Type: "IntervalAnchor", Index: msg.CurrentIndex,
+					BPM: msg.BPM, Bars: msg.Bars, Quantum: msg.Quantum,
+				}}:
+				default:
+				}
 			case "evicted":
 				log.Printf("[signaling] Evicted by server")
 				return

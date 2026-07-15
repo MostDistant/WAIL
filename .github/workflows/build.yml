@@ -14,19 +14,10 @@ jobs:
   build-macos:
     runs-on: macos-latest
     if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
 
       - uses: actions/setup-go@v5
         with:
@@ -35,37 +26,30 @@ jobs:
       - name: Install opus
         run: brew install opus
 
-      - name: Build plugin
-        run: cargo xtask bundle-plugin
-
-      - name: Build workspace
-        run: cargo build --workspace
-
-      - name: Build Go app (linkstub)
+      - name: Build Go app
         # nolibopusfile suppresses unused stream.go in gopkg.in/hraban/opus.v2,
         # which would otherwise require libopusfile to be installed.
-        run: go build -tags "linkstub,nolibopusfile" -o /dev/null .
+        run: go build -tags nolibopusfile -o /dev/null .
         working-directory: wail-app
+
+      - name: Test Go app
+        run: go test -tags nolibopusfile ./...
+        working-directory: wail-app
+
+      - name: Build & test signaling-server
+        run: go build ./... && go test ./...
+        working-directory: signaling-server
 
   build-windows:
     # Pinned to windows-2022 to match the release workflow's toolchain (older
     # MinGW GCC + CMake). windows-latest rolled over to the 2025/2026 image
-    # whose newer toolchain breaks the plugin/CGo builds. See #329.
+    # whose newer toolchain breaks the CGo builds. See #329.
     runs-on: windows-2022
     if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
 
       - uses: actions/setup-go@v5
         with:
@@ -78,7 +62,7 @@ jobs:
           path: C:\vcpkg\installed
           # Bump the suffix whenever the package list below changes, otherwise a
           # stale cache is restored and the new packages are never installed.
-          key: vcpkg-opus-pkgconf-x64-windows-v2
+          key: vcpkg-opus-mingw-static-pkgconf-x64-windows-v3
 
       - name: Install opus + pkgconf via vcpkg
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -86,7 +70,10 @@ jobs:
         # opus. We get it from vcpkg rather than choco because the choco
         # community feed is flaky (504s) and silently leaves the build to fall
         # back to Strawberry Perl's broken pkg-config.bat stub on PATH.
-        run: vcpkg install opus:x64-windows pkgconf:x64-windows
+        #
+        # opus is built for the x64-mingw-static triplet (same GCC ABI as the
+        # CGo objects) and linked statically into the desktop-app binary.
+        run: vcpkg install opus:x64-mingw-static pkgconf:x64-windows
 
       - name: Configure pkg-config
         shell: pwsh
@@ -100,58 +87,38 @@ jobs:
           Write-Host "Using PKG_CONFIG=$($pkgconf.FullName)"
           & $pkgconf.FullName --version
 
-      - name: Build plugin
-        env:
-          PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-          # Belt-and-suspenders for CMake 4.x: audiopus_sys builds a vendored
-          # Opus from source via CMake on Windows (pkg-config is compiled out
-          # for the MSVC target), and that Opus declares
-          # cmake_minimum_required(<3.5), which CMake 4.x refuses. windows-2022
-          # currently ships CMake 3.x so this is a no-op there, but it keeps the
-          # build green if the image's CMake is ever bumped.
-          # Tracked follow-up (link the prebuilt vcpkg Opus instead): #329
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-        run: cargo xtask bundle-plugin
+      - name: Rename Link `interface` param for MinGW
+        shell: pwsh
+        # MinGW's COM headers #define `interface`, colliding with the `interface`
+        # parameter in Link's link_audio/Channels.hpp. Rename it (the only
+        # identifier use — Interface/mpInterface are untouched; other files use
+        # the word only in a comment/string). Undef-ing the macro from our cgo
+        # wrapper proved unreliable on MinGW.
+        # -creplace is case-SENSITIVE: rename only lowercase `interface`, never the
+        # `Interface` template parameter (PowerShell's -replace is case-insensitive
+        # and would collapse both into `iface`, shadowing the template param).
+        run: |
+          (Get-Content vendor/link/include/ableton/link_audio/Channels.hpp) `
+            -creplace '\binterface\b', 'iface' `
+            | Set-Content vendor/link/include/ableton/link_audio/Channels.hpp
 
-      - name: Build Go app (linkstub)
+      - name: Build Go app
         env:
-          PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-        run: go build -tags "linkstub,nolibopusfile" -o NUL .
+          PKG_CONFIG_PATH: C:\vcpkg\installed\x64-mingw-static\lib\pkgconfig
+        run: go build -tags nolibopusfile -o NUL .
         working-directory: wail-app
 
-      - name: Collect artifacts
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist
-          Copy-Item C:\vcpkg\installed\x64-windows\bin\opus.dll dist\
-          Copy-Item target\bundled\wail-plugin-send.clap dist\
-          Copy-Item -Recurse target\bundled\wail-plugin-send.vst3 dist\wail-plugin-send.vst3
-          Copy-Item target\bundled\wail-plugin-recv.clap dist\
-          Copy-Item -Recurse target\bundled\wail-plugin-recv.vst3 dist\wail-plugin-recv.vst3
-          Copy-Item dist\opus.dll dist\wail-plugin-send.vst3\Contents\x86_64-win\
-          Copy-Item dist\opus.dll dist\wail-plugin-recv.vst3\Contents\x86_64-win\
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: wail-windows-x64
-          path: dist\
+      - name: Build & test signaling-server
+        run: go build ./... && go test ./...
+        working-directory: signaling-server
 
   build-linux:
     runs-on: ubuntu-22.04
     if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
 
       - uses: actions/setup-go@v5
         with:
@@ -172,22 +139,14 @@ jobs:
             cmake \
             g++
 
-      - name: Build plugin
-        run: cargo xtask bundle-plugin
-
-      - name: Build Go app (linkstub)
-        run: go build -tags "linkstub,nolibopusfile" -o /dev/null .
+      - name: Build Go app
+        run: go build -tags nolibopusfile -o /dev/null .
         working-directory: wail-app
 
-      - name: Collect artifacts
-        run: |
-          mkdir -p dist
-          cp target/bundled/wail-plugin-send.clap dist/
-          cp -r target/bundled/wail-plugin-send.vst3 dist/
-          cp target/bundled/wail-plugin-recv.clap dist/
-          cp -r target/bundled/wail-plugin-recv.vst3 dist/
+      - name: Test Go app
+        run: go test -tags nolibopusfile ./...
+        working-directory: wail-app
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: wail-linux-x64
-          path: dist/
+      - name: Build & test signaling-server
+        run: go build ./... && go test ./...
+        working-directory: signaling-server

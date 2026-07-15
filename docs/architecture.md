@@ -2,7 +2,7 @@
 
 ## Overview
 
-WAIL bridges Ableton Link sessions across the internet via a WebSocket relay server. Musicians on different networks sync tempo, phase, and interval boundaries as if they were on the same LAN. Audio is captured per interval (NINJAM-style), Opus-encoded, and transmitted as binary WebSocket frames through the server. Two CLAP/VST3 plugins provide DAW integration: WAIL Send (capture, multiple instances supported) and WAIL Recv (playback, up to 15 per-slot auxiliary outputs).
+WAIL bridges Ableton Link sessions across the internet via a WebSocket relay server. Musicians on different networks sync tempo, phase, and interval boundaries as if they were on the same LAN. Audio is captured per interval (NINJAM-style), Opus-encoded, and transmitted as binary WebSocket frames through the server. WAIL is an Ableton **Link Audio** peer (ADR-0001): capture subscribes to local Link Audio channels, and playback republishes remote streams as Link Audio channels one interval late. There are no plugins and no IPC — the entire audio path runs inside the Go `wail-app` process (ADR-0002).
 
 ## System Diagram
 
@@ -11,16 +11,15 @@ WAIL bridges Ableton Link sessions across the internet via a WebSocket relay ser
 │  Peer A Machine                      │                    │  Peer B Machine                      │
 │                                      │                    │                                      │
 │  ┌──────────────────────────────┐    │                    │    ┌──────────────────────────────┐  │
-│  │  DAW (Ableton, Bitwig, etc.) │    │                    │    │  DAW (Ableton, Bitwig, etc.) │  │
-│  │                              │    │                    │    │                              │  │
-│  │  Tracks: [WAIL Send ×N]      │    │                    │    │  Tracks: [WAIL Send ×N]      │  │
-│  │          [WAIL Recv]         │    │                    │    │          [WAIL Recv]         │  │
+│  │  DAW / Link-Audio app        │    │                    │    │  DAW / Link-Audio app        │  │
+│  │  (Ableton Live 12.3+, etc.)  │    │                    │    │  (Ableton Live 12.3+, etc.)  │  │
 │  └──────────┬───────────────────┘    │                    │    └──────────┬───────────────────┘  │
-│             │ IPC (TCP :9191)        │                    │               │ IPC (TCP :9191)      │
+│             │ Link Audio (LAN, UDP)  │                    │               │ Link Audio (LAN, UDP)│
 │  ┌──────────┴───────────────────┐    │                    │    ┌──────────┴───────────────────┐  │
 │  │  WAIL App                    │◄───┼─── WS Relay ───────┼───►│  WAIL App                    │  │
 │  │  ├─ Link bridge (50Hz poll)  │    │  "sync" (JSON)     │    │  ├─ Link bridge (50Hz poll)  │  │
-│  │  └─ Audio relay              │    │  "audio" (binary)  │    │  └─ Audio relay              │  │
+│  │  ├─ Link Audio capture       │    │  "audio" (binary)  │    │  ├─ Link Audio capture       │  │
+│  │  └─ Link Audio emit (sink)   │    │                    │    │  └─ Link Audio emit (sink)   │  │
 │  └──────────┬───────────────────┘    │                    │    └──────────┬───────────────────┘  │
 │             │ Link (LAN multicast)   │                    │               │ Link (LAN multicast) │
 │  ┌──────────┴───────────────────┐    │                    │    ┌──────────┴───────────────────┐  │
@@ -30,38 +29,34 @@ WAIL bridges Ableton Link sessions across the internet via a WebSocket relay ser
                     │ WebSocket                                              │ WebSocket
                     │                                                        │
                     │              ┌──────────────────┐                      │
-                    └─────────────►│ Signaling Server │◄─────────────────────┘
+                    └─────────────►│  Relay Server    │◄─────────────────────┘
                                    │  (Go + SQLite)   │
                                    └──────────────────┘
 ```
 
+The DAW and WAIL App are both Link peers on the same LAN: WAIL captures the app's Link Audio channels and publishes remote peers back as Link Audio channels the app can play.
+
 ## Dependency Graph
 
 ```
-wail-app/ (Go/Wails desktop app — session orchestration, IPC, recording)
-├── wails/v3 (desktop webview framework)
-├── gorilla/websocket (WebSocket client)
-├── abletonlink-go (Ableton Link via CGo)
-└── pion/opus (Opus codec)
+wail-app/ (Go/Wails desktop app — session orchestration, Link Audio engine, recording)
+├── wailsapp/wails/v3 (desktop webview framework)
+├── gorilla/websocket (WebSocket relay client)
+├── internal/abllink (our own cgo binding to Ableton Link's abl_link C API:
+│                     sync + Link Audio, compiled against vendor/link)
+├── hraban/opus.v2 (Opus codec, cgo libopus)
+├── go-audio/wav (headless WAV loading)
+└── internal engine packages (pure, unit-tested):
+    ├── interval (interval/room-clock math — RoomClock, RoomLabeler)
+    ├── capture  (interval assembler)
+    ├── emit     (reassembler + paced sink reader)
+    ├── playout  (hold-until-N+D scheduler)
+    ├── lanloss  (Link Audio count-gap loss)
+    └── affinity ((identity, stream) → stable published channel)
 
-wail-plugin-send (CLAP/VST3, captures DAW audio, stream_index param 0-14)
-├── wail-core
-└── wail-audio
-
-wail-plugin-recv (CLAP/VST3, plays remote audio, 15 aux outputs)
-├── wail-core
-└── wail-audio
-
-wail-plugin-test (integration test harness for Send/Recv plugins)
-├── wail-audio
-└── wail-core
-
-wail-e2e (two-machine end-to-end test binary)
-├── wail-core
-├── wail-audio
-└── wail-net
-
-signaling-server/ (Go WebSocket signaling server, deployed to fly.io)
+signaling-server/ (Go WebSocket relay server, deployed to fly.io)
+├── roomclock.go / interval_clock.go (relay-authoritative room interval clock + interval_anchor)
+└── cmd/wail-metrics (CLI metrics client)
 ```
 
 ## The NINJAM Model
@@ -85,59 +80,40 @@ Traditional real-time audio requires <20ms round-trip latency. That's impossible
 
 ### The Double-Buffer
 
-`IntervalRing` implements the NINJAM double-buffer with up to 15 remote slots, keyed by `ClientChannelMapping(client_id, channel_index)` — a persistent identity that survives reconnects:
+WAIL keeps the NINJAM double-buffer in pure Go: capture accumulates the current interval while playback emits the previous one, per remote stream.
 
 ```
-Interval N:   [RECORD local audio] ──→ on boundary ──→ encode + transmit
-              [PLAY remote audio from interval N-1]
+Interval N:   [CAPTURE local Link Audio] ──→ on boundary ──→ Opus-encode + transmit
+              [EMIT remote audio for room interval N-D]
 
-Interval N+1: [RECORD local audio] ──→ on boundary ──→ encode + transmit
-              [PLAY remote audio from interval N]
+Interval N+1: [CAPTURE local Link Audio] ──→ on boundary ──→ Opus-encode + transmit
+              [EMIT remote audio for room interval N+1-D]
 ```
 
-At each interval boundary:
-- The record slot moves to the completed queue (for Opus encoding + transmission)
-- The pre-mixed playback buffer swaps into the active playback slot (O(1) pointer swap)
-- Record and playback positions reset to zero
-
-**Pre-mix double buffer:** Remote audio is summed incrementally into a `next_playback_slot` during `feed_remote()` calls (amortized across process callbacks). At the boundary, `swap_intervals()` swaps `next_playback_slot` into the active `playback_slot` via `std::mem::swap` — eliminating the O(interval_length × peers) CPU spike that occurred when all mixing happened at the boundary. Entries that were pre-mixed skip the traditional summation; only late-arriving (non-pre-mixed) entries are summed at swap time.
-
-Late-arriving frames (remote audio for the current playback interval that arrives after the swap) are **live-appended** directly to the active playback slot rather than queued for the next boundary. This eliminates the "2 bars sound, 2 bars silence" dropout that occurs at real-time network pacing.
-
-Each unique `ClientChannelMapping` (persistent `client_id` + `channel_index`) is assigned its own playback slot and Recv plugin auxiliary output via a `SlotTable`. If all 15 slots are exhausted, overflow audio is merged into the peer's channel 0 slot.
-
-Slot assignment uses **affinity**: when a peer disconnects, their `SlotTable` entries move from active to reserved. When the same persistent identity reconnects (possibly with a new session-scoped `peer_id`), they reclaim their original slots, keeping DAW aux routing stable across reconnects.
+- **Capture** (`internal/capture`): each Link Audio buffer is written at its sample offset in a fixed-length interval PCM buffer; when a buffer opens the next interval, the completed one is handed off for Opus encoding + transmission.
+- **Playback** (`internal/emit` + `internal/playout`): decoded frames are reassembled per room interval index; the hold-until-boundary scheduler releases interval `N` at the local boundary labeled `N+D` (offset D, default 1), and a paced reader tops the Link Audio sink up a few ms at a time (never a burst). Late frames for the interval currently playing are **live-appended** (play-partial) rather than dropped or delayed a whole interval.
+- **Channel affinity** (`internal/affinity`): each remote `(persistent identity, stream index)` maps to a stable published Link Audio channel. When a peer disconnects and reconnects (new session peer id, same identity), it reclaims the same channel/sink, so LAN apps' routing survives the blip. There is no fixed 15-slot cap — each remote stream is its own channel.
 
 ## Audio Flow
 
-### Full Path (Plugin → Network → Plugin)
+### Full Path (Link Audio → Network → Link Audio)
 
 ```
-DAW Track A
-  → WAIL Send plugin process() — IntervalRing records input samples
-  → Opus encode each 20ms frame (960 samples)
-  → AudioFrameWire.encode() — WAIF streaming frame (25-byte header + Opus data)
-  → IPC TCP frame (length-prefixed, tag 0x05) to WAIL App A
-  → WebSocket binary frame to signaling server → relayed to Peer B
-  → WAIL App B receives
-  → IPC TCP frame (tag 0x01 with peer_id) to Recv Plugin B
-  → FrameAssembler collects WAIF frames, assembles on final frame
-  → AudioDecoder.decode_interval() — Opus decode to f32
-  → IntervalRing.feed_remote() — pre-mix into next_playback_slot if matching
-                                  current interval, otherwise queue for later
-  → Next boundary: pre-mixed next_playback_slot swaps into active playback (O(1))
-  → WAIL Recv plugin process() — IntervalRing reads playback to output
-DAW Track B hears Peer A's previous interval
+DAW / Link-Audio app A publishes a Link Audio channel on LAN A
+  → WAIL A subscribes (LinkAudioSource); pure-C callback → C ring → Go drainer
+  → internal/capture buckets buffers into a fixed-length interval (local index)
+  → interval_codec.go Opus-encodes each 20ms frame → WAIF frames (labeled with the room index)
+  → WebSocket binary frame → relay server → Peer B
+  → WAIL B receives WAIF
+  → interval_codec.go Opus-decodes; internal/emit reassembles per (identity, stream index)
+  → internal/playout holds the interval until the local boundary labeled N+D
+  → internal/emit paces the interval into a LinkAudioSink (a published channel)
+DAW / Link-Audio app B plays WAIL B's published channel — Peer A's previous interval
 ```
 
-### AudioBridge
+### Audio engine
 
-`AudioBridge` wraps the full encode/decode pipeline in a single struct:
-
-- `process_rt(input, output, beat_position)` → drives IntervalRing from DAW beat position (used by Send plugin), returns completed intervals
-- `process_rt_with_interval(input, output, interval_index)` → drives IntervalRing from an externally-provided interval index (used by Recv plugin, where the interval comes from the Go app's Link session via incoming audio frames)
-- `receive_wire(peer_id, wire_data)` → decodes Opus, feeds to ring for playback (slot keyed by `ClientChannelMapping`)
-- `update_config(bars, quantum, bpm)` → updates interval parameters from DAW transport
+`audio_engine.go` defines the `AudioEngine` interface; `audio_engine_real.go` (`//go:build !linkstub`) is the implementation, with a no-op `audio_engine_stub.go` for stub builds. The engine owns the capture drain goroutines (one per bridged channel), the emit loop (boundary detection + paced sink writes), and Link Audio channel discovery. It wraps the pure, unit-tested packages above plus the `internal/abllink` cgo binding. The realtime capture callback stays pure C (`internal/abllink/capture.c`) and never enters the Go runtime, so a GC pause can never drop incoming Link Audio UDP (ADR-0002).
 
 ### Wire Format (AudioFrameWire / WAIF)
 
@@ -161,38 +137,7 @@ If final flag set, append:
 [4 bytes]  bars: u32 LE
 ```
 
-On the receiver side, `FrameAssembler` (in `wail-audio`) collects WAIF frames keyed by `(interval_index, stream_id, peer_id)` and assembles them into the length-prefixed Opus blob format that `AudioDecoder::decode_interval` expects.
-
-### IPC Protocol (Plugin ↔ App)
-
-TCP connection to `127.0.0.1:9191`. On connect, the plugin sends a handshake:
-
-```
-[1 byte]   role: 0x01 = Send, 0x02 = Recv
-[2 bytes]  stream_index: u16 LE  (Send plugins only; identifies which stream this instance captures)
-```
-
-Legacy send plugins that omit `stream_index` default to stream 0 (the app uses a 200ms read timeout for backward compatibility).
-
-After the handshake, length-prefixed binary framing:
-
-```
-[4 bytes]  payload_length: u32 LE  (max 16 MB — frames exceeding MAX_IPC_FRAME_SIZE are rejected)
-[N bytes]  payload (tagged message, see below)
-```
-
-Message tags:
-
-| Tag | Name | Payload layout |
-|-----|------|----------------|
-| `0x01` | AudioInterval | `peer_id_len (1B) + peer_id (UTF-8) + AudioWire data` |
-| `0x02` | PeerJoined | `peer_id_len (1B) + peer_id + identity_len (1B) + identity` |
-| `0x03` | PeerLeft | `peer_id_len (1B) + peer_id` |
-| `0x04` | PeerName | `peer_id_len (1B) + peer_id + name_len (1B) + display_name` |
-| `0x05` | AudioFrame | `AudioFrameWire data (WAIF streaming frame)` |
-
-Send Plugin→App: AudioFrame (tag 0x05) — WAIF streaming frames with no peer_id (local capture).
-App→Recv Plugin: AudioInterval (tag 0x01) with peer_id identifying the remote sender; PeerJoined/PeerLeft/PeerName for peer lifecycle and display name updates.
+On the receiver side, `internal/emit.Reassembler` collects decoded WAIF frames per `(remote identity, stream index)` and reassembles them into interval PCM (out-of-order tolerant; the final frame carries the total; missing frames read as silence). WAIF frames now carry the shared *room* interval index (relay clock), so there is no per-peer index remap.
 
 ## Tempo Sync Flow
 
@@ -223,21 +168,21 @@ App→Recv Plugin: AudioInterval (tag 0x01) with peer_id identifying the remote 
 
 The signaling server records each client's public IP (from `Fly-Client-IP`, `X-Forwarded-For`, or `RemoteAddr`). When a peer joins a room, the server checks whether any existing peer shares the same public IP — indicating they are on the same LAN. The `join_ok` response includes a `lan_peer_present` boolean.
 
-When `lan_peer_present` is true, the joining peer skips the `ForceBeat` command that normally snaps its beat position to the room owner's. This is because Ableton Link already handles beat/phase synchronization natively over LAN multicast — applying `ForceBeat` on top would conflict with Link's own sync and cause a double-correction.
+WAIL is a **passive** Link peer (ADR-0003): it never `ForceBeat`s the local transport — within-bar beat/phase alignment comes for free from Ableton Link's own LAN multicast sync. `lan_peer_present` is now informational only.
 
 ## Interval Boundaries
 
-Each peer computes interval boundaries independently from its local beat position:
+Each peer detects boundaries from its own local Link beat position:
 
 ```
-interval_index = floor(beat_position / (bars × quantum))
+local_interval_index = floor(beat_position / (bars × quantum))
 ```
 
 Example: 4 bars × 4.0 quantum = 16 beats per interval. Beat 15.9 → interval 0. Beat 16.0 → interval 1.
 
-**Send vs Recv boundary driving:** The Send plugin derives its interval index from the DAW's beat position (via `process_rt`). The Recv plugin instead tracks the latest interval index carried in incoming audio frames from the Go app's Link session (via `process_rt_with_interval`). This decouples Recv from the DAW's transport position, which may not match Link's beat timeline (e.g., when the DAW isn't providing Link-aligned transport).
+**Relay-authoritative room index (ADR-0003):** the relay server owns the room interval index and broadcasts an `interval_anchor` (index + tempo/config + server time). Each client maps its *local* index to the shared *room* index via a constant offset established from the anchor (`internal/interval.RoomLabeler`). Every WAIL agrees on the room index by construction; WAIF frames are tagged with it, and the receiver's hold-until-boundary scheduler releases interval `N` at the local boundary labeled `N+D`.
 
-**WAN peers' boundaries are NOT synchronized.** Peer A might cross into interval 1 while Peer B is still in interval 0. This is fine for NINJAM semantics — you always play the _previous_ interval, so drift up to 1 full interval is tolerable. As long as the wire data arrives before the receiver's _next_ boundary, it gets played on time.
+**WAN peers' boundaries are NOT synchronized in wall-clock.** Peer A might cross into interval 1 while Peer B is still in interval 0. This is fine for NINJAM semantics — you always play the _previous_ interval, so drift up to 1 full interval is tolerable. As long as the wire data arrives before the receiver's `N+D` boundary, it plays on time; late frames live-append.
 
 ## Clock Domains
 
@@ -260,6 +205,7 @@ Two independent time domains exist in the system:
 | `AudioCapabilities` | sync | JSON | Announce send/receive support |
 | `AudioIntervalReady` | sync | JSON | Metadata before binary audio |
 | `StreamNames` | sync | JSON | Human-readable names for sender's audio streams |
+| `interval_anchor` | sync | JSON | Relay-authoritative room interval index + tempo/config (server → clients, ADR-0003) |
 | _(binary audio)_ | audio | WAIF (AudioFrameWire) | Opus-encoded streaming frames |
 
 ## Signaling Protocol Messages
@@ -292,13 +238,13 @@ Two independent time domains exist in the system:
 
 7. **Stream-count-aware rate limiting**: Per-connection token bucket rate limiting on the signaling server. Binary message rate scales with `stream_count` (60 tokens/sec/stream, 2× burst), text rate is fixed at 100/sec. Escalation: drop excess messages → warn log → send `rate_limit_warning` to client → disconnect after 50 cumulative violations. Join messages are exempt from text rate limiting so peers can always reconnect.
 
-8. **wail-core and wail-audio have no network deps**: Reusable from the CLAP/VST3 plugin without pulling in tokio-tungstenite.
+8. **Pure engine logic in `internal/` packages**: interval math, scheduler, loss, affinity, and interval assembly/reassembly are cgo- and network-free, so they are fully unit-tested; the cgo Link Audio layer and the relay wrap that proven logic.
 
-9. **IPC over TCP** (not shared memory): Simpler, cross-platform, reliable. Latency is negligible compared to the 1-interval NINJAM delay.
+9. **Link Audio is the only local audio interface** (ADR-0001/0002): no CLAP/VST3 plugins and no TCP IPC. Audio enters and leaves the process as Link Audio; the realtime capture callback is pure C with a lock-free ring so a Go GC pause can't drop UDP.
 
 10. **JSON sync protocol**: Readable for debugging. Bandwidth is negligible for small sync messages.
 
-11. **Stable slot assignment via `ClientChannelMapping`**: Each remote audio channel is identified by `ClientChannelMapping(client_id, channel_index)` where `client_id` is a persistent UUID. A `SlotTable` manages assignment, affinity reservations, and reclamation. When a peer disconnects, their slot entries move to reserved; on reconnect with the same identity, they reclaim the same slots. This prevents DAW routing from breaking during brief network interruptions.
+11. **Stable channel affinity via `(identity, stream)`**: each remote stream is keyed by `(persistent identity UUID, stream index)` and mapped to a stable published Link Audio channel (`internal/affinity`). On reconnect with the same identity, the same channel/sink is reused, so LAN apps' routing survives brief network interruptions.
 
 12. **Local session recording**: Sessions can be recorded to WAV files — either a single mixed file or per-peer stems. Managed by `recorder.go` in wail-app.
 
@@ -306,7 +252,7 @@ Two independent time domains exist in the system:
 
 14. **Lock-free audio broadcast via copy-on-write**: The signaling server uses per-room `atomic.Pointer[[]connEntry]` snapshots so the audio hot path (~50 frames/sec/peer) iterates the connection list without holding any lock. Mutations (join/leave) acquire the per-room `r.mu`, rebuild the slice, and store it atomically. To avoid data races on `conn.room`/`conn.peerID` fields (which are cleared during eviction and leave), broadcast functions receive `room` and `peerID` as value parameters captured once per join in `readPump`, rather than reading them from the shared `conn` struct.
 
-15. **Headless CLI mode with pluggable emitter**: The WAIL app supports a `-headless` flag that bypasses the Wails GUI entirely. A `NoopEmitter` satisfies the `EventEmitter` interface (logging events instead of dispatching to a webview), decoupling session orchestration from the frontend. The `WavSenderTask` goroutine provides a built-in audio source that reads a WAV file, resamples to 48kHz stereo, Opus-encodes in 20ms frames, and feeds WAIF frames into the same interval-boundary pipeline used by the DAW plugins — enabling automated/scripted participation in a room without a DAW.
+15. **Headless CLI mode with pluggable emitter**: The WAIL app supports a `-headless` flag that bypasses the Wails GUI entirely. A `NoopEmitter` satisfies the `EventEmitter` interface (logging events instead of dispatching to a webview), decoupling session orchestration from the frontend. The `WavSenderTask` goroutine (and the GUI test tone) provide a built-in audio source that Opus-encodes 20ms frames and pushes WAIF straight to the relay — the in-app Go test client, enabling automated/scripted participation in a room without a DAW.
 
 ## Session Metrics and Live Dashboard
 
@@ -316,27 +262,26 @@ The signaling server tracks aggregate session metrics to monitor whether audio i
 
 A **session** starts when the 2nd peer joins a room (≥2 peers) and ends when the count drops below 2. Sessions have two phases:
 
-1. **Joining** — from session start until all peers report `dc_open` and `plugin_connected`. Captures connection establishment and plugin attachment.
+1. **Joining** — from session start until all peers report `dc_open` and `plugin_connected`. Captures connection establishment.
 2. **Playing** — steady-state audio flow after all peers are fully connected.
 
-> **Note:** The field name `dc_open` retains its WebRTC-era naming: it is always `true` once the WebSocket connects (so the joining→playing transition effectively depends only on `plugin_connected`). The field is retained in the protocol for backward compatibility.
+> **Note:** Both field names are WebRTC/plugin-era holdovers kept for protocol compatibility. `dc_open` is always `true` once the WebSocket connects; `plugin_connected` is now always `true` (the Link Audio engine is the audio path, so there is no separate plugin to attach). The joining→playing transition is therefore effectively immediate once peers connect.
 
 ### Per-direction metrics
 
 For each unique direction (e.g., `peer1→peer2`), the server tracks metrics independently per phase (joining vs playing). This distinguishes setup-related issues from steady-state network quality.
 
 **Frame-level metrics:**
-- `frames_expected` / `frames_received` / `frames_dropped` — tracked via zero-copy WAIF header parsing (`peek_waif_header`) in session.rs as frames pass through. Each "frame" is a single 20ms WAIF streaming Opus packet.
+- `frames_expected` / `frames_received` / `frames_dropped` — tracked via zero-copy WAIF header parsing (`PeekWaifHeader`) in `session.go` as frames pass through. Each "frame" is a single 20ms WAIF streaming Opus packet. WAN relay loss is `packet_loss.go` (WAIF frame-seq gaps); Link Audio LAN capture loss is `internal/lanloss` (per-buffer count gaps).
+- `boundary_drift_us` — interval boundary timing drift (actual − expected gap, µs)
 
 **Network health metrics (per direction):**
 - `rtt_us` — median RTT to the peer (µs), from `ClockSync` Ping/Pong
 - `jitter_us` — mean absolute deviation from median RTT (µs), the key signal for intermittent issues
-- `late_frames` — WAIF frames that arrived for already-passed intervals (detected in session.rs)
-- `decode_failures` — Opus decode failures reported by the recv plugin via `IPC_TAG_METRICS` (0x06)
+- `late_frames` — WAIF frames that arrived for already-passed intervals (detected in `session.go`)
+- `decode_failures` — Opus decode failures on the playback path
 
-**Session-level metrics:**
-- `ipc_drops` — cumulative IPC channel-full drops (plugin → app direction)
-- `boundary_drift_us` — interval boundary timing drift (actual − expected gap, µs)
+The former `ipc_drops` (plugin → app IPC channel-full) is retired with IPC; the equivalent now is local-sender WAIF drops (in-app test tone / WAV feeding the relay).
 
 Clients report cumulative per-peer metrics every 2 seconds via a `metrics_report` message on the signaling WebSocket. The server computes playing-phase deltas by snapshotting cumulative values at the joining→playing transition. Point-in-time values (RTT, jitter) are overwritten with the latest report.
 
@@ -362,7 +307,7 @@ wail-metrics -json   # raw JSON
 Every push to `main` triggers continuous deployment:
 
 1. `auto-release.yml` → consumes `.changeset/` files and conventional commits, bumps versions, updates CHANGELOG, creates a release PR, auto-merges it, then runs `knope release` (creates GitHub release + git tag) and dispatches artifact builds
-2. `release.yml` → builds platform artifacts (macOS, Windows, Linux — plugins + Tauri installers) and uploads them to the GitHub release
+2. `release.yml` → builds platform artifacts (macOS, Windows, Linux — the Go `wail` app built via cgo against `vendor/link`, plus a Homebrew source tarball) and uploads them to the GitHub release
 
 The release and artifact dispatch steps run inline in `auto-release.yml` because `GITHUB_TOKEN` merges don't trigger other workflows. `release-on-merge.yml` remains as a fallback for manual merges of release PRs.
 

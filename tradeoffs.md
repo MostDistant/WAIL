@@ -124,3 +124,27 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 **File:** `crates/wail-plugin-recv/src/lib.rs`, nih_plug fork at `MostDistant/nih-plug@feat/dynamic-audio-port-names`
 **Solution:** Forked nih_plug to add `ProcessContext::set_aux_output_name()` + `rescan_audio_port_names()` which call CLAP's `host.audio_ports->rescan(CLAP_AUDIO_PORTS_RESCAN_NAMES)`. Added `IPC_TAG_PEER_NAME` message type to forward display names from the Tauri session to the recv plugin. When a peer sends Hello with a display name, the session broadcasts it via IPC, the plugin updates the dynamic port name, and triggers a host rescan.
 **Limitation:** VST3 hosts will still show static "Slot 1–31" names — VST3 has no bus rename API.
+
+---
+
+## Link Audio migration (branch `quasor/link-audio-engine`)
+
+### Transitional flag vs. strict big-bang
+**Status:** Decided (transitional)
+**File:** `wail-app/session.go`, `docs/link-audio-migration-plan.md`
+**Decision:** ADR-0002 calls for a big-bang (plugins/IPC/Rust out, Link Audio in, together). The Link Audio audio path cannot be functionally tested in this environment (needs real Link peers + a DAW on a LAN), so the engine landed behind a `WAIL_LINK_AUDIO=1` flag with the plugin/IPC/Rust path still the default. Retiring the old world (Step 5) before the new path is hardware-validated would leave the app with only an unverified audio path. Promote to default and do Step 5 after validation.
+
+### Non-48k capture resampling
+**Status:** Open (basic implementation)
+**File:** `wail-app/audio_engine_real.go` (`resampleLinearInterleaved`)
+**Decision:** Capture channels not at 48 kHz are resampled with linear interpolation — adequate for a jam on-ramp, but a low-pass/polyphase resampler would reduce aliasing. Migration-plan open question §68.
+
+### Self-channel exclusion is best-effort
+**Status:** Open
+**File:** `wail-app/audio_engine_real.go` (`reconcileChannels`)
+**Decision:** To avoid a feedback loop, capture discovery skips channels whose `peer_name` equals our own. The `abl_link` C API does not expose our own peer id, so robust self-exclusion (by id) needs a binding addition. A remote WAIL republishing under a matching name is a theoretical false-skip.
+
+### Cross-platform binding link unverified
+**Status:** Open
+**File:** `wail-app/internal/abllink/{abllink.go,wrap.cpp}`
+**Decision:** The cgo directives + MinGW `interface`-macro fix are in place, but only the macOS (arm64) build/link/run is verified in this environment. Windows (MinGW) and Linux must be confirmed in CI.
