@@ -1,5 +1,7 @@
 [package]
-versioned_files = ["VERSION"]
+# VERSION is a plain-text semver file (not a format knope recognizes by name),
+# so we point knope at it with a regex whose `version` capture group it bumps.
+versioned_files = [{ path = "VERSION", regex = "(?<version>\\d+\\.\\d+\\.\\d+)" }]
 changelog = "CHANGELOG.md"
 
 [github]
