@@ -8,22 +8,24 @@ import (
 	"sync"
 	"time"
 
-	abletonlink "github.com/DatanoiseTV/abletonlink-go"
+	"github.com/nicholasgasior/wail/wail-app/internal/abllink"
 )
 
-// LinkBridge wraps the Ableton Link session via abletonlink-go CGo binding.
+// LinkBridge wraps the Ableton Link session via our own abl_link cgo binding
+// (internal/abllink), compiled directly against vendor/link. One abl_link handle
+// carries both Link sync and Link Audio.
 type LinkBridge struct {
 	mu           sync.Mutex
-	link         *abletonlink.Link
-	sessionState *abletonlink.SessionState
+	link         *abllink.Link
+	sessionState *abllink.SessionState
 	quantum      float64
 	detector     *TempoChangeDetector
 }
 
 // NewLinkBridge creates a new Link bridge with the given initial BPM and quantum.
 func NewLinkBridge(initialBPM, quantum float64) *LinkBridge {
-	link := abletonlink.NewLink(initialBPM)
-	ss := abletonlink.NewSessionState()
+	link := abllink.New(initialBPM)
+	ss := abllink.NewSessionState()
 	return &LinkBridge{
 		link:         link,
 		sessionState: ss,
@@ -95,6 +97,27 @@ func (lb *LinkBridge) State() LinkState {
 // Detector returns the tempo change detector.
 func (lb *LinkBridge) Detector() *TempoChangeDetector {
 	return lb.detector
+}
+
+// Link returns the underlying abl_link handle so the Link Audio engine can
+// create sources/sinks on the one shared peer (sync + audio share it).
+func (lb *LinkBridge) Link() *abllink.Link {
+	return lb.link
+}
+
+// EnableLinkAudio enables or disables Link Audio on the shared handle.
+func (lb *LinkBridge) EnableLinkAudio(on bool) {
+	lb.link.EnableLinkAudio(on)
+}
+
+// SetPeerName sets the Link Audio peer name used to label WAIL's channels.
+func (lb *LinkBridge) SetPeerName(name string) {
+	lb.link.SetPeerName(name)
+}
+
+// Quantum returns the Link session quantum.
+func (lb *LinkBridge) Quantum() float64 {
+	return lb.quantum
 }
 
 // SpawnPoller starts a polling goroutine that monitors the Link session.

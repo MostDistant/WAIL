@@ -13,7 +13,6 @@ const joinError = document.getElementById('join-error');
 const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
 const sessionBpmInput = document.getElementById('session-bpm');
-const testToneSelect = document.getElementById('test-tone-select');
 const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsCloseBtn = document.getElementById('settings-close-btn');
@@ -31,21 +30,38 @@ window.__TAURI__.app.getVersion().then(v => {
   document.getElementById('version-label').textContent = 'v' + v;
 });
 
-// Check for plugin install errors on load
-invoke('get_plugin_install_errors').then(errors => {
-  if (errors.length === 0) return;
-  const modal = document.getElementById('plugin-error-modal');
-  const list = document.getElementById('plugin-error-list');
-  list.innerHTML = errors.map(e => `<li>${escapeHtml(e)}</li>`).join('');
-  modal.style.display = 'flex';
-}).catch(() => {});
+// Capture send-mixer: render discovered local Link Audio channels as checkboxes.
+// Re-renders only when the channel set changes so ticking a box isn't clobbered
+// by the 2s status refresh.
+let _captureSig = '';
+function renderCaptureMixer(channels) {
+  const el = document.getElementById('capture-channels');
+  if (!el) return;
+  const sig = channels.map(c => `${c.channel_id}:${c.enabled}:${c.name}:${c.peer_name}`).join('|');
+  if (sig === _captureSig) return;
+  _captureSig = sig;
+  if (channels.length === 0) {
+    el.innerHTML = '<span class="empty">No local Link Audio channels discovered</span>';
+    return;
+  }
+  el.innerHTML = '';
+  channels.forEach(c => {
+    const row = document.createElement('label');
+    row.className = 'capture-channel';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!c.enabled;
+    cb.addEventListener('change', () => {
+      invoke('set_capture_enabled', { channelID: c.channel_id, enabled: cb.checked }).catch(() => {});
+    });
+    const name = document.createElement('span');
+    name.textContent = c.peer_name ? `${c.peer_name} · ${c.name}` : (c.name || c.channel_id);
+    row.appendChild(cb);
+    row.appendChild(name);
+    el.appendChild(row);
+  });
+}
 
-document.getElementById('plugin-error-close-btn').addEventListener('click', () => {
-  document.getElementById('plugin-error-modal').style.display = 'none';
-});
-document.getElementById('plugin-error-ok-btn').addEventListener('click', () => {
-  document.getElementById('plugin-error-modal').style.display = 'none';
-});
 
 // --- Room Name Generator ---
 // Dictionary 1: synthesis techniques, sound qualities, processing descriptors
@@ -202,7 +218,6 @@ document.getElementById('generate-room-btn').addEventListener('click', () => {
 
 // State
 let unlisten = [];
-let testToneStream = null; // null or stream index number
 let roomRefreshTimer = null;
 
 // Rolling stats window state
@@ -256,7 +271,7 @@ function saveRememberEnabled(enabled) {
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['room', 'password', 'bars', 'quantum', 'test-tone', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
+const rememberFields = ['room', 'password', 'bars', 'quantum', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
 
 function loadSettings() {
   try {
@@ -408,7 +423,6 @@ async function joinPublicRoom(room) {
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
-    testTone: document.getElementById('test-tone').checked,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
     recordingStems: document.getElementById('recording-stems').checked,
@@ -564,13 +578,8 @@ function showSession(room) {
   document.getElementById('session-plugin').className = 'status-value';
   document.getElementById('session-link-peers').textContent = '0';
   document.getElementById('session-interval').textContent = '-';
-  testToneStream = document.getElementById('test-tone').checked ? 0 : null;
   document.getElementById('recording-stat').style.display =
     document.getElementById('recording-enabled').checked ? '' : 'none';
-}
-
-function updateTestToneUI() {
-  testToneSelect.value = testToneStream != null ? String(testToneStream) : '';
 }
 
 function showError(el, msg) {
@@ -597,7 +606,6 @@ joinForm.addEventListener('submit', async (e) => {
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
-    testTone: document.getElementById('test-tone').checked,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
     recordingStems: document.getElementById('recording-stems').checked,
@@ -646,19 +654,6 @@ sessionBpmInput.addEventListener('keydown', (e) => {
 
 sessionBpmInput.addEventListener('change', applyBpm);
 
-// --- Test Tone Toggle ---
-testToneSelect.addEventListener('change', async () => {
-  const val = testToneSelect.value;
-  const streamIndex = val === '' ? null : parseInt(val, 10);
-  try {
-    await invoke('set_test_tone', { streamIndex });
-    testToneStream = streamIndex;
-  } catch (err) {
-    console.error('Test tone error:', err);
-    updateTestToneUI(); // revert
-  }
-});
-
 // --- Stats mode toggle click handlers ---
 document.getElementById('stats-mode-btn').addEventListener('click', toggleStatsMode);
 document.getElementById('stats-mode-btn-net').addEventListener('click', toggleStatsMode);
@@ -706,14 +701,14 @@ function renderStatus(s) {
     `${formatBytes(bytesSent)} / ${formatBytes(bytesRecv)}`;
 
   document.getElementById('session-interval').textContent = `${s.interval_bars} bar${s.interval_bars !== 1 ? 's' : ''}`;
-  document.getElementById('session-plugin').textContent =
-    s.plugin_connected ? 'connected' : 'disconnected';
-  document.getElementById('session-plugin').className =
-    s.plugin_connected ? 'status-value connected' : 'status-value';
 
-  // Sync test tone state
-  testToneStream = s.test_tone_stream;
-  updateTestToneUI();
+  // Link Audio engine status: show how many local channels are bridged.
+  const captureChannels = s.capture_channels || [];
+  const bridged = captureChannels.filter(c => c.enabled).length;
+  document.getElementById('session-plugin').textContent =
+    bridged > 0 ? `on (${bridged} ch)` : 'on';
+  document.getElementById('session-plugin').className = 'status-value connected';
+  renderCaptureMixer(captureChannels);
 
   // Update recording status
   if (s.recording) {
@@ -724,8 +719,7 @@ function renderStatus(s) {
 
   // Update slot list (local sends first, then remote slots)
   const slotList = document.getElementById('peer-list');
-  // Filter out test tone entries that aren't actively sending
-  const localSends = (s.local_sends || []).filter(ls => !ls.is_test_tone || ls.is_sending);
+  const localSends = (s.local_sends || []);
   const slots = (s.slots || []).slice().sort((a, b) => a.slot - b.slot);
   if (localSends.length === 0 && slots.length === 0) {
     slotList.innerHTML = '<span class="empty">No peers connected</span>';
@@ -834,16 +828,6 @@ async function setupListeners() {
 
   unlisten.push(await listen('session:ended', () => {
     showJoin();
-  }));
-
-  unlisten.push(await listen('plugin:connected', () => {
-    document.getElementById('session-plugin').textContent = 'connected';
-    document.getElementById('session-plugin').className = 'status-value connected';
-  }));
-
-  unlisten.push(await listen('plugin:disconnected', () => {
-    document.getElementById('session-plugin').textContent = 'disconnected';
-    document.getElementById('session-plugin').className = 'status-value';
   }));
 
   unlisten.push(await listen('log:entry', (event) => {

@@ -2,86 +2,119 @@
 
 ## How It Works
 
-Each WAIL peer joins a local Ableton Link session and connects to a lightweight signaling server to discover other peers. Once peers find each other, they establish direct WebRTC connections with two DataChannels each:
+Each WAIL peer joins a local Ableton Link session and connects to a lightweight WebSocket relay server to join a room. All sync and audio data flows through the relay to every peer in the room:
 
-- **sync** — JSON text messages for tempo, beat, phase, and clock synchronization
-- **audio** — binary messages carrying Opus-encoded audio intervals
+- **sync** — JSON text messages for tempo, beat, phase, clock, and the relay's `interval_anchor` (the authoritative room interval clock)
+- **audio** — binary WAIF frames carrying Opus-encoded audio intervals
 
-Audio uses a NINJAM-style double-buffer pattern: the Send plugin records the current interval from the DAW, and at the interval boundary the completed recording is Opus-encoded and sent to all peers. Remote intervals are decoded, mixed, and played back one interval behind — latency equals exactly one interval by design.
+WAIL is an Ableton Link Audio peer, so the whole audio path runs inside `wail-app` — no plugins, no IPC. Capture subscribes to your local Link Audio channels, buckets the samples into NINJAM-style intervals, Opus-encodes them, and relays them. Playback decodes remote intervals, holds each one until the interval boundary (offset D, default 1), and republishes it as a Link Audio channel — latency equals the offset by design.
 
 ```
-DAW A → [WAIL Send] → record → Opus encode → DataChannel → remote peer
-         [WAIL Recv] ← play  ← Opus decode  ← DataChannel ← remote peer
+Link Audio (local channels)     → capture → interval → Opus → WAIF → WS relay → remote peer
+Link Audio (published channels) ← emit/sink ← hold N+D ← reassemble ← Opus ← WAIF ← WS relay ← remote peer
 ```
 
 ## Project Structure
 
 ```
-wail-app/                Go/Wails desktop app (session orchestration)
+wail-app/                Go/Wails desktop app: session orchestration, Link + Link
+│                        Audio, Opus codec, relay client, GUI. Needs cgo.
+├── audio_engine*.go     Link Audio capture + emit engine (stub under -tags linkstub)
+├── interval_codec.go    Interval Opus↔WAIF codec
+├── link_*.go            Ableton Link sync bridge + poller
+├── session.go           Session state machine
+├── signaling.go         WebSocket signaling/relay client
+├── wire.go              WAIF binary wire format
+└── internal/
+    ├── abllink/         cgo binding to Ableton Link (abl_link C API: sync + Link
+    │                    Audio); capture.c holds the pure-C realtime callback + ring
+    ├── interval/        Interval/room-clock math (RoomClock, RoomLabeler)
+    ├── playout/         Hold-until-N+D playout scheduler
+    ├── lanloss/         Link Audio count-gap loss detection
+    ├── affinity/        (identity, stream) → stable published channel
+    ├── capture/         Interval assembler
+    └── emit/            Reassembler + paced sink reader
 
-Cargo workspace with Rust crates (plugins + shared libraries):
-
-crates/
-├── wail-core/           Core sync library (no networking)
-├── wail-audio/          Audio encoding, intervalic ring buffer, IPC framing
-├── wail-net/            WebSocket relay and signaling client
-├── wail-plugin-send/    CLAP/VST3 send plugin (captures DAW audio)
-├── wail-plugin-recv/    CLAP/VST3 receive plugin (plays remote audio)
-
-xtask/                   Build tasks (build-plugin, install-plugin, etc.)
-
-signaling-server/
-└── main.go              WebSocket signaling server (Go + SQLite, deployed to fly.io)
+signaling-server/        Go WebSocket relay (SQLite, deployed to fly.io)
+├── main.go              Relay + room management
+├── roomclock.go         Relay-authoritative room interval clock
+└── interval_clock.go    interval_anchor broadcast
 
 vendor/
-└── link/                Ableton Link 4.0.0 beta SDK (git submodule)
+└── link/                Ableton Link 4.0 SDK (git submodule, pinned to Link-4.0)
 ```
 
 ## Build from Source
 
-Requires: **Rust 1.75+**, CMake 3.14+, a C++ compiler, and libopus-dev.
+Requires: **Go 1.26+**, a C++ toolchain (cgo, for the Link Audio binding in `internal/abllink`), and libopus. CMake is **not** required.
 
 **Linux build dependencies (Debian/Ubuntu):**
 
 ```sh
-sudo apt-get install libssl-dev libopus-dev cmake g++
+sudo apt-get install libopus-dev pkg-config g++
 ```
 
 ```sh
-git submodule update --init --recursive   # fetch Ableton Link SDK
-cargo build                               # build workspace
+git submodule update --init --recursive vendor/link   # fetch Link SDK + its asio submodule
+
+cd wail-app && go build                                # build the app (needs cgo)
+cd signaling-server && go build ./...                  # build the relay server
 ```
 
-### Plugins
-
-Install the bundler once, then use `cargo xtask`:
+Building without the Link SDK (Link becomes a stub, no audio path):
 
 ```sh
-cargo install --git https://github.com/robbert-vdh/nih-plug.git cargo-nih-plug
-
-cargo xtask build-plugin        # build CLAP + VST3 bundles → target/bundled/
-cargo xtask install-plugin      # build and install to system plugin directories
-cargo xtask install-plugin --no-build  # install already-built bundles
+cd wail-app && go build -tags linkstub
 ```
 
-Plugin directories:
-- **macOS** — `~/Library/Audio/Plug-Ins/{CLAP,VST3}/`
-- **Linux** — `~/.clap/` and `~/.vst3/`
-- **Windows** — `%COMMONPROGRAMFILES%\{CLAP,VST3}\`
-
-### Desktop App
+**Windows (MinGW) only:** MinGW's COM headers `#define interface`, which collides with a parameter named `interface` in Link's `link_audio/Channels.hpp`. Before building on Windows, rename it:
 
 ```sh
-bin/dev                  # build plugins + run Go/Wails app in dev mode
+sed -i 's/\binterface\b/iface/g' vendor/link/include/ableton/link_audio/Channels.hpp
+```
+
+(The Windows CI jobs do this automatically; macOS/Linux don't need it.)
+
+### Desktop App (dev mode)
+
+```sh
+bin/dev            # fetch the Link submodule + run the Go/Wails app in dev mode
+bin/dev-headless   # same, but headless (CLI) mode
 ```
 
 ## Testing
 
 ```sh
-cargo test                    # all tests (~114 unit + integration)
-cargo test -p wail-core       # core library tests
-cargo test -p wail-audio      # audio codec, ring buffer, wire format
-cargo test -p wail-net        # networking integration tests
+cd wail-app && go test ./...                    # app + internal package tests
+cd wail-app && go test ./internal/interval      # a single package
+cd wail-app && go test -tags linkstub ./...     # without the Link SDK (no audio path)
+cd signaling-server && go test ./...            # relay server
 ```
 
-# TODO
+Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOCACHE write access; in a sandbox you may need to disable it.
+
+### Tier 2 audio E2E (real Link Audio path, no DAW)
+
+`go test` runs entirely in-process — it never exercises the real Link Audio
+Sink/Source UDP path, the relay round trip, or real-time timing. `scripts/tier2-e2e.sh`
+covers that gap on a single machine, no DAW required:
+
+```sh
+./scripts/tier2-e2e.sh          # exit 0 = PASS, 1 = FAIL
+```
+
+It stands up a **local relay**, runs two headless WAIL instances against it — a
+`SweepSender` that injects a rising frequency-sweep WAV, and a `Receiver` that
+pulls the stream from the relay and republishes it as a real Link Audio channel —
+then runs `linkaudio-probe` (a DAW-free Link Audio consumer) to subscribe to that
+channel and measure what actually arrives. A PASS means non-silent, **lossless**
+audio whose estimated frequency **climbs with the sweep** (proof it's intact and
+in order). Tunables: `TIER2_PORT`, `TIER2_BPM`, `TIER2_SWEEP_DUR`, `TIER2_PROBE_SECS`,
+`TIER2_ROOM`.
+
+The instances point at the local relay via the `WAIL_SIGNAL_URL` env var (e.g.
+`WAIL_SIGNAL_URL=ws://localhost:8899`), which overrides the default production
+relay — useful on its own for running headless against a self-hosted relay.
+
+For a full hardware run, point a Link-Audio DAW (Ableton Live 12.3+) at two
+machines instead of the probe; the emit path is identical.

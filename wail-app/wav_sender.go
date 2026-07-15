@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"os"
 	"time"
 
 	"github.com/go-audio/wav"
+	"github.com/nicholasgasior/wail/wail-app/internal/dsp"
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 	"gopkg.in/hraban/opus.v2"
 )
 
@@ -52,7 +53,7 @@ func loadWAV(path string) ([]int16, error) {
 
 	// Resample to 48kHz if needed
 	if srcRate != wavTargetSampleRate {
-		samples16 = resample(samples16, srcRate, wavTargetSampleRate)
+		samples16 = dsp.ResampleLinearInterleaved(samples16, wavTargetChannels, srcRate, wavTargetSampleRate)
 	}
 
 	durationSec := float64(len(samples16)/wavTargetChannels) / float64(wavTargetSampleRate)
@@ -112,42 +113,12 @@ func toStereo(samples []int16, srcChannels int) []int16 {
 	return out
 }
 
-// resample performs linear interpolation resampling of interleaved stereo samples.
-func resample(samples []int16, srcRate, dstRate int) []int16 {
-	srcFrames := len(samples) / 2
-	if srcFrames < 2 {
-		return samples
-	}
-	dstFrames := int(math.Round(float64(srcFrames) * float64(dstRate) / float64(srcRate)))
-	out := make([]int16, dstFrames*2)
-	ratio := float64(srcRate) / float64(dstRate)
-
-	for i := 0; i < dstFrames; i++ {
-		srcPos := float64(i) * ratio
-		srcIdx := int(srcPos)
-		frac := srcPos - float64(srcIdx)
-
-		if srcIdx+1 >= srcFrames {
-			srcIdx = srcFrames - 2
-			frac = 1.0
-		}
-
-		for ch := 0; ch < 2; ch++ {
-			a := float64(samples[srcIdx*2+ch])
-			b := float64(samples[(srcIdx+1)*2+ch])
-			out[i*2+ch] = int16(a + frac*(b-a))
-		}
-	}
-	return out
-}
-
 // WavSenderTask reads a WAV file and sends Opus-encoded WAIF frames,
 // looping continuously. Structurally parallel to TestToneTask.
 func WavSenderTask(
 	ctx context.Context,
 	streamIndex uint16,
-	connID int,
-	fromPluginCh chan<- ipcFrame,
+	send func([]byte),
 	boundaryCh <-chan IntervalBoundaryInfo,
 	wavPath string,
 ) {
@@ -173,8 +144,7 @@ func WavSenderTask(
 	readPos := 0 // position in interleaved samples
 	var currentIdx int64 = -1
 	var currentBPM float64 = 120.0
-	var currentBars uint32 = 4
-	var currentQuantum float64 = 4.0
+	currentCfg := interval.Config{Bars: 4, Quantum: 4.0}
 	var frameNumber uint32
 	var totalFrames uint32
 	var frameSeq uint32
@@ -192,8 +162,8 @@ func WavSenderTask(
 			if currentIdx >= 0 && frameNumber > 0 && frameNumber < totalFrames {
 				frame := extractFrame(samples, &readPos, samplesPerFrame)
 				if opusData, n, err := encodeFrame(enc, frame, opusBuf); err == nil {
-					sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
-						totalFrames-1, frameSeq, opusData[:n], true, currentBPM, currentQuantum, currentBars, totalFrames)
+					sendWAIFFrame(send, streamIndex, currentIdx,
+						totalFrames-1, frameSeq, opusData[:n], true, currentBPM, currentCfg.Quantum, currentCfg.Bars, totalFrames)
 					frameSeq++
 				} else {
 					log.Printf("[wav-sender] Encode failed on boundary flush: %v", err)
@@ -201,10 +171,9 @@ func WavSenderTask(
 			}
 			currentIdx = boundary.Index
 			currentBPM = boundary.BPM
-			currentBars = boundary.Bars
-			currentQuantum = boundary.Quantum
+			currentCfg = boundary.Cfg
 			frameNumber = 0
-			totalFrames = FramesPerInterval(currentBPM, currentBars, currentQuantum)
+			totalFrames = FramesPerInterval(currentBPM, currentCfg)
 			now := time.Now()
 			intervalStart = &now
 		default:
@@ -238,8 +207,8 @@ func WavSenderTask(
 		}
 
 		isFinal := frameNumber == totalFrames-1
-		sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
-			frameNumber, frameSeq, opusData[:n], isFinal, currentBPM, currentQuantum, currentBars, totalFrames)
+		sendWAIFFrame(send, streamIndex, currentIdx,
+			frameNumber, frameSeq, opusData[:n], isFinal, currentBPM, currentCfg.Quantum, currentCfg.Bars, totalFrames)
 		frameNumber++
 		frameSeq++
 	}

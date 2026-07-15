@@ -302,6 +302,13 @@ type room struct {
 	connMap map[string]*conn
 	activeSession     *session
 	completedSessions []*session
+
+	// Relay-authoritative interval clock (ADR-0003). Guarded by clockMu.
+	clockMu   sync.Mutex
+	clk       *roomClock
+	haveClock bool
+	tempoBPM  float64
+	cfg       intervalConfig
 }
 
 func newRoom() *room {
@@ -533,6 +540,10 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 		"type": "join_ok", "peers": peers, "peer_display_names": peerDisplayNames,
 		"lan_peer_present": lanPeerPresent,
 	})
+	// Give a late joiner the current room interval anchor so it aligns immediately.
+	if am, ok := r.currentAnchor(); ok {
+		c.sendJSON(am)
+	}
 	return roomName, peerID, streamCount
 }
 
@@ -557,6 +568,11 @@ func (h *hub) broadcastSync(room, peerID string, c *conn, msg clientMsg) {
 	wsMsg := wsMessage{websocket.TextMessage, raw}
 	for _, e := range r.loadConns() {
 		if e.peerID != peerID { e.c.sendWS(wsMsg) }
+	}
+	// The relay owns the room interval clock (ADR-0003): if this sync carried a
+	// tempo/config change, update the clock and broadcast the new anchor to all.
+	if am, ok := r.observeSync(msg.Payload); ok {
+		r.broadcastAnchor(am)
 	}
 }
 

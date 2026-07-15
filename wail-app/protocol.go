@@ -171,6 +171,12 @@ type ServerMsg struct {
 	TimestampUs      uint64                     `json:"timestamp_us,omitempty"`
 	To               string                     `json:"to,omitempty"`
 	PerPeer          map[string]PeerFrameReport `json:"per_peer,omitempty"`
+
+	// interval_anchor (relay-authoritative room interval clock, ADR-0003)
+	CurrentIndex int64   `json:"current_index,omitempty"`
+	BPM          float64 `json:"bpm,omitempty"`
+	Bars         uint32  `json:"bars,omitempty"`
+	Quantum      float64 `json:"quantum,omitempty"`
 }
 
 // MeshEvent represents events from the peer mesh.

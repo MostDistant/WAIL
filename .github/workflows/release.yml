@@ -56,20 +56,11 @@ jobs:
     # the Go/CGo desktop-app build (the same headers compile cleanly on the
     # Linux runner's GCC 11). See #329.
     runs-on: windows-2022
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
 
       - uses: actions/setup-go@v5
         with:
@@ -82,32 +73,23 @@ jobs:
           path: C:\vcpkg\installed
           # Bump the suffix whenever the package list below changes, otherwise a
           # stale cache is restored and the new packages are never installed.
-          key: vcpkg-opus-rtmidi-mingw-static-pkgconf-x64-windows-v3
+          key: vcpkg-opus-mingw-static-pkgconf-x64-windows-v4
 
-      - name: Install opus + rtmidi + pkgconf via vcpkg
+      - name: Install opus + pkgconf via vcpkg
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         shell: bash
         # pkgconf is a drop-in pkg-config that the Go/CGo build needs to locate
-        # opus and rtmidi. We get it from vcpkg rather than choco because the
-        # choco community feed is flaky (504s) and silently leaves the build to
-        # fall back to Strawberry Perl's broken pkg-config.bat stub on PATH.
+        # opus. We get it from vcpkg rather than choco because the choco
+        # community feed is flaky (504s) and silently leaves the build to fall
+        # back to Strawberry Perl's broken pkg-config.bat stub on PATH.
         #
-        # Triplet choice matters for the CGo desktop-app link:
-        #   - opus is a C library; its C-ABI symbols link cleanly into the
-        #     MinGW-GCC CGo binary even when built by MSVC. The x64-windows
-        #     opus.dll is what the plugins (audiopus) and the staged bundles use.
-        #   - rtmidi is C++; the MSVC build's mangled symbols and C++ runtime are
-        #     ABI-incompatible with MinGW GCC and cannot be linked into the CGo
-        #     binary. So we also build opus + rtmidi for the x64-mingw-static
-        #     triplet (same GCC ABI as the CGo objects) and link the desktop app
-        #     against those, statically. See #329.
+        # opus is built for the x64-mingw-static triplet (same GCC ABI as the
+        # CGo objects) so it links statically into the desktop-app binary.
         run: |
           gcc --version  # the x64-mingw-static triplet builds with this GCC
           vcpkg install \
             pkgconf:x64-windows \
-            opus:x64-windows \
-            opus:x64-mingw-static \
-            rtmidi:x64-mingw-static
+            opus:x64-mingw-static
 
       - name: Configure pkg-config
         shell: pwsh
@@ -132,89 +114,32 @@ jobs:
           fi
           echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build plugin
-        env:
-          PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows\lib\pkgconfig
-          # Belt-and-suspenders for CMake 4.x: audiopus_sys builds a vendored
-          # Opus from source via CMake on Windows (pkg-config is compiled out
-          # for the MSVC target), and that Opus declares
-          # cmake_minimum_required(<3.5), which CMake 4.x refuses. windows-2022
-          # currently ships CMake 3.x so this is a no-op there, but it keeps the
-          # build green if the image's CMake is ever bumped.
-          # Tracked follow-up (link the prebuilt vcpkg Opus instead): #329
-          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-        run: cargo xtask bundle-plugin
-
-      - name: Clone abletonlink-go
+      - name: Rename Link `interface` param for MinGW
         shell: bash
-        run: git clone --recursive https://github.com/DatanoiseTV/abletonlink-go.git "$RUNNER_TEMP/abletonlink-go"
-
-      - name: Patch Link beta header for MinGW GCC
-        shell: bash
-        # The Ableton Link 4.0 beta vendored by abletonlink-go has two name
-        # collisions in link_audio/Channels.hpp that only bite the MinGW GCC on
-        # the Windows runners — Linux GCC 11 compiles the same headers cleanly:
-        #
-        #   1. The SendHandler constructor parameter `endpoint` shadows the
-        #      member function `endpoint()`. By the standard the parameter wins
-        #      inside the initializer, but MinGW GCC mis-resolves it to the
-        #      member function ("unresolved overloaded function type"). Rename
-        #      only the parameter and its use — never the `endpoint()` member.
-        #
-        #   2. The SendHandler parameter / local variable named `interface`
-        #      collides with the Windows `interface` macro (objbase.h defines
-        #      `#define interface struct`), pulled in transitively via asio's
-        #      winsock headers. The preprocessor rewrites the identifier and the
-        #      build fails with "expected identifier before ')' token". Rename
-        #      every lowercase `interface` identifier to `iface`; the
-        #      word-boundary match leaves the `Interface` template type and the
-        #      `mpInterface` member untouched.
-        #
-        # See #329.
-        run: |
-          f="$RUNNER_TEMP/abletonlink-go/vendor/link/include/ableton/link_audio/Channels.hpp"
-          sed -i \
-            -e 's/SendHandler(discovery::UdpEndpoint endpoint,/SendHandler(discovery::UdpEndpoint ep,/' \
-            -e 's/: mEndpoint(endpoint)/: mEndpoint(ep)/' \
-            -e 's/\binterface\b/iface/g' \
-            "$f"
-          grep -q "SendHandler(discovery::UdpEndpoint ep, std::shared_ptr<Interface> iface)" "$f" \
-            || { echo "Channels.hpp endpoint/interface patch did not apply"; exit 1; }
+        # MinGW's COM headers #define `interface`, colliding with the `interface`
+        # parameter in Link's link_audio/Channels.hpp. Rename that identifier (the
+        # only real use; Interface/mpInterface are untouched by \b).
+        run: sed -i 's/\binterface\b/iface/g' vendor/link/include/ableton/link_audio/Channels.hpp
 
       - name: Build wail desktop app
         shell: bash
         env:
-          # opus + rtmidi for the CGo link come from the MinGW (x64-mingw-static)
-          # prefix so their ABI matches the GCC that compiles the CGo objects.
+          # opus for the CGo link comes from the MinGW (x64-mingw-static) prefix
+          # so its ABI matches the GCC that compiles the CGo objects. Windows
+          # system libs (ws2_32, winmm, iphlpapi) are set via cgo LDFLAGS in the
+          # abllink package. libstdc++ stays dynamic; the runtime DLLs are shipped
+          # in the staging step below.
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-mingw-static\lib\pkgconfig
-          # System libs abletonlink-go's cgo LDFLAGS omit: ws2_32 (asio sockets),
-          # winmm (rtmidi WinMM MIDI backend), iphlpapi (GetAdaptersAddresses in
-          # Link's Windows ScanIpIfAddrs). We deliberately do NOT pass
-          # -static-libstdc++: abletonlink-go already links -lstdc++ (the dynamic
-          # import lib), so forcing the static libstdc++.a too yields duplicate
-          # symbol definitions. Keep libstdc++ dynamic and ship the runtime DLLs.
-          CGO_LDFLAGS: -lws2_32 -lwinmm -liphlpapi
         working-directory: wail-app
-        run: |
-          REPLACE_PATH="${RUNNER_TEMP//\\//}/abletonlink-go"
-          sed -i "s|^replace github.com/DatanoiseTV/abletonlink-go.*|replace github.com/DatanoiseTV/abletonlink-go => $REPLACE_PATH|" go.mod
-          go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail.exe" .
+        run: go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail.exe" .
 
       - name: Stage release artifacts
         shell: bash
         run: |
-          mkdir -p dist/lib
-          cp target/bundled/wail-plugin-send.clap dist/lib/
-          cp -r target/bundled/wail-plugin-send.vst3 dist/lib/
-          cp target/bundled/wail-plugin-recv.clap dist/lib/
-          cp -r target/bundled/wail-plugin-recv.vst3 dist/lib/
-          cp /c/vcpkg/installed/x64-windows/bin/opus.dll dist/lib/opus.dll
-          cp dist/lib/opus.dll dist/lib/wail-plugin-send.vst3/Contents/x86_64-win/
-          cp dist/lib/opus.dll dist/lib/wail-plugin-recv.vst3/Contents/x86_64-win/
-          # rtmidi + opus are linked statically into wail.exe (x64-mingw-static),
-          # so no rtmidi.dll. But the exe is built with MinGW GCC against a
-          # dynamic libstdc++, so it needs the GCC/C++ runtime DLLs at launch.
-          # Ship them from the same toolchain that built the exe (C:\mingw64).
+          # opus is linked statically into wail.exe (x64-mingw-static), but the
+          # exe is built with MinGW GCC against a dynamic libstdc++, so it needs
+          # the GCC/C++ runtime DLLs at launch. Ship them from the same toolchain
+          # that built the exe (C:\mingw64).
           cp /c/mingw64/bin/libstdc++-6.dll dist/bin/
           cp /c/mingw64/bin/libgcc_s_seh-1.dll dist/bin/
           cp /c/mingw64/bin/libwinpthread-1.dll dist/bin/
@@ -223,11 +148,6 @@ jobs:
 
           Run:
             bin\wail.exe
-
-          On first launch the CLAP/VST3 plugins in lib/ are copied to
-          %LOCALAPPDATA%\Programs\Common\CLAP and
-          %LOCALAPPDATA%\Programs\Common\VST3 so your DAW can find them.
-          (No admin rights required.)
 
           Note: this binary is unsigned. If Windows SmartScreen blocks
           launch, click "More info" then "Run anyway".
@@ -242,20 +162,11 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-22.04
-    env:
-      SCCACHE_GHA_ENABLED: "true"
-      RUSTC_WRAPPER: "sccache"
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
 
       - uses: actions/setup-go@v5
         with:
@@ -267,7 +178,6 @@ jobs:
           sudo apt-get install -y \
             libssl-dev \
             libopus-dev \
-            librtmidi-dev \
             libgl-dev \
             libx11-xcb-dev \
             libxcb1-dev \
@@ -287,36 +197,20 @@ jobs:
           fi
           echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build plugin
-        run: cargo xtask bundle-plugin
-
-      - name: Clone abletonlink-go
-        run: git clone --recursive https://github.com/DatanoiseTV/abletonlink-go.git "$RUNNER_TEMP/abletonlink-go"
-
       - name: Build wail desktop app
-        run: |
-          sed -i "s|^replace github.com/DatanoiseTV/abletonlink-go.*|replace github.com/DatanoiseTV/abletonlink-go => $RUNNER_TEMP/abletonlink-go|" go.mod
-          go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail" .
+        run: go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail" .
         working-directory: wail-app
 
       - name: Stage release artifacts
         run: |
-          mkdir -p dist/lib
-          cp target/bundled/wail-plugin-send.clap dist/lib/
-          cp -r target/bundled/wail-plugin-send.vst3 dist/lib/
-          cp target/bundled/wail-plugin-recv.clap dist/lib/
-          cp -r target/bundled/wail-plugin-recv.vst3 dist/lib/
           cat > dist/README.txt <<'EOF'
           WAIL — WAN Audio Interchange for Link
 
           Runtime dependencies (Debian/Ubuntu):
-            sudo apt install libwebkit2gtk-4.1-0 libopus0 librtmidi6
+            sudo apt install libwebkit2gtk-4.1-0 libopus0
 
           Run:
             ./bin/wail
-
-          On first launch the CLAP/VST3 plugins in lib/ are copied to
-          ~/.clap/ and ~/.vst3/ so your DAW can find them.
 
           Documentation: https://github.com/MostDistant/WAIL
           EOF

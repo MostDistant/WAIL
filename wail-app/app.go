@@ -12,20 +12,26 @@ import (
 	"github.com/google/uuid"
 )
 
-const signalingURL = "wss://wail-signal.fly.dev"
+// signalingURL is the relay endpoint. Override with WAIL_SIGNAL_URL (e.g.
+// ws://localhost:8899) to point at a local or self-hosted relay — the Tier 2
+// E2E harness (scripts/tier2-e2e.sh) uses this to run against a local server.
+var signalingURL = func() string {
+	if u := os.Getenv("WAIL_SIGNAL_URL"); u != "" {
+		return u
+	}
+	return "wss://wail-signal.fly.dev"
+}()
 
 // App is the Wails application backend. All exported methods are callable from the frontend.
 type App struct {
-	mu           sync.Mutex
-	session      *SessionHandle
-	emitter      EventEmitter
-	identity     string
-	ipcPort      uint16
-	streamNames  map[uint16]string
-	dataDir      string
-	fileLog      *RotatingFileWriter
-	wsLog        *WsLogWriter
-	pluginErrors []string
+	mu          sync.Mutex
+	session     *SessionHandle
+	emitter     EventEmitter
+	identity    string
+	streamNames map[uint16]string
+	dataDir     string
+	fileLog     *RotatingFileWriter
+	wsLog       *WsLogWriter
 }
 
 // NewApp creates a new App instance. Pass instance=0 for the default instance.
@@ -38,21 +44,10 @@ func NewApp(instance int) *App {
 	identity := getOrCreateIdentity(dataDir)
 	streamNames := LoadStreamNames(dataDir)
 
-	// Auto-install plugins from the bundled lib/ dir into the user's CLAP/VST3
-	// directories. Plugins ship inside the release archive, so this gives a
-	// single-download install on every platform.
-	var pluginErrors []string
-	pluginDir := FindPluginDir("")
-	if pluginDir != "" {
-		pluginErrors = InstallPluginsIfMissing(pluginDir)
-	}
-
 	return &App{
-		ipcPort:      uint16(9191 + instance),
-		streamNames:  streamNames,
-		dataDir:      dataDir,
-		identity:     identity,
-		pluginErrors: pluginErrors,
+		streamNames: streamNames,
+		dataDir:     dataDir,
+		identity:    identity,
 	}
 }
 
@@ -111,7 +106,6 @@ func (a *App) JoinRoom(
 	recordingStems *bool,
 	recordingRetentionDays *uint32,
 	streamCount *uint16,
-	testMode *bool,
 ) (*JoinResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -135,10 +129,6 @@ func (a *App) JoinRoom(
 	actualStreamCount := uint16(1)
 	if streamCount != nil {
 		actualStreamCount = *streamCount
-	}
-	actualTestMode := false
-	if testMode != nil {
-		actualTestMode = *testMode
 	}
 
 	var recording *RecordingConfig
@@ -173,10 +163,8 @@ func (a *App) JoinRoom(
 		BPM:         actualBPM,
 		Bars:        actualBars,
 		Quantum:     actualQuantum,
-		IPCPort:     a.ipcPort,
 		Recording:   recording,
 		StreamCount: actualStreamCount,
-		TestMode:    actualTestMode,
 	}
 
 	handle, err := SpawnSession(a.emitter, config)
@@ -309,11 +297,16 @@ func (a *App) SetLogSharing(enabled bool) error {
 	return nil
 }
 
-// GetPluginInstallErrors returns any plugin installation errors from startup.
-func (a *App) GetPluginInstallErrors() []string {
+// SetCaptureEnabled toggles whether a discovered local Link Audio channel is
+// bridged (the capture send-mixer). channelID is the hex id from a status
+// update's capture_channels.
+func (a *App) SetCaptureEnabled(channelID string, enabled bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.pluginErrors
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetCaptureEnabled", ChannelID: channelID, Enabled: enabled}
+	}
+	return nil
 }
 
 // RenameStream updates a stream name.

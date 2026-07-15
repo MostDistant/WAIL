@@ -1,0 +1,82 @@
+package main
+
+import "testing"
+
+func TestRoomClockIndexAndBoundary(t *testing.T) {
+	rc := newRoomClock(roomAnchor{Index: 100, AtMicros: 0, TempoBPM: 120, Config: intervalConfig{Bars: 4, Quantum: 4}})
+	// 16 beats at 120 BPM = 8s per interval.
+	if got := rc.indexAt(0); got != 100 {
+		t.Fatalf("indexAt(0) = %d, want 100", got)
+	}
+	if got := rc.indexAt(7_999_999); got != 100 {
+		t.Fatalf("indexAt(just before 8s) = %d, want 100", got)
+	}
+	if got := rc.indexAt(8_000_000); got != 101 {
+		t.Fatalf("indexAt(8s) = %d, want 101", got)
+	}
+	// Boundary/index are inverse.
+	for idx := int64(98); idx <= 104; idx++ {
+		if got := rc.indexAt(rc.boundaryMicros(idx)); got != idx {
+			t.Errorf("boundary(%d) maps back to %d", idx, got)
+		}
+	}
+}
+
+func TestRoomClockReanchorQuantizes(t *testing.T) {
+	rc := newRoomClock(roomAnchor{Index: 0, AtMicros: 0, TempoBPM: 120, Config: intervalConfig{Bars: 4, Quantum: 4}})
+	// Mid interval 2 (16s..24s); change tempo. Applies at interval 3 (24s).
+	rc.reanchor(20_000_000, 240, intervalConfig{Bars: 4, Quantum: 4})
+	if got := rc.anchor().AtMicros; got != 24_000_000 {
+		t.Fatalf("reanchor AtMicros = %d, want 24s", got)
+	}
+	if got := rc.indexAt(23_999_999); got != 2 {
+		t.Fatalf("index just before 24s = %d, want 2", got)
+	}
+	// 240 BPM → 4s intervals; interval 4 at 28s.
+	if got := rc.indexAt(28_000_000); got != 4 {
+		t.Fatalf("index at 28s = %d, want 4", got)
+	}
+}
+
+func TestRoomClockClampsBadInput(t *testing.T) {
+	rc := newRoomClock(roomAnchor{Index: 0, AtMicros: 0, TempoBPM: 0, Config: intervalConfig{Bars: 0, Quantum: 0}})
+	// Must not panic / produce NaN with zero tempo and zero config.
+	if got := rc.indexAt(1_000_000); got < 0 {
+		t.Fatalf("indexAt with bad config = %d", got)
+	}
+}
+
+func TestObserveSyncMaintainsClock(t *testing.T) {
+	r := newRoom()
+
+	// A non-clock sync leaves the clock uninitialised.
+	if _, ok := r.observeSync([]byte(`{"type":"ChatMessage","text":"hi"}`)); ok {
+		t.Fatal("ChatMessage should not affect the clock")
+	}
+	if _, ok := r.currentAnchor(); ok {
+		t.Fatal("no clock should exist before any tempo/config")
+	}
+
+	// A TempoChange bootstraps the clock and yields an anchor.
+	am, ok := r.observeSync([]byte(`{"type":"TempoChange","bpm":120,"quantum":4}`))
+	if !ok {
+		t.Fatal("TempoChange should produce an anchor")
+	}
+	if am.Type != "interval_anchor" || am.BPM != 120 || am.Quantum != 4 {
+		t.Fatalf("anchor = %+v", am)
+	}
+	if am.Bars != 4 {
+		t.Fatalf("bars defaulted to %d, want 4", am.Bars)
+	}
+
+	// IntervalConfig updates bars and re-anchors.
+	am2, ok := r.observeSync([]byte(`{"type":"IntervalConfig","bars":8,"quantum":4}`))
+	if !ok || am2.Bars != 8 {
+		t.Fatalf("IntervalConfig anchor = %+v, ok=%v", am2, ok)
+	}
+
+	// Late joiner can read the current anchor.
+	if _, ok := r.currentAnchor(); !ok {
+		t.Fatal("currentAnchor should exist after a tempo change")
+	}
+}

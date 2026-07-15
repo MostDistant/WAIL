@@ -6,34 +6,33 @@ import (
 	"math"
 	"time"
 
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 	"gopkg.in/hraban/opus.v2"
 )
 
 const (
-	toneSampleRate = 48000
-	toneChannels   = 2
-	toneBitrateKbps = 128
-	toneFrameMs    = 20
+	toneSampleRate      = 48000
+	toneChannels        = 2
+	toneBitrateKbps     = 128
+	toneFrameMs         = 20
 	toneSamplesPerFrame = toneSampleRate * toneFrameMs / 1000 // 960
 	// Switch frequency every 4 intervals
 	toneFreqSwitchIntervals = 4
 )
 
-// IntervalBoundaryInfo is sent to the test tone task on interval boundaries.
+// IntervalBoundaryInfo is sent to the in-app senders on interval boundaries.
 type IntervalBoundaryInfo struct {
-	Index   int64
-	BPM     float64
-	Bars    uint32
-	Quantum float64
+	Index int64
+	BPM   float64
+	Cfg   interval.Config
 }
 
 // FramesPerInterval calculates the number of 20ms frames in one interval.
-func FramesPerInterval(bpm float64, bars uint32, quantum float64) uint32 {
+func FramesPerInterval(bpm float64, cfg interval.Config) uint32 {
 	if bpm <= 0 {
 		return 0
 	}
-	beatsPerInterval := float64(bars) * quantum
-	intervalSec := beatsPerInterval / (bpm / 60.0)
+	intervalSec := cfg.BeatsPerInterval() / (bpm / 60.0)
 	return uint32(math.Ceil(intervalSec / 0.02))
 }
 
@@ -62,8 +61,7 @@ func GenerateSineFrame(freq float64, phase *float64, sampleRate uint32, channels
 func TestToneTask(
 	ctx context.Context,
 	streamIndex uint16,
-	connID int,
-	fromPluginCh chan<- ipcFrame,
+	send func([]byte),
 	boundaryCh <-chan IntervalBoundaryInfo,
 ) {
 	enc, err := opus.NewEncoder(toneSampleRate, toneChannels, opus.AppAudio)
@@ -78,8 +76,7 @@ func TestToneTask(
 	var phase float64
 	var currentIdx int64 = -1
 	var currentBPM float64 = 120.0
-	var currentBars uint32 = 4
-	var currentQuantum float64 = 4.0
+	currentCfg := interval.Config{Bars: 4, Quantum: 4.0}
 	var frameNumber uint32
 	var totalFrames uint32
 	var frameSeq uint32
@@ -97,17 +94,16 @@ func TestToneTask(
 				freq := toneFrequency(currentIdx)
 				samples := GenerateSineFrame(freq, &phase, toneSampleRate, toneChannels)
 				if opusData, n, err := encodeFrame(enc, samples, opusBuf); err == nil {
-					sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
-						totalFrames-1, frameSeq, opusData[:n], true, currentBPM, currentQuantum, currentBars, totalFrames)
+					sendWAIFFrame(send, streamIndex, currentIdx,
+						totalFrames-1, frameSeq, opusData[:n], true, currentBPM, currentCfg.Quantum, currentCfg.Bars, totalFrames)
 					frameSeq++
 				}
 			}
 			currentIdx = boundary.Index
 			currentBPM = boundary.BPM
-			currentBars = boundary.Bars
-			currentQuantum = boundary.Quantum
+			currentCfg = boundary.Cfg
 			frameNumber = 0
-			totalFrames = FramesPerInterval(currentBPM, currentBars, currentQuantum)
+			totalFrames = FramesPerInterval(currentBPM, currentCfg)
 			now := time.Now()
 			intervalStart = &now
 		default:
@@ -142,8 +138,8 @@ func TestToneTask(
 		}
 
 		isFinal := frameNumber == totalFrames-1
-		sendWAIFFrame(fromPluginCh, connID, streamIndex, currentIdx,
-			frameNumber, frameSeq, opusData[:n], isFinal, currentBPM, currentQuantum, currentBars, totalFrames)
+		sendWAIFFrame(send, streamIndex, currentIdx,
+			frameNumber, frameSeq, opusData[:n], isFinal, currentBPM, currentCfg.Quantum, currentCfg.Bars, totalFrames)
 		frameNumber++
 		frameSeq++
 	}
@@ -164,7 +160,7 @@ func encodeFrame(enc *opus.Encoder, samples []int16, buf []byte) ([]byte, int, e
 	return buf, n, nil
 }
 
-func sendWAIFFrame(ch chan<- ipcFrame, connID int, streamIndex uint16, intervalIdx int64,
+func sendWAIFFrame(send func([]byte), streamIndex uint16, intervalIdx int64,
 	frameNum uint32, frameSeq uint32, opusData []byte, isFinal bool, bpm, quantum float64, bars, totalFrames uint32) {
 
 	frame := &AudioFrame{
@@ -184,11 +180,5 @@ func sendWAIFFrame(ch chan<- ipcFrame, connID int, streamIndex uint16, intervalI
 		frame.Bars = bars
 	}
 
-	waif := EncodeAudioFrameWire(frame)
-	ipcMsg := EncodeAudioFrameMsg(waif)
-
-	select {
-	case ch <- ipcFrame{connID: connID, data: ipcMsg}:
-	default:
-	}
+	send(EncodeAudioFrameWire(frame))
 }

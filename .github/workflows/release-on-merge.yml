@@ -37,7 +37,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+          VERSION=$(cat VERSION)
           TAG="v${VERSION}"
           echo "Triggering release build for ${TAG}"
           gh workflow run release.yml --ref "${TAG}" -f tag="${TAG}"
