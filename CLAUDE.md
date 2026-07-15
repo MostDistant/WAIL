@@ -153,6 +153,8 @@ cd signaling-server && go test ./...            # relay server
 
 Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOCACHE write access; in a sandbox you may need to disable it. `-tags linkstub` swaps Link for a stub so the app and its pure logic packages build without the SDK.
 
+`go test` is all in-process. To exercise the real Link Audio Sink/Source path + relay round trip end-to-end on one machine (no DAW), run `./scripts/tier2-e2e.sh` (local relay + WAV-sweep sender + receiver + `linkaudio-probe`; exit 0 = PASS). See DEVELOPMENT.md → "Tier 2 audio E2E".
+
 **Skip tests for docs-only changes.** If a PR only modifies `.md` files (or other non-code docs), do not run the test suite — building the audio path requires the Link SDK/cgo and is slow. Tests are not needed when no code paths change.
 
 ## Code Conventions

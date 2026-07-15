@@ -92,3 +92,29 @@ cd signaling-server && go test ./...            # relay server
 ```
 
 Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOCACHE write access; in a sandbox you may need to disable it.
+
+### Tier 2 audio E2E (real Link Audio path, no DAW)
+
+`go test` runs entirely in-process — it never exercises the real Link Audio
+Sink/Source UDP path, the relay round trip, or real-time timing. `scripts/tier2-e2e.sh`
+covers that gap on a single machine, no DAW required:
+
+```sh
+./scripts/tier2-e2e.sh          # exit 0 = PASS, 1 = FAIL
+```
+
+It stands up a **local relay**, runs two headless WAIL instances against it — a
+`SweepSender` that injects a rising frequency-sweep WAV, and a `Receiver` that
+pulls the stream from the relay and republishes it as a real Link Audio channel —
+then runs `linkaudio-probe` (a DAW-free Link Audio consumer) to subscribe to that
+channel and measure what actually arrives. A PASS means non-silent, **lossless**
+audio whose estimated frequency **climbs with the sweep** (proof it's intact and
+in order). Tunables: `TIER2_PORT`, `TIER2_BPM`, `TIER2_SWEEP_DUR`, `TIER2_PROBE_SECS`,
+`TIER2_ROOM`.
+
+The instances point at the local relay via the `WAIL_SIGNAL_URL` env var (e.g.
+`WAIL_SIGNAL_URL=ws://localhost:8899`), which overrides the default production
+relay — useful on its own for running headless against a self-hosted relay.
+
+For a full hardware run, point a Link-Audio DAW (Ableton Live 12.3+) at two
+machines instead of the probe; the emit path is identical.
