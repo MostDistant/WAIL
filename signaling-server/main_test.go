@@ -62,15 +62,16 @@ func TestTokenBucketRefill(t *testing.T) {
 func TestTokenBucketStreamScaling(t *testing.T) {
 	streams := 3
 	b := newTokenBucket(baseBinaryRate*float64(streams), baseBinaryBurst*float64(streams))
-	// Burst should be 120*3 = 360.
+	b.refillRate = 0 // freeze refill so the count is exact regardless of loop duration
+	expectedBurst := int(baseBinaryBurst * float64(streams))
 	allowed := 0
-	for i := 0; i < 400; i++ {
+	for i := 0; i < expectedBurst+50; i++ {
 		if b.allow() {
 			allowed++
 		}
 	}
-	if allowed < 350 || allowed > 370 {
-		t.Fatalf("expected ~360 burst for 3 streams, got %d", allowed)
+	if allowed != expectedBurst {
+		t.Fatalf("expected %d burst for %d streams, got %d", expectedBurst, streams, allowed)
 	}
 }
 
@@ -78,6 +79,7 @@ func TestStreamCountCap(t *testing.T) {
 	// Even if a peer claims 100 streams, the rate bucket should be capped at maxStreamsPerPeer.
 	cap := maxStreamsPerPeer
 	b := newTokenBucket(baseBinaryRate*float64(cap), baseBinaryBurst*float64(cap))
+	b.refillRate = 0 // freeze refill so the count is exact regardless of loop duration
 	expectedBurst := int(baseBinaryBurst * float64(cap))
 	allowed := 0
 	for i := 0; i < expectedBurst+50; i++ {
@@ -85,8 +87,8 @@ func TestStreamCountCap(t *testing.T) {
 			allowed++
 		}
 	}
-	if allowed < expectedBurst-5 || allowed > expectedBurst+5 {
-		t.Fatalf("expected ~%d burst for capped streams, got %d", expectedBurst, allowed)
+	if allowed != expectedBurst {
+		t.Fatalf("expected %d burst for capped streams, got %d", expectedBurst, allowed)
 	}
 }
 
