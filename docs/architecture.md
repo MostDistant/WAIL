@@ -121,7 +121,7 @@ DAW / Link-Audio app B plays WAIL B's published channel — Peer A's previous in
 
 ### Wire Format (AudioFrameWire / WAIF)
 
-Streaming format: one WAIF frame per 20ms Opus packet. The final frame of an interval carries metadata so the receiver can reconstruct the full interval.
+Streaming format: one WAIF frame per 20ms Opus packet. The final frame of an interval carries metadata so the receiver can reconstruct the full interval. When the interval length isn't a multiple of the 20ms window (most tempos), the final frame's tail is padded with the next interval's real head samples — never silence — so the encoder's input stays continuous across the boundary; the receiver plays through that padding and starts the next interval past its twice-encoded head (silent padding from older senders falls back to truncating playout at the exact interval end).
 
 ```
 [4 bytes]  magic: "WAIF"

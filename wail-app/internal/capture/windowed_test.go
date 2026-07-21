@@ -131,13 +131,18 @@ func TestExactCoverageEmitsFinalWithoutClose(t *testing.T) {
 
 func TestShortFinalWindowIsPadded(t *testing.T) {
 	// sr=90: 8s interval = 720 frames; windows of 100 → 8 windows, final holds
-	// 20 frames + 80 frames of padding.
+	// 20 frames + 80 frames of continuation from the next interval.
 	a := NewWindowed(wcfg(), 1, 90, wframes)
 	// One beat = 45 frames at 90 Hz / 120 BPM.
 	var all []Window
 	all = collectWindows(all, a.AddWindows(0, 120, fill(720, 1, 4), 720))
+	if len(all) != 7 {
+		t.Fatalf("expected the 7 full windows (short final held), got %d", len(all))
+	}
+	// The next interval's head arrives: the final window emits, padded with it.
+	all = collectWindows(all, a.AddWindows(16, 120, fill(80, 1, 5), 80))
 	if len(all) != 8 {
-		t.Fatalf("expected 8 windows for a 720-frame interval, got %d", len(all))
+		t.Fatalf("expected the held final window after continuation, got %d windows", len(all))
 	}
 	final := all[7]
 	if !final.IsFinal || final.Total != 8 {
@@ -146,8 +151,8 @@ func TestShortFinalWindowIsPadded(t *testing.T) {
 	if len(final.Samples) != wframes {
 		t.Fatalf("final window must be padded to %d frames, got %d", wframes, len(final.Samples))
 	}
-	if final.Samples[19] != 4 || final.Samples[20] != 0 {
-		t.Fatal("final window should hold 20 data frames then silence padding")
+	if final.Samples[19] != 4 || final.Samples[20] != 5 || final.Samples[99] != 5 {
+		t.Fatal("final window should hold 20 data frames then the next interval's audio")
 	}
 }
 
@@ -382,9 +387,9 @@ func TestSlewTracksSustainedDrift(t *testing.T) {
 	}
 }
 
-// TestSlewSeamContinuity: slewing a ramp must not create sample jumps beyond
+// TestSlewContinuity: slewing a ramp must not create sample jumps beyond
 // the ramp's own slope (no clicks at the stretch window).
-func TestSlewSeamContinuity(t *testing.T) {
+func TestSlewContinuity(t *testing.T) {
 	a := NewWindowed(wcfg(), 1, wsr, wframes)
 
 	ramp := func(start int16, n int) []int16 {
@@ -411,7 +416,7 @@ func TestSlewSeamContinuity(t *testing.T) {
 			if prev >= 0 && s != 0 {
 				d := int(s) - int(prev)
 				if d < -3 || d > 3 {
-					t.Fatalf("seam jump of %d (prev %d → %d) — slew clicked", d, prev, s)
+					t.Fatalf("boundary jump of %d (prev %d → %d) — slew clicked", d, prev, s)
 				}
 			}
 			prev = s

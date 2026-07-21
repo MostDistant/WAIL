@@ -149,7 +149,7 @@ func TestFeederPreRollsNextIntervalAcrossBoundary(t *testing.T) {
 	made := 0
 	next := NewPacedReader(func() []int16 { return stampedSource(fTotal, 5000) }, 1, fRate, fTempo, 1.0, fTotal)
 	f.SetCurrent(0, NewPacedReader(func() []int16 { return stampedSource(fTotal, 0) }, 1, fRate, fTempo, 0, fTotal),
-		func() (*PacedReader, int64) { made++; return next, 1 })
+		func() (*PacedReader, int64, int) { made++; return next, 1, 0 })
 
 	// Playhead at 970: cushion window reaches 1020 → 30 tail + 20 pre-roll.
 	f.Advance(0.97, collector(&out))
@@ -176,7 +176,7 @@ func TestFeederPromoteAdoptsPreRollWithoutReEmission(t *testing.T) {
 	next := NewPacedReader(func() []int16 { return stampedSource(fTotal, 5000) }, 1, fRate, fTempo, 1.0, fTotal)
 	f := NewFeeder(fCushion, fChunk)
 	f.SetCurrent(0, NewPacedReader(func() []int16 { return stampedSource(fTotal, 0) }, 1, fRate, fTempo, 0, fTotal),
-		func() (*PacedReader, int64) { return next, 1 })
+		func() (*PacedReader, int64, int) { return next, 1, 0 })
 	f.Advance(0.97, collector(&out)) // pre-rolls next to 20
 
 	if f.Promote(2, nil) {
@@ -260,5 +260,86 @@ func TestFeederFreshReaderFirstTickLagIsNotAnUnderrun(t *testing.T) {
 	f2.Advance(0.05, collector(&out2)) // 50 frames in at cursor 0
 	if ev, _ := f2.Underruns(); ev != 1 {
 		t.Fatalf("late start past tolerance should count, got %d events", ev)
+	}
+}
+
+func TestPacedReaderSetTotalFramesExtends(t *testing.T) {
+	r := NewPacedReader(func() []int16 { return stampedSource(1050, 0) }, 1, fRate, fTempo, 0, fTotal)
+	r.Skip(fTotal)
+	if s, _, done := r.Next(10); len(s) != 0 || !done {
+		t.Fatal("reader should be exhausted at totalFrames")
+	}
+	r.SetTotalFrames(1050)
+	s, beat, done := r.Next(10)
+	if len(s) != 10 || done || s[0] != 1000 {
+		t.Fatalf("extension not readable: n=%d first=%d done=%v", len(s), s[0], done)
+	}
+	// Stamps stay on the same linear grid: frame 1000 begins at beat 1.0.
+	if beat != 1.0 {
+		t.Fatalf("extended frame stamped %.4f, want 1.0", beat)
+	}
+}
+
+// The interval handoff for continuation-padded senders: makeNext extends the
+// playing reader past its interval end (the pad carries real audio) and the
+// next reader starts past its twice-encoded head. The emitted stream must stay
+// contiguous in both content and stamps.
+func TestFeederHandoffExtendsCurrentAndSkipsNext(t *testing.T) {
+	const pad = 50
+	var out []emitted
+	cur := NewPacedReader(func() []int16 { return stampedSource(fTotal+pad, 0) }, 1, fRate, fTempo, 0, fTotal)
+	next := NewPacedReader(func() []int16 { return stampedSource(fTotal, 5000) }, 1, fRate, fTempo, 1.0, fTotal)
+	f := NewFeeder(fCushion, fChunk)
+	f.SetCurrent(0, cur, func() (*PacedReader, int64, int) {
+		cur.SetTotalFrames(fTotal + pad)
+		return next, 1, pad
+	})
+
+	// Steady ticks to 970; the cushion crosses the unextended end (frame 1000)
+	// on the way, so the handoff runs — but the cushion target stays inside
+	// the extended current reader.
+	for b := 0.0; b < 0.965; b += 0.01 {
+		f.Advance(b, collector(&out))
+	}
+	f.Advance(0.97, collector(&out))
+	if next.Cursor() != pad {
+		t.Fatalf("next cursor = %d, want start offset %d", next.Cursor(), pad)
+	}
+	last := out[len(out)-1]
+	if last.first+int16(last.n) != 1020 {
+		t.Fatalf("cushion should fill current to frame 1020, last chunk %d+%d", last.first, last.n)
+	}
+
+	// Steady ticks to 1040: current finishes at 1050, next fills 50..90.
+	out = nil
+	f.Advance(0.99, collector(&out))
+	f.Advance(1.01, collector(&out))
+	f.Advance(1.04, collector(&out))
+	if cur.Cursor() != fTotal+pad {
+		t.Fatalf("current cursor = %d, want %d", cur.Cursor(), fTotal+pad)
+	}
+	if next.Cursor() != pad+40 {
+		t.Fatalf("next cursor = %d, want %d", next.Cursor(), pad+40)
+	}
+	// Content and stamps must be contiguous through the handoff: current's
+	// extension (frames 1020..1050 = values 1020..1049), then next from its
+	// frame 50 (value 5050) stamped at beat 1.05.
+	seenSwitch := false
+	for i, e := range out {
+		if e.first == 5000+pad {
+			seenSwitch = true
+			if prev := out[i-1]; int(prev.first)+prev.n != fTotal+pad {
+				t.Fatalf("switch not contiguous: prev chunk ends at %d, want %d", int(prev.first)+prev.n, fTotal+pad)
+			}
+			if e.beat < 1.05-1e-9 || e.beat > 1.05+1e-9 {
+				t.Fatalf("first next chunk stamped %.5f, want 1.05", e.beat)
+			}
+		}
+	}
+	if !seenSwitch {
+		t.Fatal("never switched to the next reader")
+	}
+	if ev, fr := f.Underruns(); ev != 0 || fr != 0 {
+		t.Fatalf("handoff produced underruns: %d/%d", ev, fr)
 	}
 }
