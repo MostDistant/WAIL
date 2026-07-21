@@ -61,10 +61,13 @@ type EngineHealth struct {
 	OpusDecodeFailures      uint64 `json:"opus_decode_failures"`        // Opus decode errors
 }
 
-// CaptureChannelInfo describes a discovered local Link Audio channel for the UI.
+// CaptureChannelInfo describes a discovered local Link Audio channel for the
+// UI and for stream naming (StreamID labels the WAIF stream a bridged channel
+// sends as; receivers republish it under the channel's name).
 type CaptureChannelInfo struct {
 	ChannelID string `json:"channel_id"`
 	Name      string `json:"name"`
 	PeerName  string `json:"peer_name"`
 	Enabled   bool   `json:"enabled"`
+	StreamID  uint16 `json:"stream_id"`
 }

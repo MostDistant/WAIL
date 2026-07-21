@@ -260,6 +260,7 @@ func (e *linkAudioEngine) CaptureChannels() []CaptureChannelInfo {
 	for id, ch := range e.capture {
 		out = append(out, CaptureChannelInfo{
 			ChannelID: id, Name: ch.name, PeerName: ch.peerName, Enabled: ch.enabled,
+			StreamID: ch.streamID,
 		})
 	}
 	// Grouped by app then alphabetical: primary key is the peer (app) name,

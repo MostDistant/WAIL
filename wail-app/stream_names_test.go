@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,5 +48,33 @@ func TestLoadInvalidJSON(t *testing.T) {
 	names := LoadStreamNames(dir)
 	if len(names) != 0 {
 		t.Fatal("expected empty for invalid JSON")
+	}
+}
+
+func TestEffectiveStreamNamesDefaultsAndOverrides(t *testing.T) {
+	channels := []CaptureChannelInfo{
+		{StreamID: 0, Name: "Synth Bus", Enabled: true},
+		{StreamID: 1, Name: "Drums", Enabled: true},
+		{StreamID: 2, Name: "Disabled Channel", Enabled: false}, // not sending: no name
+		{StreamID: 3, Name: "", Enabled: true},                  // nameless: no default
+	}
+	overrides := map[uint16]string{
+		1: "My Custom Drums", // user rename wins over the channel name
+		7: "Test Tone",       // in-app sender, no capture channel
+	}
+	got := effectiveStreamNames(channels, overrides)
+	want := map[uint16]string{
+		0: "Synth Bus",
+		1: "My Custom Drums",
+		7: "Test Tone",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("effectiveStreamNames = %v, want %v", got, want)
+	}
+}
+
+func TestEffectiveStreamNamesEmptyInputs(t *testing.T) {
+	if got := effectiveStreamNames(nil, nil); len(got) != 0 {
+		t.Fatalf("expected empty map, got %v", got)
 	}
 }

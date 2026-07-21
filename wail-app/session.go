@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"sort"
@@ -163,6 +164,21 @@ func sessionLoop(
 	intervalCfg := interval.Config{Bars: bars, Quantum: quantum}
 	lastBroadcastBPM := bpm
 	localStreamNames := make(map[uint16]string)
+
+	// Receivers label our republished channels with these names (StreamNames
+	// sync): enabled capture channels default to their discovered channel name,
+	// overridden by user-set names. Recomputed on the status tick (discovery
+	// changes don't raise commands) and after any command that affects it;
+	// broadcast only when the map actually changes.
+	var effStreamNames, sentStreamNames map[uint16]string
+	syncStreamNames := func() {
+		effStreamNames = effectiveStreamNames(audioEngine.CaptureChannels(), localStreamNames)
+		if maps.Equal(effStreamNames, sentStreamNames) {
+			return
+		}
+		sentStreamNames = effStreamNames
+		mesh.Broadcast(NewStreamNames(StreamNamesToWire(effStreamNames)))
+	}
 
 	// Audio stats
 	var audioIntervalsSent, audioIntervalsReceived uint64
@@ -333,7 +349,7 @@ func sessionLoop(
 				emitter.Emit("chat:message", ChatMessageEvent{SenderName: displayName, IsOwn: true, Text: cmd.Text})
 			case "StreamNamesChanged":
 				localStreamNames = cmd.Names
-				mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
+				syncStreamNames()
 			case "SetTestTone":
 				// Stop existing test tone
 				if testToneCancelFn != nil {
@@ -367,7 +383,7 @@ func sessionLoop(
 				} else {
 					logInfo("[TEST] Test tone stopped")
 				}
-				mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
+				syncStreamNames()
 			case "SetWavSender":
 				// Stop existing WAV sender
 				if wavSenderCancelFn != nil {
@@ -401,10 +417,11 @@ func sessionLoop(
 				} else {
 					logInfo("[WAV] WAV sender stopped")
 				}
-				mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
+				syncStreamNames()
 			case "SetCaptureEnabled":
 				audioEngine.SetCaptureEnabled(cmd.ChannelID, cmd.Enabled)
 				logInfo("[capture] channel %s enabled=%v", cmd.ChannelID, cmd.Enabled)
+				syncStreamNames()
 			case "SetCaptureDump":
 				audioEngine.SetCaptureDump(cmd.Enabled)
 				logInfo("[capture] dump enabled=%v", cmd.Enabled)
@@ -433,9 +450,8 @@ func sessionLoop(
 				mesh.Broadcast(hello)
 				mesh.Broadcast(NewIntervalConfig(bars, quantum))
 				mesh.Broadcast(NewAudioCapabilities([]uint32{48000}, []uint16{1, 2}, true, true))
-				if len(localStreamNames) > 0 {
-					mesh.Broadcast(NewStreamNames(StreamNamesToWire(localStreamNames)))
-				}
+				sentStreamNames = nil // new peer: re-broadcast even if unchanged
+				syncStreamNames()
 
 			case "PeerLeft":
 				var name string
@@ -573,8 +589,8 @@ func sessionLoop(
 				if peers.MarkHelloSent(from) {
 					reply := NewHello(peerID, &displayName, &identity)
 					mesh.SendTo(from, reply)
-					if len(localStreamNames) > 0 {
-						mesh.SendTo(from, NewStreamNames(StreamNamesToWire(localStreamNames)))
+					if len(effStreamNames) > 0 {
+						mesh.SendTo(from, NewStreamNames(StreamNamesToWire(effStreamNames)))
 					}
 				}
 
@@ -649,17 +665,19 @@ func sessionLoop(
 			// hand straight to the engine under a distinct identity so it
 			// republishes as a "(loopback)" monitor channel.
 			if from == peerID {
+				loopStreamName := ""
 				if header := PeekWaifHeader(data); header != nil {
 					if loss := recordFrame(loopbackState, header); loss != nil {
 						logWarn("loopback packet_loss stream=%d lost=%d expected_seq=%d got_seq=%d interval=%d",
 							loss.StreamID, loss.Lost, loss.ExpectedSeq, loss.GotSeq, loss.IntervalIdx)
 					}
+					loopStreamName = effStreamNames[header.StreamID]
 				}
 				audioIntervalsReceived++
 				audioBytesRecv += uint64(len(data))
 				intervalFramesRecv++
 				intervalBytesRecv += uint64(len(data))
-				audioEngine.HandleRemoteAudio(identity+":loopback", displayName+" (loopback)", "", data)
+				audioEngine.HandleRemoteAudio(identity+":loopback", displayName+" (loopback)", loopStreamName, data)
 				continue
 			}
 
@@ -893,6 +911,10 @@ func sessionLoop(
 			localSendActive = make(map[uint16]bool)
 
 			peers.FlushAudioRecvPrev()
+
+			// Capture discovery changes (channels appearing, toggling, renames)
+			// don't raise commands; refresh the advertised stream names here.
+			syncStreamNames()
 
 			emitter.Emit("status:update", StatusUpdate{
 				BPM: state.BPM, Beat: state.Beat, Phase: state.Phase,

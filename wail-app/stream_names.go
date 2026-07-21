@@ -37,6 +37,23 @@ func LoadStreamNames(dataDir string) map[uint16]string {
 	return names
 }
 
+// effectiveStreamNames is the map receivers should label our streams with:
+// each enabled capture channel defaults to its discovered Link Audio channel
+// name, overridden by any user-set names (which also carry the test tone /
+// WAV sender labels). Broadcast via the StreamNames sync whenever it changes.
+func effectiveStreamNames(captureChannels []CaptureChannelInfo, overrides map[uint16]string) map[uint16]string {
+	eff := make(map[uint16]string, len(captureChannels)+len(overrides))
+	for _, cc := range captureChannels {
+		if cc.Enabled && cc.Name != "" {
+			eff[cc.StreamID] = cc.Name
+		}
+	}
+	for k, v := range overrides {
+		eff[k] = v
+	}
+	return eff
+}
+
 // SaveStreamNames persists stream names to disk. Logs on failure, never panics.
 func SaveStreamNames(dataDir string, names map[uint16]string) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
