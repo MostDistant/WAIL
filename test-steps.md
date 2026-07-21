@@ -38,7 +38,7 @@ Serves on `:8080`. Leave it running.
 ### 3. WAIL app
 
 The signaling server URL is the `signalingURL` const in `wail-app/app.go` (default
-`wss://wail-signal.fly.dev`). To test against the local server, point it at the
+`wss://wail-relay.fly.dev`). To test against the local server, point it at the
 leader: `const signalingURL = "ws://<LEADER_LAN_IP>:8080"` (both machines), then:
 ```sh
 cd wail-app && go run .    # or: ../bin/dev
