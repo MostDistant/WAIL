@@ -44,8 +44,8 @@ const (
 
 	// Outgoing WAIF frames are paced at 2× real time (frames are 20ms of audio)
 	// so a whole interval never bursts into the send queue or the relay's rate
-	// limiter, yet always finishes within half its interval — well before the
-	// receiver's N+D playout boundary.
+	// limiter, while the send position stays ahead of the receiver's playhead
+	// by a margin that grows through the interval (see internal/pace).
 	sendFrameGap     = 10 * time.Millisecond
 	sendQueueBatches = 4
 )

@@ -147,7 +147,7 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 ### Send pacing rate and relay burst limits
 **Status:** Decided (issue #352)
 **File:** `wail-app/internal/pace/pace.go`, `wail-app/audio_engine_real.go`, `signaling-server/main.go`
-**Decision:** Outgoing interval frames are paced at 2× real time (one 20ms frame per 10ms): fast enough to finish within half an interval (safe for playout at N+D, D≥1), slow enough to never overflow queues. The relay keeps a flat per-stream token bucket (rate 100/s, burst 2500) rather than an interval-aware limit derived from bars/quantum/BPM — simpler, and the burst covers a full interval even at slow tempos (1200 frames at 40 BPM / 4 bars). Revisit if intervals ever exceed ~25s.
+**Decision:** Outgoing interval frames are paced at 2× real time (one 20ms frame per 10ms). With D=1, delivery is concurrent with playback (both start at the same boundary), so the requirement is staying ahead of the playhead: frame k is sent at k×10ms and plays at k×20ms, a linearly growing margin. 1× would leave zero catch-up margin after any hiccup; much faster re-approaches the burst that overflowed queues. The relay keeps a flat per-stream token bucket (rate 100/s, burst 2500) rather than an interval-aware limit derived from bars/quantum/BPM — simpler, and the burst covers a full interval even at slow tempos (1200 frames at 40 BPM / 4 bars). Revisit if intervals ever exceed ~25s.
 
 ### Cross-platform binding link unverified
 **Status:** Open

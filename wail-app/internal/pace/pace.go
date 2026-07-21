@@ -5,9 +5,16 @@
 // overflows every fixed-size queue between encoder and wire (and trips
 // server-side rate limiting), so a Sender spaces the frames out instead:
 // enqueue the batch, and frames go to the send func one at a time with a
-// fixed gap between them. At a gap of half the frame duration (10ms for
-// 20ms Opus frames) a batch finishes in half its interval — comfortably
-// before the receiver's playout boundary at N+D.
+// fixed gap between them.
+//
+// The gap is half the frame duration (10ms for 20ms Opus frames), i.e. 2×
+// real time. With the default offset D=1 the receiver starts playing an
+// interval at the same boundary at which sending starts, so delivery cannot
+// beat the boundary — the invariant is staying ahead of the playhead: frame
+// k plays at offset k×20ms and is sent at k×10ms, a margin that grows
+// through the interval. (The first few frames arrive ~network-latency late,
+// which internal/playout live-appends — same as before pacing.) 1× would
+// leave zero catch-up margin; much faster re-approaches the burst.
 //
 // The Sender never blocks the caller: Enqueue is non-blocking and drops the
 // whole batch (reported via onDrop) if the small batch queue is full, which
