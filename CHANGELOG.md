@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.2.3 (2026-07-21)
+
+### Fixes
+
+- keep macOS from App Napping WAIL; make the emit cushion tunable (#365)
+- raise default emit cushion to 160ms for steadier Link Audio playout (#367)
+
 ## 3.2.2 (2026-07-21)
 
 ### Fixes
