@@ -919,20 +919,24 @@ func sessionLoop(
 			// likely-audible event), then ship the snapshot with the network event.
 			health := audioEngine.Health()
 			if health != lastHealth {
-				delta := func(what string, prev, now uint64) {
+				delta := func(logf func(string, ...any), what string, prev, now uint64) {
 					if now > prev {
-						logWarn("[audio] %s +%d (total %d)", what, now-prev, now)
+						logf("[audio] %s +%d (total %d)", what, now-prev, now)
 					}
 				}
-				delta("capture ring dropped buffers (drain stalled — audible gap)", lastHealth.CaptureRingDropped, health.CaptureRingDropped)
-				delta("capture LAN loss: buffers lost on the Link Audio hop", lastHealth.CaptureLANLostBuffers, health.CaptureLANLostBuffers)
-				delta("capture LAN loss events", lastHealth.CaptureLANGapEvents, health.CaptureLANGapEvents)
-				delta("capture re-anchor (stamp discontinuity — audible splice)", lastHealth.CaptureResnaps, health.CaptureResnaps)
-				delta("capture dropped late buffers", lastHealth.CaptureDroppedLate, health.CaptureDroppedLate)
-				delta("capture dropped backfill buffers", lastHealth.CaptureDroppedBackfill, health.CaptureDroppedBackfill)
-				delta("playout released incomplete intervals (played partial — audible dropout)", lastHealth.EmitIntervalsIncomplete, health.EmitIntervalsIncomplete)
-				delta("WAIF wire decode failures", lastHealth.WireDecodeFailures, health.WireDecodeFailures)
-				delta("Opus decode failures", lastHealth.OpusDecodeFailures, health.OpusDecodeFailures)
+				delta(logWarn, "capture ring dropped buffers (drain stalled — audible gap)", lastHealth.CaptureRingDropped, health.CaptureRingDropped)
+				delta(logWarn, "capture LAN loss: buffers lost on the Link Audio hop", lastHealth.CaptureLANLostBuffers, health.CaptureLANLostBuffers)
+				delta(logWarn, "capture LAN loss events", lastHealth.CaptureLANGapEvents, health.CaptureLANGapEvents)
+				delta(logWarn, "capture re-anchor (stamp discontinuity — audible splice)", lastHealth.CaptureResnaps, health.CaptureResnaps)
+				delta(logInfo, "capture drift micro-slew frames (inaudible correction)", lastHealth.CaptureSlews, health.CaptureSlews)
+				delta(logWarn, "capture dropped late buffers", lastHealth.CaptureDroppedLate, health.CaptureDroppedLate)
+				delta(logWarn, "capture dropped backfill buffers", lastHealth.CaptureDroppedBackfill, health.CaptureDroppedBackfill)
+				delta(logWarn, "sink underrun: paced audio late past the cushion (audible dropout)", lastHealth.EmitSinkUnderrunEvents, health.EmitSinkUnderrunEvents)
+				delta(logWarn, "frames never arrived by playout retirement (played as silence)", lastHealth.EmitFramesMissingAtPlay, health.EmitFramesMissingAtPlay)
+				delta(logInfo, "frames concealed by Opus PLC (masked loss)", lastHealth.EmitFramesConcealed, health.EmitFramesConcealed)
+				delta(logInfo, "intervals released before their streaming tail arrived (benign)", lastHealth.EmitIntervalsIncomplete, health.EmitIntervalsIncomplete)
+				delta(logWarn, "WAIF wire decode failures", lastHealth.WireDecodeFailures, health.WireDecodeFailures)
+				delta(logWarn, "Opus decode failures", lastHealth.OpusDecodeFailures, health.OpusDecodeFailures)
 				lastHealth = health
 			}
 

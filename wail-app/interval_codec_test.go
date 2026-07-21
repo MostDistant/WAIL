@@ -127,3 +127,87 @@ func TestIntervalCodecEmptyStillFinal(t *testing.T) {
 		t.Fatalf("lone frame should be final with total=1, got final=%v total=%d", f.IsFinal, f.TotalFrames)
 	}
 }
+
+// plcSineWindow returns one interleaved int16 window of a continuous sine
+// (phase advances across calls so windows join without a click). Local copy:
+// the capture-dump test helpers are !linkstub-only, this test is not.
+func plcSineWindow(spf, channels int, freq float64, phase *float64) []int16 {
+	s := make([]int16, spf*channels)
+	for i := 0; i < spf; i++ {
+		v := int16(8000 * math.Sin(*phase))
+		for c := 0; c < channels; c++ {
+			s[i*channels+c] = v
+		}
+		*phase += 2 * math.Pi * freq / 48000
+	}
+	return s
+}
+
+// TestDecodePLCBridgesAGap decodes around a deliberately skipped frame: the
+// PLC window must be a full frame, non-silent for loud material, and must not
+// break the decoder for subsequent real frames.
+func TestDecodePLCBridgesAGap(t *testing.T) {
+	enc, err := NewIntervalEncoder(2, 48000, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewIntervalDecoder(2, 48000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Five loud sine windows through the streaming encoder.
+	phase := 0.0
+	wires := make([][]byte, 5)
+	for i := range wires {
+		w := plcSineWindow(960, 2, 330, &phase)
+		wire, err := enc.EncodeWindow(w, WindowMeta{
+			RoomIndex: 0, FrameNumber: uint32(i), Seq: uint32(i),
+			IsFinal: i == 4, TotalFrames: 5, BPM: 120, Quantum: 4, Bars: 4,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wires[i] = wire
+	}
+
+	decode := func(wire []byte) []int16 {
+		f, err := DecodeAudioFrameWire(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pcm, err := dec.DecodeFrame(f.OpusData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pcm
+	}
+
+	decode(wires[0])
+	decode(wires[1])
+	// Frame 2 "lost": conceal it.
+	plc, err := dec.DecodePLC()
+	if err != nil {
+		t.Fatalf("DecodePLC: %v", err)
+	}
+	if len(plc) != 960*2 {
+		t.Fatalf("PLC window = %d samples, want %d", len(plc), 960*2)
+	}
+	var energy int64
+	for _, s := range plc {
+		energy += int64(s) * int64(s)
+	}
+	if energy == 0 {
+		t.Fatal("PLC of a loud sine should not be silent")
+	}
+	// PLC output must survive the next real decode (separate scratch).
+	firstPLC := plc[0]
+	pcm := decode(wires[3])
+	if len(pcm) != 960*2 {
+		t.Fatalf("post-PLC decode = %d samples", len(pcm))
+	}
+	if plc[0] != firstPLC {
+		t.Fatal("PLC buffer was clobbered by the next real decode")
+	}
+	decode(wires[4])
+}

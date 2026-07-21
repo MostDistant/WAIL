@@ -4,7 +4,10 @@
 // Opus/WAIF/relay plumbing live in package main and wrap this proven logic.
 package capture
 
-import "github.com/nicholasgasior/wail/wail-app/internal/interval"
+import (
+	"github.com/nicholasgasior/wail/wail-app/internal/dsp"
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
+)
 
 // CompletedInterval is a fully-bucketed interval ready to encode. Samples is the
 // whole interval, zero-padded (NINJAM intervals are fixed length; capture gaps
@@ -45,6 +48,13 @@ type Assembler struct {
 	nextOff  int
 	anchored bool
 	resnaps  uint64
+
+	// Micro-slew drift correction: when the stamp-vs-cursor divergence leaves
+	// the deadband (but stays under the re-anchor threshold), the next buffer's
+	// tail is stretched/compressed by a few frames so the cursor tracks the
+	// beat grid — bounding drift-as-latency without a single splice.
+	pendingSlew  int
+	slewedFrames uint64
 
 	// Windowed (streaming) mode: 0 in batch mode.
 	windowFrames    int
@@ -87,6 +97,50 @@ func NewWindowed(cfg interval.Config, channels int, sampleRate uint32, windowFra
 // far below any musically meaningful discontinuity.
 func (a *Assembler) reanchorThreshold() int64 { return int64(a.sampleRate) / 4 }
 
+// slewDeadband is the divergence (frames) below which stamps are treated as
+// noise (10ms). Past it, the slew corrector gently pulls the cursor back to
+// the beat grid.
+func (a *Assembler) slewDeadband() int64 {
+	if db := int64(a.sampleRate) / 100; db > 1 {
+		return db
+	}
+	return 1
+}
+
+// slewAdjust applies a ±k-frame drift correction by linearly resampling the
+// buffer's last slewWindow frames to slewWindow+k: the tail is stretched or
+// compressed by ~1.3ms worth of audio — no splice, imperceptible pitch bend.
+// Buffers too short to smear the correction pass through (the divergence
+// persists, so the next buffer re-arms it).
+func (a *Assembler) slewAdjust(samples []int16, numFrames, k int) ([]int16, int) {
+	if k == 0 || numFrames < slewWindow+slewMaxPerBuffer {
+		return samples, numFrames
+	}
+	headFrames := numFrames - slewWindow
+	out := make([]int16, 0, (numFrames+k)*a.channels)
+	out = append(out, samples[:headFrames*a.channels]...)
+	tail := samples[headFrames*a.channels : numFrames*a.channels]
+	out = append(out, dsp.ResampleLinearInterleaved(tail, a.channels, slewWindow, slewWindow+k)...)
+	if k < 0 {
+		a.slewedFrames += uint64(-k)
+	} else {
+		a.slewedFrames += uint64(k)
+	}
+	return out, len(out) / a.channels
+}
+
+const (
+	// slewMaxPerBuffer caps the correction per incoming buffer (frames).
+	slewMaxPerBuffer = 4
+	// slewWindow is the tail span (frames) a correction is smeared over via
+	// linear resampling — ~1.3ms at 48k: no splice, imperceptible pitch bend.
+	slewWindow = 64
+)
+
+// SlewedFrames is the cumulative number of frames inserted or dropped by the
+// drift corrector (each an inaudible micro-stretch, unlike Resnaps).
+func (a *Assembler) SlewedFrames() uint64 { return a.slewedFrames }
+
 // Reanchor tells the assembler the sample stream has a genuine discontinuity
 // (e.g. the capture hop lost buffers): the next buffer is placed by its beat
 // stamp instead of contiguously, so the lost span honestly reads as silence.
@@ -112,7 +166,16 @@ func (a *Assembler) place(beat, tempoBPM float64, windowed bool) (flushedC *Comp
 	beatOff := a.cfg.FrameOffset(beat, beatIdx, a.sampleRate, tempoBPM)
 	div := (beatIdx-a.cur.index)*int64(a.cur.frames) + int64(beatOff-a.nextOff)
 	if a.anchored && div <= a.reanchorThreshold() && div >= -a.reanchorThreshold() {
-		return nil, nil, true // stamp noise/drift: stay contiguous
+		// Stay contiguous. Past the deadband, arm a micro-slew on this buffer
+		// so accumulated clock drift is corrected instead of growing without
+		// bound into an eventual re-anchor splice.
+		switch db := a.slewDeadband(); {
+		case div > db:
+			a.pendingSlew = int(min(div, slewMaxPerBuffer))
+		case div < -db:
+			a.pendingSlew = -int(min(-div, slewMaxPerBuffer))
+		}
+		return nil, nil, true
 	}
 
 	// Genuine discontinuity: re-anchor from the stamp.
@@ -144,6 +207,10 @@ func (a *Assembler) Add(beat, tempoBPM float64, samples []int16, numFrames int) 
 	completed, _, ok := a.place(beat, tempoBPM, false)
 	if !ok {
 		return nil
+	}
+	if k := a.pendingSlew; k != 0 {
+		a.pendingSlew = 0
+		samples, numFrames = a.slewAdjust(samples, numFrames, k)
 	}
 	for numFrames > 0 {
 		if a.nextOff >= a.cur.frames {
@@ -211,6 +278,10 @@ func (a *Assembler) AddWindows(beat, tempoBPM float64, samples []int16, numFrame
 	_, out, ok := a.place(beat, tempoBPM, true)
 	if !ok {
 		return nil
+	}
+	if k := a.pendingSlew; k != 0 {
+		a.pendingSlew = 0
+		samples, numFrames = a.slewAdjust(samples, numFrames, k)
 	}
 	for numFrames > 0 {
 		if a.nextOff >= a.cur.frames {

@@ -82,3 +82,75 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 		t.Fatalf("Stop should clear emit streams, still have %d", len(le.emit))
 	}
 }
+
+// TestEngineConcealsSeqGapWithPLC ships an interval with one frame withheld:
+// the seq gap must be PLC-concealed at decode time (slot filled, not counted
+// as received), and the late real frame must replace the concealment.
+func TestEngineConcealsSeqGapWithPLC(t *testing.T) {
+	lb := NewLinkBridge(120, 4)
+	eng := newAudioEngine(lb, "TestPeer", func([]byte) {}, 1)
+	le := eng.(*linkAudioEngine)
+	defer eng.Stop()
+
+	// Anchor so cfg/tempo-derived interval totals exist for the slot walk.
+	eng.SetRoomAnchor(0, 120, 4, 4)
+
+	enc, err := NewIntervalEncoder(2, 48000, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Four loud stereo frames (sine, not silence — PLC needs signal history).
+	phase := 0.0
+	pcm := make([]int16, 0, 4*960*2)
+	for i := 0; i < 4; i++ {
+		pcm = append(pcm, sineWindow(960, 2, 220, &phase)...)
+	}
+	frames, _, err := enc.EncodeInterval(pcm, 5, 0, 0, 120, 4, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 4 {
+		t.Fatalf("expected 4 frames, got %d", len(frames))
+	}
+
+	// Ship 0, 1, then 3 — frame 2 "lost" (seq gap of 1).
+	eng.HandleRemoteAudio("id-plc", "Alice", "gtr", frames[0])
+	eng.HandleRemoteAudio("id-plc", "Alice", "gtr", frames[1])
+	eng.HandleRemoteAudio("id-plc", "Alice", "gtr", frames[3])
+
+	var st *emitStream
+	for _, s := range le.emit {
+		st = s
+	}
+	if st == nil {
+		t.Fatal("no emit stream")
+	}
+	if got := st.framesConcealed.Load(); got != 1 {
+		t.Fatalf("framesConcealed = %d, want 1", got)
+	}
+	missing, concealed := st.reasm.Missing(5)
+	if missing != 0 || concealed != 1 {
+		t.Fatalf("Missing(5) = (%d,%d), want (0,1)", missing, concealed)
+	}
+	if st.reasm.Complete(5) {
+		t.Fatal("PLC must not make the interval Complete")
+	}
+	// The concealed slot must hold non-silent audio.
+	ipcm, _, _, _ := st.reasm.Interval(5)
+	var energy int64
+	for _, s := range ipcm[2*960*2 : 3*960*2] {
+		energy += int64(s) * int64(s)
+	}
+	if energy == 0 {
+		t.Fatal("concealed slot is silent — PLC audio not placed")
+	}
+
+	// The late real frame 2 arrives: real audio wins.
+	eng.HandleRemoteAudio("id-plc", "Alice", "gtr", frames[2])
+	if !st.reasm.Complete(5) {
+		t.Fatal("interval should be Complete once the real frame lands")
+	}
+	if _, concealed := st.reasm.Missing(5); concealed != 0 {
+		t.Fatalf("concealed = %d, want 0 after real replacement", concealed)
+	}
+}

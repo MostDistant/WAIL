@@ -48,11 +48,16 @@ type EngineHealth struct {
 	CaptureLANLostBuffers   uint64 `json:"capture_lan_lost_buffers"`   // Link Audio buffers lost on the capture hop
 	CaptureLANGapEvents     uint64 `json:"capture_lan_gap_events"`     // distinct capture-hop loss events
 	CaptureResnaps          uint64 `json:"capture_resnaps"`            // assembler re-anchors (stamp discontinuity)
+	CaptureSlews            uint64 `json:"capture_slews"`              // frames micro-slewed tracking clock drift (inaudible)
 	CaptureDroppedLate      uint64 `json:"capture_dropped_late"`       // buffers for already-emitted intervals
 	CaptureDroppedBackfill  uint64 `json:"capture_dropped_backfill"`   // buffers behind the emitted-window boundary
-	EmitIntervalsIncomplete uint64 `json:"emit_intervals_incomplete"`  // intervals released with missing frames
-	WireDecodeFailures      uint64 `json:"wire_decode_failures"`       // WAIF wire-decode errors
-	OpusDecodeFailures      uint64 `json:"opus_decode_failures"`       // Opus decode errors
+	EmitIntervalsIncomplete uint64 `json:"emit_intervals_incomplete"`   // released before the streaming tail arrived (expected; benign)
+	EmitSinkUnderrunEvents  uint64 `json:"emit_sink_underrun_events"`   // paced feed fell behind the playhead past the cushion (audible)
+	EmitSinkUnderrunFrames  uint64 `json:"emit_sink_underrun_frames"`   // frames skipped (played as silence) due to underrun
+	EmitFramesMissingAtPlay uint64 `json:"emit_frames_missing_at_play"` // frames still absent when their interval retired (played as silence)
+	EmitFramesConcealed     uint64 `json:"emit_frames_concealed"`       // missing frames masked by Opus PLC
+	WireDecodeFailures      uint64 `json:"wire_decode_failures"`        // WAIF wire-decode errors
+	OpusDecodeFailures      uint64 `json:"opus_decode_failures"`        // Opus decode errors
 }
 
 // CaptureChannelInfo describes a discovered local Link Audio channel for the UI.

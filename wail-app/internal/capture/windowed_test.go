@@ -249,9 +249,9 @@ func TestStampDriftStaysContiguous(t *testing.T) {
 	a := NewWindowed(wcfg(), 1, wsr, wframes)
 
 	// 200 buffers × 10 frames = 2000 frames = 2.5 intervals of 800.
-	// Stamp jitter cycles 0,+2,+4,+7,+3 frames — like the measured pattern,
-	// always far below the re-anchor threshold (25 frames at wsr).
-	jitter := []int{0, 2, 4, 7, 3}
+	// Stamp jitter stays within the slew deadband (1 frame at wsr), so
+	// placement must be bit-exact contiguous — no slew, no gaps.
+	jitter := []int{0, 1}
 	var windows []Window
 	for i := 0; i < 200; i++ {
 		pos := i * 10
@@ -343,5 +343,78 @@ func TestAutoResnapOnLargeDivergence(t *testing.T) {
 	}
 	if a.Resnaps() != 1 {
 		t.Fatalf("Resnaps = %d, want 1", a.Resnaps())
+	}
+}
+
+// --- Micro-slew drift corrector ---
+
+// TestSlewTracksSustainedDrift: stamps advance faster than samples (sustained
+// clock drift, well past the deadband). The slew corrector must keep the
+// cursor tracking the beat grid with tiny inaudible stretches — never letting
+// divergence reach the re-anchor threshold — and must not punch zero-gaps.
+func TestSlewTracksSustainedDrift(t *testing.T) {
+	a := NewWindowed(wcfg(), 1, wsr, wframes)
+
+	// 100-frame buffers whose stamps advance 102 frames each: +2 frames/buffer
+	// of drift. Uncorrected, divergence would cross the 25-frame re-anchor
+	// threshold by buffer ~13; the slew (≤4 frames/buffer) must absorb it.
+	var windows []Window
+	stampPos := 0
+	for i := 0; i < 60; i++ {
+		windows = collectWindows(windows, a.AddWindows(beatAt(stampPos), 120, fill(100, 1, 7), 100))
+		stampPos += 102
+	}
+
+	if a.Resnaps() != 0 {
+		t.Fatalf("slew should prevent re-anchors under sustained drift, got %d", a.Resnaps())
+	}
+	if a.SlewedFrames() == 0 {
+		t.Fatal("sustained drift must engage the slew corrector")
+	}
+	// Constant input ⇒ any placement gap would read as zeros in emitted windows.
+	for _, w := range windows {
+		for k, s := range w.Samples {
+			if s != 7 {
+				t.Fatalf("interval %d win %d sample %d = %d — slew punched a gap",
+					w.IntervalIndex, w.Number, k, s)
+			}
+		}
+	}
+}
+
+// TestSlewSeamContinuity: slewing a ramp must not create sample jumps beyond
+// the ramp's own slope (no clicks at the stretch window).
+func TestSlewSeamContinuity(t *testing.T) {
+	a := NewWindowed(wcfg(), 1, wsr, wframes)
+
+	ramp := func(start int16, n int) []int16 {
+		s := make([]int16, n)
+		for i := range s {
+			s[i] = start + int16(i)
+		}
+		return s
+	}
+	stampPos := 0
+	var windows []Window
+	var v int16
+	for i := 0; i < 40; i++ {
+		windows = collectWindows(windows, a.AddWindows(beatAt(stampPos), 120, ramp(v, 100), 100))
+		v += 100
+		stampPos += 103 // +3/buffer drift
+	}
+	if a.SlewedFrames() == 0 {
+		t.Fatal("drift must engage slew")
+	}
+	prev := int16(-1)
+	for _, w := range windows {
+		for _, s := range w.Samples {
+			if prev >= 0 && s != 0 {
+				d := int(s) - int(prev)
+				if d < -3 || d > 3 {
+					t.Fatalf("seam jump of %d (prev %d → %d) — slew clicked", d, prev, s)
+				}
+			}
+			prev = s
+		}
 	}
 }

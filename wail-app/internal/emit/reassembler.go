@@ -15,11 +15,39 @@ type Reassembler struct {
 	partials        map[int64]*partial
 }
 
+// Slot provenance: a frame slot is empty until filled by a real decoded frame
+// or a PLC-synthesized one. Real frames win over PLC; PLC never overwrites.
+const (
+	slotEmpty uint8 = iota
+	slotPLC
+	slotReal
+)
+
 type partial struct {
-	pcm      []int16
-	received int  // WAIF frames placed
-	total    int  // total WAIF frames, -1 until the final frame is seen
-	maxFrame int  // highest frame_number seen (+1), for sizing before total known
+	pcm       []int16
+	state     []uint8 // per frame-slot provenance (slotEmpty/slotPLC/slotReal)
+	received  int     // distinct REAL WAIF frames placed (PLC does not count)
+	concealed int     // slots currently holding PLC audio
+	total     int     // total WAIF frames, -1 until the final frame is seen
+	maxFrame  int     // highest frame_number seen (+1), for sizing before total known
+}
+
+// slotState returns the provenance of frame slot fn (empty if never grown).
+func (p *partial) slotState(fn int) uint8 {
+	if fn < len(p.state) {
+		return p.state[fn]
+	}
+	return slotEmpty
+}
+
+// growState ensures the state slice covers frame slot fn.
+func (p *partial) growState(fn int) {
+	if fn < len(p.state) {
+		return
+	}
+	grown := make([]uint8, fn+1)
+	copy(grown, p.state)
+	p.state = grown
 }
 
 // New creates a reassembler. samplesPerFrame is the decoded PCM frame count of
@@ -37,24 +65,84 @@ func New(channels, samplesPerFrame int) *Reassembler {
 
 // Add places one decoded frame's PCM at frameNumber within interval `index`.
 // pcm is interleaved (samplesPerFrame × channels). isFinal marks the last frame,
-// carrying totalFrames (the interval's WAIF frame count).
+// carrying totalFrames (the interval's WAIF frame count). A real frame replaces
+// a PLC-concealed slot; a duplicate real frame overwrites in place without
+// double-counting `received` (which would fake Complete() with holes).
 func (r *Reassembler) Add(index int64, frameNumber int, pcm []int16, isFinal bool, totalFrames int) {
 	if frameNumber < 0 {
 		return
 	}
+	p := r.ensure(index)
+	if isFinal && totalFrames > 0 {
+		p.total = totalFrames
+	}
+	r.place(p, frameNumber, pcm)
+	switch p.slotState(frameNumber) {
+	case slotPLC:
+		p.concealed--
+		p.received++
+	case slotEmpty:
+		p.received++
+	case slotReal:
+		// duplicate: content already overwritten, count unchanged
+	}
+	p.growState(frameNumber)
+	p.state[frameNumber] = slotReal
+}
+
+// AddPLC places codec-concealed PCM at frameNumber, filling only an empty slot
+// (real audio always wins) and never counting toward `received`/Complete().
+func (r *Reassembler) AddPLC(index int64, frameNumber int, pcm []int16) {
+	if frameNumber < 0 {
+		return
+	}
+	p := r.ensure(index)
+	if p.slotState(frameNumber) != slotEmpty {
+		return
+	}
+	r.place(p, frameNumber, pcm)
+	p.growState(frameNumber)
+	p.state[frameNumber] = slotPLC
+	p.concealed++
+}
+
+// Missing reports the frame slots of interval `index` that hold no audio and
+// those holding PLC concealment, measured against total when known (else the
+// highest frame seen). (0,0) for unknown intervals.
+func (r *Reassembler) Missing(index int64) (missing, concealed int) {
+	p := r.partials[index]
+	if p == nil {
+		return 0, 0
+	}
+	frames := p.maxFrame
+	if p.total > frames {
+		frames = p.total
+	}
+	filled := 0
+	for fn := 0; fn < frames && fn < len(p.state); fn++ {
+		if p.state[fn] != slotEmpty {
+			filled++
+		}
+	}
+	return frames - filled, p.concealed
+}
+
+// ensure returns interval index's partial, creating it if absent.
+func (r *Reassembler) ensure(index int64) *partial {
 	p := r.partials[index]
 	if p == nil {
 		p = &partial{total: -1}
 		r.partials[index] = p
 	}
-	if isFinal && totalFrames > 0 {
-		p.total = totalFrames
-	}
+	return p
+}
+
+// place copies one frame's PCM into the interval buffer, growing it as needed
+// and tracking maxFrame.
+func (r *Reassembler) place(p *partial, frameNumber int, pcm []int16) {
 	if frameNumber+1 > p.maxFrame {
 		p.maxFrame = frameNumber + 1
 	}
-
-	// Grow the interval buffer to hold this frame.
 	need := (frameNumber + 1) * r.samplesPerFrame * r.channels
 	if len(p.pcm) < need {
 		grown := make([]int16, need)
@@ -67,7 +155,6 @@ func (r *Reassembler) Add(index int64, frameNumber int, pcm []int16, isFinal boo
 		n = len(pcm)
 	}
 	copy(p.pcm[off:off+n], pcm[:n])
-	p.received++
 }
 
 // Complete reports whether every frame of interval `index` has arrived.
