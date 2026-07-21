@@ -36,8 +36,16 @@ jobs:
           # Export the repo tree (excludes .git) into a named staging directory
           mkdir -p "/tmp/${STAGING}"
           git archive --format=tar HEAD | tar -x -C "/tmp/${STAGING}"
-          # Overlay the submodule contents (git archive omits them)
-          cp -r vendor/link "/tmp/${STAGING}/vendor/link"
+          # Overlay the submodule contents. git archive emits the gitlink as an
+          # empty vendor/link/ directory, so copy the submodule's *contents* into
+          # it — `cp -r vendor/link dest/vendor/link` would nest them one level
+          # too deep (vendor/link/link/), breaking the cgo include paths.
+          mkdir -p "/tmp/${STAGING}/vendor/link"
+          cp -R vendor/link/. "/tmp/${STAGING}/vendor/link/"
+          # Fail loudly if the headers the cgo binding needs aren't where
+          # wail-app/internal/abllink expects them.
+          test -f "/tmp/${STAGING}/vendor/link/extensions/abl_link/include/abl_link.h"
+          test -d "/tmp/${STAGING}/vendor/link/modules/asio-standalone/asio/include"
           # Package and compute checksum
           tar -czf "wail-${VERSION}-src.tar.gz" -C /tmp "${STAGING}"
           sha256sum "wail-${VERSION}-src.tar.gz" | awk '{print $1}' > "wail-${VERSION}-src.tar.gz.sha256"
