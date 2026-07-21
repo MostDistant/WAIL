@@ -70,8 +70,10 @@ git submodule update --init --recursive vendor/link   # fetch Link SDK + its asi
 cd wail-app && go build                                # build the app (needs cgo)
 cd wail-app && go test ./...                           # run app + internal package tests
 
-# Build/test WITHOUT the Link SDK (Link becomes a stub; no audio path):
-cd wail-app && go build -tags linkstub
+# Build/test WITHOUT the Link SDK (Link becomes a stub; no audio path).
+# ALWAYS -o /dev/null for the stub compile check: a bare `go build -tags linkstub`
+# overwrites ./wail-app with a DEAF binary (no Link, no audio) that looks identical.
+cd wail-app && go build -tags linkstub -o /dev/null
 cd wail-app && go test -tags linkstub ./...
 
 # Signaling server
