@@ -57,20 +57,179 @@ jobs:
             wail-*-src.tar.gz
             wail-*-src.tar.gz.sha256
 
-  # build-windows: DISABLED DURING ITERATION (mac only for now)
-  # build-windows:
-  #   runs-on: windows-2022
-  #   steps: ...
-  #     (disabled to speed up release pipeline during active development)
+  build-windows:
+    # Pinned to windows-2022 (older MinGW GCC + CMake) rather than
+    # windows-latest, which rolled over to the 2025/2026 image. That newer
+    # image's MinGW GCC rejects the Ableton Link 4.0 beta headers compiled by
+    # the Go/CGo desktop-app build (the same headers compile cleanly on the
+    # Linux runner's GCC 11). See #329.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          submodules: recursive
 
-  # build-linux: DISABLED DURING ITERATION (mac only for now)
-  # build-linux:
-  #   runs-on: ubuntu-22.04
-  #   steps: ...
-  #     (disabled to speed up release pipeline during active development)
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wail-app/go.mod
+
+      - name: Cache vcpkg
+        id: vcpkg-cache
+        uses: actions/cache@v5
+        with:
+          path: C:\vcpkg\installed
+          # Bump the suffix whenever the package list below changes, otherwise a
+          # stale cache is restored and the new packages are never installed.
+          key: vcpkg-opus-mingw-static-pkgconf-x64-windows-v4
+
+      - name: Install opus + pkgconf via vcpkg
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        shell: bash
+        # pkgconf is a drop-in pkg-config that the Go/CGo build needs to locate
+        # opus. We get it from vcpkg rather than choco because the choco
+        # community feed is flaky (504s) and silently leaves the build to fall
+        # back to Strawberry Perl's broken pkg-config.bat stub on PATH.
+        #
+        # opus is built for the x64-mingw-static triplet (same GCC ABI as the
+        # CGo objects) so it links statically into the desktop-app binary.
+        run: |
+          gcc --version  # the x64-mingw-static triplet builds with this GCC
+          vcpkg install \
+            pkgconf:x64-windows \
+            opus:x64-mingw-static
+
+      - name: Configure pkg-config
+        shell: pwsh
+        # Point CGo straight at the vcpkg pkgconf binary by absolute path via
+        # PKG_CONFIG, so PATH lookup (and Strawberry Perl's pkg-config.bat stub)
+        # is bypassed entirely for every later step in this job.
+        run: |
+          $pkgconf = Get-ChildItem C:\vcpkg\installed\x64-windows -Recurse -Filter pkgconf.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $pkgconf) { throw "pkgconf.exe not found under vcpkg (did the install step run?)" }
+          "PKG_CONFIG=$($pkgconf.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using PKG_CONFIG=$($pkgconf.FullName)"
+          & $pkgconf.FullName --version
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Rename Link `interface` param for MinGW
+        shell: bash
+        # MinGW's COM headers #define `interface`, colliding with the `interface`
+        # parameter in Link's link_audio/Channels.hpp. Rename that identifier (the
+        # only real use; Interface/mpInterface are untouched by \b).
+        run: sed -i 's/\binterface\b/iface/g' vendor/link/include/ableton/link_audio/Channels.hpp
+
+      - name: Build wail desktop app
+        shell: bash
+        env:
+          # opus for the CGo link comes from the MinGW (x64-mingw-static) prefix
+          # so its ABI matches the GCC that compiles the CGo objects. Windows
+          # system libs (ws2_32, winmm, iphlpapi) are set via cgo LDFLAGS in the
+          # abllink package. libstdc++ stays dynamic; the runtime DLLs are shipped
+          # in the staging step below.
+          PKG_CONFIG_PATH: C:\vcpkg\installed\x64-mingw-static\lib\pkgconfig
+        working-directory: wail-app
+        run: go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail.exe" .
+
+      - name: Stage release artifacts
+        shell: bash
+        run: |
+          # opus is linked statically into wail.exe (x64-mingw-static), but the
+          # exe is built with MinGW GCC against a dynamic libstdc++, so it needs
+          # the GCC/C++ runtime DLLs at launch. Ship them from the same toolchain
+          # that built the exe (C:\mingw64).
+          cp /c/mingw64/bin/libstdc++-6.dll dist/bin/
+          cp /c/mingw64/bin/libgcc_s_seh-1.dll dist/bin/
+          cp /c/mingw64/bin/libwinpthread-1.dll dist/bin/
+          cat > dist/README.txt <<'EOF'
+          WAIL — WAN Audio Interchange for Link
+
+          Run:
+            bin\wail.exe
+
+          Note: this binary is unsigned. If Windows SmartScreen blocks
+          launch, click "More info" then "Run anyway".
+
+          Documentation: https://github.com/MostDistant/WAIL
+          EOF
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wail-release-windows
+          path: dist\
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: wail-app/go.mod
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libssl-dev \
+            libopus-dev \
+            libgl-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            cmake \
+            g++
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build wail desktop app
+        run: go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail" .
+        working-directory: wail-app
+
+      - name: Stage release artifacts
+        run: |
+          cat > dist/README.txt <<'EOF'
+          WAIL — WAN Audio Interchange for Link
+
+          Runtime dependencies (Debian/Ubuntu):
+            sudo apt install libwebkit2gtk-4.1-0 libopus0
+
+          Run:
+            ./bin/wail
+
+          Documentation: https://github.com/MostDistant/WAIL
+          EOF
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wail-release-linux
+          path: dist/
 
   create-release:
-    needs: [build-homebrew-tarball]
+    needs: [build-windows, build-linux, build-homebrew-tarball]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -97,19 +256,29 @@ jobs:
       - name: Package platform artifacts
         run: |
           VERSION="${{ steps.tag.outputs.version }}"
-          # Note: Windows and Linux builds disabled during iteration (mac only)
-          echo "Skipping Windows/Linux packaging during iteration"
+          # Windows: zip, with a top-level wail-<version>/ directory inside.
+          mv wail-release-windows "wail-${VERSION}"
+          zip -r "wail-windows-x64-${VERSION}.zip" "wail-${VERSION}"
+          mv "wail-${VERSION}" wail-release-windows
+          # Linux: tarball, same top-level directory layout.
+          mv wail-release-linux "wail-${VERSION}"
+          tar -czf "wail-linux-x64-${VERSION}.tar.gz" "wail-${VERSION}"
+          mv "wail-${VERSION}" wail-release-linux
 
       - name: Find individual installers
         id: files
         run: |
           echo "src_tarball=$(ls wail-homebrew-src/wail-*-src.tar.gz 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
+          echo "windows_zip=$(ls wail-windows-x64-*.zip 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
+          echo "linux_tarball=$(ls wail-linux-x64-*.tar.gz 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: |
             ${{ steps.files.outputs.src_tarball }}
+            ${{ steps.files.outputs.windows_zip }}
+            ${{ steps.files.outputs.linux_tarball }}
 
       # Update the Homebrew tap formula with the new version and SHA256.
       # Requires a HOMEBREW_TAP_TOKEN secret with push access to MostDistant/homebrew-wail.
