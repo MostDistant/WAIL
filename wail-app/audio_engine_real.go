@@ -18,6 +18,7 @@ import (
 	"github.com/nicholasgasior/wail/wail-app/internal/capture"
 	"github.com/nicholasgasior/wail/wail-app/internal/dsp"
 	"github.com/nicholasgasior/wail/wail-app/internal/emit"
+	"github.com/nicholasgasior/wail/wail-app/internal/pace"
 	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 	"github.com/nicholasgasior/wail/wail-app/internal/lanloss"
 	"github.com/nicholasgasior/wail/wail-app/internal/playout"
@@ -40,6 +41,13 @@ const (
 	engineBitrateKbps  = 128
 	discoveryInterval  = 1 * time.Second
 	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
+
+	// Outgoing WAIF frames are paced at 2× real time (frames are 20ms of audio)
+	// so a whole interval never bursts into the send queue or the relay's rate
+	// limiter, yet always finishes within half its interval — well before the
+	// receiver's N+D playout boundary.
+	sendFrameGap     = 10 * time.Millisecond
+	sendQueueBatches = 4
 )
 
 type linkAudioEngine struct {
@@ -64,6 +72,7 @@ type linkAudioEngine struct {
 
 	capture      map[string]*captureChannel // by channel-id hex
 	emit         map[affinity.Key]*emitStream
+	own          *affinity.OwnChannels // our published sinks, for discovery exclusion
 	nextStreamID uint16
 }
 
@@ -80,6 +89,7 @@ type captureChannel struct {
 	loss   lanloss.Tracker
 	seq    uint32
 	drain  context.CancelFunc
+	pacer  *pace.Sender
 }
 
 type emitStream struct {
@@ -119,6 +129,7 @@ func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), off
 		tempoBPM: 120,
 		capture:  make(map[string]*captureChannel),
 		emit:     make(map[affinity.Key]*emitStream),
+		own:      affinity.NewOwnChannels(),
 	}
 }
 
@@ -252,10 +263,13 @@ func (e *linkAudioEngine) reconcileChannels(chans []abllink.Channel) {
 	defer e.mu.Unlock()
 	seen := make(map[string]bool, len(chans))
 	for _, c := range chans {
-		if c.PeerName == e.peerName {
-			continue // our own republished channel — never capture it
-		}
 		id := hex.EncodeToString(c.ID[:])
+		// Never capture our own republished channels (feedback loop). Matching
+		// by peer name alone is too blunt — a third-party publisher may share
+		// our peer name — so classify by minted sink names and learned IDs.
+		if e.own.Own(id, c.PeerName == e.peerName, c.Name) {
+			continue
+		}
 		seen[id] = true
 		ch, ok := e.capture[id]
 		if !ok {
@@ -301,6 +315,10 @@ func (e *linkAudioEngine) startCaptureLocked(ch *captureChannel) {
 	}
 	ch.enc = enc
 	ch.asm = capture.New(e.cfg, 2, engineInternalRate)
+	name := ch.name // stable copy: the onDrop callback runs off the pacer goroutine
+	ch.pacer = pace.New(sendFrameGap, sendQueueBatches, e.send, func(n int) {
+		log.Printf("[audio] WARN: send backlog on %q — dropped a batch of %d frames", name, n)
+	})
 
 	dctx, dcancel := context.WithCancel(e.ctx)
 	ch.drain = dcancel
@@ -317,6 +335,11 @@ func (e *linkAudioEngine) stopCaptureLocked(ch *captureChannel) {
 	if ch.drain != nil {
 		ch.drain()
 		ch.drain = nil
+	}
+	if ch.pacer != nil {
+		// Close only — Enqueue on a closed pacer is a no-op, so the drain
+		// goroutine can race with teardown without a nil check.
+		ch.pacer.Close()
 	}
 	if ch.source != nil {
 		ch.source.Close()
@@ -380,9 +403,7 @@ func (e *linkAudioEngine) emitCaptured(ch *captureChannel, done *capture.Complet
 		return
 	}
 	ch.seq = next
-	for _, f := range frames {
-		e.send(f)
-	}
+	ch.pacer.Enqueue(frames)
 }
 
 // --- emit ---
@@ -417,22 +438,26 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			return
 		}
 		label := streamLabel(streamName, f.StreamID)
+		sinkName := affinity.FormatName(displayName, label)
 		st = &emitStream{
 			key:             key,
 			channels:        channels,
 			dec:             dec,
 			reasm:           emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
 			sched:           playout.New(e.offsetD),
-			sink:            e.link.NewSink(affinity.FormatName(displayName, label), engineInternalRate*2),
+			sink:            e.link.NewSink(sinkName, engineInternalRate*2),
 			lastDisplayName: displayName,
 			lastStreamName:  streamName,
 		}
+		e.own.Published(sinkName)
 		e.emit[key] = st
 	} else if st.lastDisplayName != displayName || st.lastStreamName != streamName {
 		// Name became known / changed: rename the existing channel in place, don't
 		// re-mint it (affinity preserves the channel).
 		if st.sink != nil {
-			st.sink.SetName(affinity.FormatName(displayName, streamLabel(streamName, f.StreamID)))
+			newName := affinity.FormatName(displayName, streamLabel(streamName, f.StreamID))
+			st.sink.SetName(newName)
+			e.own.Published(newName)
 		}
 		st.lastDisplayName = displayName
 		st.lastStreamName = streamName

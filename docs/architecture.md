@@ -91,8 +91,10 @@ Interval N+1: [CAPTURE local Link Audio] ──→ on boundary ──→ Opus-en
 ```
 
 - **Capture** (`internal/capture`): each Link Audio buffer is written at its sample offset in a fixed-length interval PCM buffer; when a buffer opens the next interval, the completed one is handed off for Opus encoding + transmission.
+- **Send pacing** (`internal/pace`): the encoded interval (hundreds of WAIF frames) is never burst into the socket. A per-stream paced sender emits one frame per 10ms (2× real time), so a whole interval always finishes within half its duration — before the receiver's `N+D` boundary — without overflowing send queues or the relay's per-peer rate limiter.
 - **Playback** (`internal/emit` + `internal/playout`): decoded frames are reassembled per room interval index; the hold-until-boundary scheduler releases interval `N` at the local boundary labeled `N+D` (offset D, default 1), and a paced reader tops the Link Audio sink up a few ms at a time (never a burst). Late frames for the interval currently playing are **live-appended** (play-partial) rather than dropped or delayed a whole interval.
 - **Channel affinity** (`internal/affinity`): each remote `(persistent identity, stream index)` maps to a stable published Link Audio channel. When a peer disconnects and reconnects (new session peer id, same identity), it reclaims the same channel/sink, so LAN apps' routing survives the blip. There is no fixed 15-slot cap — each remote stream is its own channel.
+- **Own-channel exclusion** (`internal/affinity.OwnChannels`): capture discovery must skip WAIL's own republished channels (feedback loop) but must not hide a third-party publisher that merely shares WAIL's Link peer name. Since the sink channel ID isn't exposed by the `abl_link` C API, the classifier records every sink name WAIL mints and learns each sink's channel ID from the first discovery snapshot that pairs a minted name with WAIL's peer name; from then on exclusion is by ID (rename-proof).
 
 ## Audio Flow
 
@@ -103,6 +105,7 @@ DAW / Link-Audio app A publishes a Link Audio channel on LAN A
   → WAIL A subscribes (LinkAudioSource); pure-C callback → C ring → Go drainer
   → internal/capture buckets buffers into a fixed-length interval (local index)
   → interval_codec.go Opus-encodes each 20ms frame → WAIF frames (labeled with the room index)
+  → internal/pace spaces the frames out (one per 10ms, 2× real time)
   → WebSocket binary frame → relay server → Peer B
   → WAIL B receives WAIF
   → interval_codec.go Opus-decodes; internal/emit reassembles per (identity, stream index)

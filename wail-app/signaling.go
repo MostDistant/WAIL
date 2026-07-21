@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 )
@@ -57,6 +58,8 @@ type SignalingClient struct {
 
 	// Suppress leave on close (for reconnection)
 	suppressLeave bool
+
+	audioDrops atomic.Uint64 // outgoing audio frames dropped on a full queue
 
 	cancel context.CancelFunc
 }
@@ -166,7 +169,9 @@ func ConnectSignaling(
 	syncCh := make(chan FromPeerSync, 256)
 	audioCh := make(chan FromPeerAudio, 1024)
 	syncOutCh := make(chan outgoingSync, 256)
-	audioOutCh := make(chan []byte, 256)
+	// Sized to hold a full interval of WAIF frames (1200 at 40 BPM / 4 bars)
+	// with headroom, so even an unpaced burst survives a stalled writer.
+	audioOutCh := make(chan []byte, 2048)
 	ctrlOutCh := make(chan SignalMessage, 64)
 
 	// Push initial PeerList
@@ -364,6 +369,9 @@ func (sc *SignalingClient) SendAudio(data []byte) {
 	select {
 	case sc.audioOutCh <- data:
 	default:
+		if n := sc.audioDrops.Add(1); n == 1 || n%100 == 0 {
+			log.Printf("[signaling] WARN: outgoing audio queue full — dropped frame (%d total)", n)
+		}
 	}
 }
 
