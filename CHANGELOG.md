@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.0.1 (2026-07-21)
+
+### Fixes
+
+- Homebrew source tarball nested the Link SDK one directory too deep (#350)
+
 ## 3.0.0 (2026-07-15)
 
 ### Breaking Changes
