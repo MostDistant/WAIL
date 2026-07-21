@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.2.2 (2026-07-21)
+
+### Fixes
+
+- boundary click at non-frame-aligned tempos — stop playing the final WAIF frame's zero padding (#363)
+
 ## 3.2.1 (2026-07-21)
 
 ### Fixes
