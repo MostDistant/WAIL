@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.2.0 (2026-07-21)
+
+### Features
+
+- audio-quality overhaul — capture click fix, cushioned playout, Opus PLC, 256kbps — plus loopback monitoring, dump instruments, relay rename (#359)
+
 ## 3.1.0 (2026-07-21)
 
 ### Features
