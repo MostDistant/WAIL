@@ -138,7 +138,14 @@ func sessionLoop(
 	if v, err := strconv.Atoi(os.Getenv("WAIL_INTERVAL_OFFSET")); err == nil && v >= 0 {
 		offsetD = v
 	}
-	audioEngine := newAudioEngine(link, displayName, mesh.BroadcastAudio, offsetD)
+	// Engine sends happen on pacer goroutines, not the session loop, so they are
+	// counted atomically and folded into the per-interval sent= log line.
+	var engineFramesSent atomic.Uint64
+	engineSend := func(waif []byte) {
+		engineFramesSent.Add(1)
+		mesh.BroadcastAudio(waif)
+	}
+	audioEngine := newAudioEngine(link, displayName, engineSend, offsetD)
 	if err := audioEngine.Start(); err != nil {
 		logWarn("Link Audio engine failed to start: %v", err)
 	}
@@ -246,7 +253,7 @@ func sessionLoop(
 			roomIdx = ri
 		}
 
-		log.Printf("[session] >>> INTERVAL local=%d room=%d <<< beat=%.1f sent=%d recv=%d", idx, roomIdx, beat, intervalFramesSent, intervalFramesRecv)
+		log.Printf("[session] >>> INTERVAL local=%d room=%d <<< beat=%.1f sent=%d recv=%d", idx, roomIdx, beat, intervalFramesSent+engineFramesSent.Swap(0), intervalFramesRecv)
 		intervalFramesSent = 0
 		intervalFramesRecv = 0
 		intervalBytesSent = 0

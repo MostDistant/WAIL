@@ -36,8 +36,11 @@ const (
 	maxCompletedSessions = 50
 
 	// Rate limiting (token bucket)
-	baseBinaryRate   = 60.0  // tokens/sec per stream
-	baseBinaryBurst  = 120.0 // max tokens per stream
+	// The Link Audio engine sends a whole interval's WAIF frames in one burst at
+	// the boundary (~400 frames for 8s at 20ms; more at slow tempos), so the
+	// burst must absorb a full interval — steady-state is still ~50 frames/sec.
+	baseBinaryRate   = 100.0  // tokens/sec per stream
+	baseBinaryBurst  = 2500.0 // max tokens per stream
 	baseTextRate     = 100.0 // tokens/sec (not scaled by streams)
 	baseTextBurst    = 200.0 // max tokens
 	rateLimitWarnMax = 50    // violations before disconnect
