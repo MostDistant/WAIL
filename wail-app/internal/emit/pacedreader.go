@@ -1,5 +1,7 @@
 package emit
 
+import "math"
+
 // PacedReader walks an interval's PCM in sink-sized chunks, stamping each chunk
 // with the beat at which it begins. WAIL must not dump a whole interval into a
 // Link Audio sink at once — the sink queue drains straight onto the wire and
@@ -15,9 +17,12 @@ type PacedReader struct {
 	channels   int
 	sampleRate uint32
 	tempoBPM   float64
-	startBeat  float64
+	// Beat anchor: frame baseFrame begins at beat baseBeat. Rebase moves the
+	// anchor to the cursor (for tempo changes) without retro-shifting past stamps.
+	baseBeat    float64
+	baseFrame   int
 	totalFrames int
-	cursor     int // frame position
+	cursor      int // frame position
 }
 
 // NewPacedReader creates a reader over an interval. samples is a getter (called
@@ -32,7 +37,7 @@ func NewPacedReader(samples func() []int16, channels int, sampleRate uint32, tem
 		channels:    channels,
 		sampleRate:  sampleRate,
 		tempoBPM:    tempoBPM,
-		startBeat:   startBeat,
+		baseBeat:    startBeat,
 		totalFrames: totalFrames,
 	}
 }
@@ -76,12 +81,56 @@ func (p *PacedReader) Remaining() int {
 	return p.totalFrames - p.cursor
 }
 
+// Cursor returns the current frame position.
+func (p *PacedReader) Cursor() int { return p.cursor }
+
+// TotalFrames returns the interval's full frame count.
+func (p *PacedReader) TotalFrames() int { return p.totalFrames }
+
+// TempoBPM returns the tempo the reader stamps beats at.
+func (p *PacedReader) TempoBPM() float64 { return p.tempoBPM }
+
+// Skip advances the cursor to toFrame without emitting (underrun skip-ahead —
+// frames behind the playhead would be stamped in the past and dropped by
+// receivers). Never moves backward; clamps to the interval end.
+func (p *PacedReader) Skip(toFrame int) {
+	if toFrame > p.totalFrames {
+		toFrame = p.totalFrames
+	}
+	if toFrame > p.cursor {
+		p.cursor = toFrame
+	}
+}
+
+// FrameAtBeat maps a session beat to its frame position (inverse of beatAt).
+func (p *PacedReader) FrameAtBeat(beat float64) int {
+	seconds := (beat - p.baseBeat) * 60.0 / p.tempo()
+	return p.baseFrame + int(math.Round(seconds*float64(p.sampleRate)))
+}
+
+// Rebase re-anchors beat stamping at the current cursor with a new tempo (and
+// interval length, which changes with it): stamps already emitted keep their
+// beats; future stamps advance at the new tempo from here.
+func (p *PacedReader) Rebase(tempoBPM float64, totalFrames int) {
+	p.baseBeat = p.beatAt(p.cursor)
+	p.baseFrame = p.cursor
+	if tempoBPM > 0 {
+		p.tempoBPM = tempoBPM
+	}
+	if totalFrames > 0 {
+		p.totalFrames = totalFrames
+	}
+}
+
 // beatAt maps a frame offset to its begin beat.
 func (p *PacedReader) beatAt(frame int) float64 {
-	seconds := float64(frame) / float64(p.sampleRate)
-	tempo := p.tempoBPM
-	if tempo <= 0 {
-		tempo = 120
+	seconds := float64(frame-p.baseFrame) / float64(p.sampleRate)
+	return p.baseBeat + seconds*p.tempo()/60.0
+}
+
+func (p *PacedReader) tempo() float64 {
+	if p.tempoBPM <= 0 {
+		return 120
 	}
-	return p.startBeat + seconds*tempo/60.0
+	return p.tempoBPM
 }

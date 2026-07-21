@@ -170,6 +170,16 @@
           <div id="capture-channels" class="capture-channels">
             <span class="empty">No local Link Audio channels discovered</span>
           </div>
+          <!-- Debug: dump each enabled channel's audio pre- and post-Opus to WAV -->
+          <label class="capture-dump" title="Writes pre-Opus and post-Opus WAV files under ~/.wail/dumps for debugging; path is shown in the log.">
+            <input type="checkbox" id="capture-dump-toggle">
+            <span>Dump capture to WAV (debug)</span>
+          </label>
+          <!-- Debug: relay echoes our own audio back; republished as a "(loopback)" Link Audio channel -->
+          <label class="capture-dump" title="The relay echoes your own audio back to you. It reappears one interval late as a '(loopback)' Link Audio channel — subscribe to it in your DAW to hear exactly what peers hear.">
+            <input type="checkbox" id="loopback-toggle">
+            <span>Loopback my audio via server (debug)</span>
+          </label>
         </div>
       </section>
 
@@ -204,6 +214,12 @@
           <tr><td colspan="6" class="empty">No peers connected</td></tr>
         </tbody>
       </table>
+
+      <!-- Local audio-path health counters (each increment ≈ one audible-risk event) -->
+      <h3 class="section-label network-health-label">Local audio health</h3>
+      <div id="network-health" class="network-health">
+        <span class="empty">No diagnostics yet</span>
+      </div>
     </div>
 
     <!-- Logs tab -->

@@ -59,6 +59,7 @@ WAIL can run without the GUI for scripted or automated use. The `-headless` flag
 | `-bpm` | Tempo in BPM (default: 120) |
 | `-name` | Display name (auto-generated if empty) |
 | `-password` | Room password (optional) |
+| `-loopback` | Relay echoes our own audio back; republished as a `(loopback)` Link Audio channel |
 
 Stop with Ctrl+C or SIGTERM for clean shutdown.
 
@@ -86,6 +87,8 @@ WAIL has two components that work together:
 **No audio from remote peers** — Make sure Link Audio is available in your DAW (native in Ableton Live 12.3+, or via the [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst) in other DAWs), that you've routed audio to a Link Audio output channel and added a track that takes its input from WAIL's published Link Audio channels, and that the WAIL app is running and connected to the same room.
 
 **Changing tempo mid-jam** — Not recommended. WAIL uses NINJAM-style intervals, so audio is recorded and played back in full interval chunks. If you change the tempo, the current interval must finish before the new tempo takes effect. If you do need to change tempo, agree on it beforehand and have one person change it — Link will propagate it to all peers within a few seconds.
+
+**Debugging what you're sending** — Two live toggles under *Capture channels*: **Dump capture to WAV** writes each enabled channel's audio to pre-Opus and post-Opus WAV files under `~/.wail/dumps` (A/B them to localize where audio degrades). **Loopback my audio via server** asks the relay to echo your own audio back; it reappears one interval late as a `(loopback)` Link Audio channel — subscribe to it in your DAW to hear exactly what remote peers hear, including the full encode → relay → decode round trip.
 
 ## Development
 

@@ -154,6 +154,11 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 **File:** `wail-app/internal/capture/assembler.go` (`AddWindows`)
 **Decision:** Streaming capture emits a window once coverage passes its end; a buffer that lands behind the emitted boundary is trimmed/dropped and counted (`DroppedBackfill`). Link Audio buffers arrive in temporal order from the C ring, so backfill only occurs on pathological reordering — accepted in exchange for real-time transmission. The relay keeps a flat per-stream token bucket (rate 100/s, burst 2500) rather than an interval-aware limit derived from bars/quantum/BPM — simpler, and the burst covers a full interval even at slow tempos (1200 frames at 40 BPM / 4 bars). Revisit if intervals ever exceed ~25s.
 
+### Residual splices are hard cuts (no crosslap) and drift accrues as latency
+**Status:** Mostly resolved (2026-07 audio-quality pass); crosslap on the few remaining splice points still open
+**File:** `wail-app/internal/capture/assembler.go`, `wail-app/internal/emit/{feeder,plc}.go`, `wail-app/audio_engine_real.go`
+**Decision:** The quality pass landed the substantive fixes: bounded drift is now absorbed by the capture **micro-slew** (≤4 frames smeared over a 64-frame tail resample past a 10ms deadband — no splice, replaces the eventual 250ms re-anchor for pure drift), receive-side sequence gaps are masked by **Opus PLC** (decode-order synthesis, ≤120ms per gap, real frames still win), and the emit side keeps an ~80ms **cushion** ahead of the playhead so scheduler stalls no longer reach the ear (shortfalls counted as sink underruns). Still hard splices, deliberately: capture re-anchors after genuine discontinuities (LAN loss, >250ms divergence — rare, counted, logged) and zero-padded interval tails after capture stops. A 1–5ms crossfade at those two points is the remaining polish; deferred until the new counters show they occur in practice. NINJAM forum precedent for the drift disease and its cure (place audio at its true sample time, not the rounded grid) noted in the 2026-07 investigation. Fractional interval lengths (e.g. 44.1k/117BPM → 180923.077 samples) still imply ±1-sample playout seams at non-integer tempos; inaudible so far.
+
 ### Cross-platform binding link unverified
 **Status:** Open
 **File:** `wail-app/internal/abllink/{abllink.go,wrap.cpp}`

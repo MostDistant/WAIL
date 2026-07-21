@@ -62,6 +62,22 @@ function renderCaptureMixer(channels) {
   });
 }
 
+// Debug capture-to-WAV dump toggle (live; engine defaults to off per session).
+const captureDumpToggle = document.getElementById('capture-dump-toggle');
+if (captureDumpToggle) {
+  captureDumpToggle.addEventListener('change', () => {
+    invoke('set_capture_dump', { enabled: captureDumpToggle.checked }).catch(() => {});
+  });
+}
+
+// Debug server-echo loopback toggle (live; relay defaults to off per session).
+const loopbackToggle = document.getElementById('loopback-toggle');
+if (loopbackToggle) {
+  loopbackToggle.addEventListener('change', () => {
+    invoke('set_loopback', { enabled: loopbackToggle.checked }).catch(() => {});
+  });
+}
+
 
 // --- Room Name Generator ---
 // Dictionary 1: synthesis techniques, sound qualities, processing descriptors
@@ -567,6 +583,8 @@ function showSession(room) {
   joinScreen.style.display = 'none';
   sessionScreen.style.display = '';
   sessionError.style.display = 'none';
+  if (captureDumpToggle) captureDumpToggle.checked = false; // new session → dump off
+  if (loopbackToggle) loopbackToggle.checked = false; // new session → loopback off
   resetStatsWindow();
   clearLog();
   clearChatMessages();
@@ -766,6 +784,38 @@ function renderStatus(s) {
   }
 }
 
+// Engine health counters: [json key, friendly label]. Each increment is a
+// likely-audible event on the local audio path.
+const HEALTH_FIELDS = [
+  ['capture_ring_dropped', 'Capture ring drops'],
+  ['capture_lan_lost_buffers', 'Capture LAN loss (buffers)'],
+  ['capture_lan_gap_events', 'Capture LAN loss (events)'],
+  ['capture_resnaps', 'Capture re-anchors (drift snaps)'],
+  ['capture_slews', 'Drift micro-slews (inaudible)'],
+  ['capture_dropped_late', 'Capture late drops'],
+  ['capture_dropped_backfill', 'Capture backfill drops'],
+  ['emit_sink_underrun_events', 'Sink underruns (audible dropouts)'],
+  ['emit_sink_underrun_frames', 'Sink underrun frames'],
+  ['emit_frames_missing_at_play', 'Frames missing at playout'],
+  ['emit_frames_concealed', 'Frames concealed (Opus PLC)'],
+  ['emit_intervals_incomplete', 'Released before tail (benign)'],
+  ['wire_decode_failures', 'Wire decode failures'],
+  ['opus_decode_failures', 'Opus decode failures'],
+];
+
+// Non-zero values that are expected in normal operation — not styled as errors.
+const HEALTH_BENIGN = new Set(['emit_intervals_incomplete', 'emit_frames_concealed', 'capture_slews']);
+
+function renderHealth(health) {
+  const el = document.getElementById('network-health');
+  if (!el || !health) return;
+  el.innerHTML = HEALTH_FIELDS.map(([key, label]) => {
+    const v = health[key] || 0;
+    const cls = v > 0 && !HEALTH_BENIGN.has(key) ? 'health-bad' : '';
+    return `<div class="health-row"><span>${label}</span><span class="${cls}">${v}</span></div>`;
+  }).join('');
+}
+
 function renderNetwork(peers) {
   const tbody = document.getElementById('network-table-body');
   if (peers.length === 0) {
@@ -854,6 +904,7 @@ async function setupListeners() {
     networkSnapshots.push(snap);
     if (networkSnapshots.length > STATS_WINDOW_SIZE) networkSnapshots.shift();
     renderNetwork(peers);
+    renderHealth(event.payload.health);
   }));
 }
 

@@ -15,11 +15,13 @@ import (
 // signalingURL is the relay endpoint. Override with WAIL_SIGNAL_URL (e.g.
 // ws://localhost:8899) to point at a local or self-hosted relay — the Tier 2
 // E2E harness (scripts/tier2-e2e.sh) uses this to run against a local server.
+// wail-relay.fly.dev replaced wail-signal.fly.dev (fly apps can't be renamed);
+// the old app stays up for clients released before the switch.
 var signalingURL = func() string {
 	if u := os.Getenv("WAIL_SIGNAL_URL"); u != "" {
 		return u
 	}
-	return "wss://wail-signal.fly.dev"
+	return "wss://wail-relay.fly.dev"
 }()
 
 // App is the Wails application backend. All exported methods are callable from the frontend.
@@ -305,6 +307,30 @@ func (a *App) SetCaptureEnabled(channelID string, enabled bool) error {
 	defer a.mu.Unlock()
 	if a.session != nil {
 		a.session.CmdCh <- SessionCommand{Type: "SetCaptureEnabled", ChannelID: channelID, Enabled: enabled}
+	}
+	return nil
+}
+
+// SetCaptureDump toggles the debug capture-to-WAV dump. While on, each enabled
+// capture channel writes a pre-Opus and a post-Opus WAV under ~/.wail/dumps/
+// (the destination is logged); used to diagnose where transmitted audio degrades.
+func (a *App) SetCaptureDump(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetCaptureDump", Enabled: enabled}
+	}
+	return nil
+}
+
+// SetLoopback toggles the server-echo loopback: the relay sends our own audio
+// frames back to us and they are republished as a "(loopback)" Link Audio
+// channel one interval late — a live monitor of exactly what peers hear.
+func (a *App) SetLoopback(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetLoopback", Enabled: enabled}
 	}
 	return nil
 }

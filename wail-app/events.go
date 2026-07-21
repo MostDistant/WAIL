@@ -93,7 +93,8 @@ type PeerNetworkInfo struct {
 }
 
 type PeersNetwork struct {
-	Peers []PeerNetworkInfo `json:"peers"`
+	Peers  []PeerNetworkInfo `json:"peers"`
+	Health EngineHealth      `json:"health"`
 }
 
 type LogEntry struct {

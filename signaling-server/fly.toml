@@ -1,9 +1,15 @@
-# fly.toml app configuration file generated for wail-signal on 2026-03-06T23:09:36-08:00
+# fly.toml app configuration for the WAIL relay.
+#
+# Renamed wail-signal → wail-relay (2026-07-20). Fly can't rename apps in
+# place, so wail-relay is a separate app; wail-signal stays deployed for
+# clients released before the switch. Deploy relay changes to wail-relay only.
+# Run exactly ONE machine: rooms live in process memory, so a second machine
+# silently splits rooms (fly deploy's --ha default creates two — scale back).
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'wail-signal'
+app = 'wail-relay'
 primary_region = 'iad'
 
 [build]

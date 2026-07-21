@@ -791,6 +791,33 @@ summary:hover {
   font-family: var(--font-mono);
 }
 
+/* Local audio health (Network tab): one row per engine diagnostic counter */
+.network-health-label {
+  margin-top: 16px;
+}
+
+.network-health {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 24px;
+  font-size: 12px;
+}
+
+.network-health .health-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+
+.network-health .health-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.network-health .health-row span:last-child {
+  font-family: var(--font-mono);
+}
+
 /* ================================================================
    LOG PANEL
    ================================================================ */
@@ -1031,6 +1058,24 @@ summary:hover {
   font-weight: 400;
 }
 .capture-channel input {
+  width: auto;
+  margin: 0;
+}
+/* Debug dump toggle — a normal checkbox row, overriding the `.capture-mixer > label`
+   header styling it would otherwise inherit as a direct child. */
+.capture-dump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.capture-dump input {
   width: auto;
   margin: 0;
 }

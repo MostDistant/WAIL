@@ -4,7 +4,10 @@
 // Opus/WAIF/relay plumbing live in package main and wrap this proven logic.
 package capture
 
-import "github.com/nicholasgasior/wail/wail-app/internal/interval"
+import (
+	"github.com/nicholasgasior/wail/wail-app/internal/dsp"
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
+)
 
 // CompletedInterval is a fully-bucketed interval ready to encode. Samples is the
 // whole interval, zero-padded (NINJAM intervals are fixed length; capture gaps
@@ -25,12 +28,33 @@ func (c *CompletedInterval) Complete() bool { return c.WrittenFrames >= c.Frames
 // samples arrive at the internal rate (48 kHz); the caller resamples at the edge
 // if the channel differs. Not safe for concurrent use — drive from the drain
 // goroutine.
+//
+// Placement is sample-contiguous: consecutive buffers are laid down back to
+// back, and beat stamps only anchor the stream — at the first buffer, after
+// Reanchor(), or when a stamp diverges from the contiguous cursor by more than
+// reanchorThreshold (a genuine discontinuity: source stop/start, transport
+// jump, capture stall). Trusting per-buffer stamps for position turns
+// sender-side clock drift into zero-gaps punched into continuous audio
+// (measured live 2026-07: ~5-frame gaps every 64000 samples plus a growing
+// ~100-frame pop at every interval boundary — audible clicks).
 type Assembler struct {
 	cfg        interval.Config
 	channels   int
 	sampleRate uint32
 	cur        *intervalBuf
 	droppedLate uint64
+
+	// Contiguous placement cursor (frames within cur) + anchoring state.
+	nextOff  int
+	anchored bool
+	resnaps  uint64
+
+	// Micro-slew drift correction: when the stamp-vs-cursor divergence leaves
+	// the deadband (but stays under the re-anchor threshold), the next buffer's
+	// tail is stretched/compressed by a few frames so the cursor tracks the
+	// beat grid — bounding drift-as-latency without a single splice.
+	pendingSlew  int
+	slewedFrames uint64
 
 	// Windowed (streaming) mode: 0 in batch mode.
 	windowFrames    int
@@ -68,26 +92,144 @@ func NewWindowed(cfg interval.Config, channels int, sampleRate uint32, windowFra
 	return a
 }
 
-// Add places a buffer beginning at local beat `beat` (from Source.BeginBeats)
-// into its interval. It returns a completed interval when the buffer opens a new
-// interval (the previous one is done), otherwise nil.
-func (a *Assembler) Add(beat, tempoBPM float64, samples []int16, numFrames int) *CompletedInterval {
-	idx := a.cfg.IndexAtBeat(beat)
+// reanchorThreshold is the stamp-vs-cursor divergence (frames) beyond which the
+// beat stamp wins over sample contiguity. 250ms: far above clock-drift noise,
+// far below any musically meaningful discontinuity.
+func (a *Assembler) reanchorThreshold() int64 { return int64(a.sampleRate) / 4 }
 
-	var completed *CompletedInterval
+// slewDeadband is the divergence (frames) below which stamps are treated as
+// noise (10ms). Past it, the slew corrector gently pulls the cursor back to
+// the beat grid.
+func (a *Assembler) slewDeadband() int64 {
+	if db := int64(a.sampleRate) / 100; db > 1 {
+		return db
+	}
+	return 1
+}
+
+// slewAdjust applies a ±k-frame drift correction by linearly resampling the
+// buffer's last slewWindow frames to slewWindow+k: the tail is stretched or
+// compressed by ~1.3ms worth of audio — no splice, imperceptible pitch bend.
+// Buffers too short to smear the correction pass through (the divergence
+// persists, so the next buffer re-arms it).
+func (a *Assembler) slewAdjust(samples []int16, numFrames, k int) ([]int16, int) {
+	if k == 0 || numFrames < slewWindow+slewMaxPerBuffer {
+		return samples, numFrames
+	}
+	headFrames := numFrames - slewWindow
+	out := make([]int16, 0, (numFrames+k)*a.channels)
+	out = append(out, samples[:headFrames*a.channels]...)
+	tail := samples[headFrames*a.channels : numFrames*a.channels]
+	out = append(out, dsp.ResampleLinearInterleaved(tail, a.channels, slewWindow, slewWindow+k)...)
+	if k < 0 {
+		a.slewedFrames += uint64(-k)
+	} else {
+		a.slewedFrames += uint64(k)
+	}
+	return out, len(out) / a.channels
+}
+
+const (
+	// slewMaxPerBuffer caps the correction per incoming buffer (frames).
+	slewMaxPerBuffer = 4
+	// slewWindow is the tail span (frames) a correction is smeared over via
+	// linear resampling — ~1.3ms at 48k: no splice, imperceptible pitch bend.
+	slewWindow = 64
+)
+
+// SlewedFrames is the cumulative number of frames inserted or dropped by the
+// drift corrector (each an inaudible micro-stretch, unlike Resnaps).
+func (a *Assembler) SlewedFrames() uint64 { return a.slewedFrames }
+
+// Reanchor tells the assembler the sample stream has a genuine discontinuity
+// (e.g. the capture hop lost buffers): the next buffer is placed by its beat
+// stamp instead of contiguously, so the lost span honestly reads as silence.
+func (a *Assembler) Reanchor() { a.anchored = false }
+
+// Resnaps counts automatic re-anchors (stamp divergence over the threshold).
+func (a *Assembler) Resnaps() uint64 { return a.resnaps }
+
+// place positions the stream cursor for a buffer stamped at `beat`: contiguous
+// by default, anchored from the stamp on the first buffer, after Reanchor(),
+// or past-threshold divergence. ok=false drops a buffer stamped into an
+// already-emitted interval. flushedC/flushedW carry the previous interval's
+// remainder when anchoring advances past it (batch/windowed respectively).
+func (a *Assembler) place(beat, tempoBPM float64, windowed bool) (flushedC *CompletedInterval, flushedW []Window, ok bool) {
+	beatIdx := a.cfg.IndexAtBeat(beat)
 	if a.cur == nil {
-		a.cur = a.newBuf(idx, tempoBPM)
-	} else if idx > a.cur.index {
-		completed = a.finish()
-		a.cur = a.newBuf(idx, tempoBPM)
-	} else if idx < a.cur.index {
-		// Buffer belongs to an already-emitted interval (reordered/late). Drop.
-		a.droppedLate++
-		return nil
+		a.cur = a.newBuf(beatIdx, tempoBPM)
+		a.nextOff = a.cfg.FrameOffset(beat, beatIdx, a.sampleRate, tempoBPM)
+		a.anchored = true
+		return nil, nil, true
 	}
 
-	off := a.cfg.FrameOffset(beat, a.cur.index, a.sampleRate, tempoBPM)
-	a.write(off, samples, numFrames)
+	beatOff := a.cfg.FrameOffset(beat, beatIdx, a.sampleRate, tempoBPM)
+	div := (beatIdx-a.cur.index)*int64(a.cur.frames) + int64(beatOff-a.nextOff)
+	if a.anchored && div <= a.reanchorThreshold() && div >= -a.reanchorThreshold() {
+		// Stay contiguous. Past the deadband, arm a micro-slew on this buffer
+		// so accumulated clock drift is corrected instead of growing without
+		// bound into an eventual re-anchor splice.
+		switch db := a.slewDeadband(); {
+		case div > db:
+			a.pendingSlew = int(min(div, slewMaxPerBuffer))
+		case div < -db:
+			a.pendingSlew = -int(min(-div, slewMaxPerBuffer))
+		}
+		return nil, nil, true
+	}
+
+	// Genuine discontinuity: re-anchor from the stamp.
+	if beatIdx < a.cur.index {
+		a.droppedLate++
+		return nil, nil, false
+	}
+	if a.anchored {
+		a.resnaps++
+	}
+	a.anchored = true
+	if beatIdx > a.cur.index {
+		if windowed {
+			flushedW = a.remainingWindows()
+		} else {
+			flushedC = a.finish()
+		}
+		a.cur = a.newBuf(beatIdx, tempoBPM)
+	}
+	a.nextOff = beatOff
+	return flushedC, flushedW, true
+}
+
+// Add places a buffer beginning at local beat `beat` (from Source.BeginBeats)
+// into its interval, contiguously with the previous buffer. It returns a
+// completed interval when one closes (anchoring advanced past it, or the
+// buffer's samples spanned its end), otherwise nil.
+func (a *Assembler) Add(beat, tempoBPM float64, samples []int16, numFrames int) *CompletedInterval {
+	completed, _, ok := a.place(beat, tempoBPM, false)
+	if !ok {
+		return nil
+	}
+	if k := a.pendingSlew; k != 0 {
+		a.pendingSlew = 0
+		samples, numFrames = a.slewAdjust(samples, numFrames, k)
+	}
+	for numFrames > 0 {
+		if a.nextOff >= a.cur.frames {
+			c := a.finish()
+			if completed == nil {
+				completed = c
+			}
+			a.cur = a.newBuf(a.cur.index+1, tempoBPM)
+			a.nextOff = 0
+		}
+		n := a.cur.frames - a.nextOff
+		if n > numFrames {
+			n = numFrames
+		}
+		a.write(a.nextOff, samples[:n*a.channels], n)
+		a.nextOff += n
+		samples = samples[n*a.channels:]
+		numFrames -= n
+	}
 	return completed
 }
 
@@ -123,41 +265,51 @@ type Window struct {
 
 // AddWindows is the streaming counterpart of Add (requires NewWindowed). It
 // places the buffer exactly like Add and returns the windows that became ready:
-// a window is ready once coverage passes its end, and when a buffer opens a new
-// interval the previous interval's remaining windows flush first (zero-padded —
-// capture gaps read as silence), ending with its final window.
+// a window is ready once coverage passes its end. A buffer whose samples span
+// an interval's end fills its tail and continues into the next interval — no
+// boundary gap. When anchoring advances past the current interval (a genuine
+// discontinuity), its remaining windows flush first (zero-padded — capture
+// gaps read as silence), ending with its final window.
 //
-// Emitted windows are immutable: a buffer that lands behind the emitted
-// boundary is trimmed to it (fully-behind buffers are dropped) and counted in
-// DroppedBackfill. Capture buffers arrive in temporal order, so this only
-// fires on pathological reordering.
+// Emitted windows are immutable: after a backward re-anchor, a buffer that
+// lands behind the emitted boundary is trimmed to it (fully-behind buffers are
+// dropped) and counted in DroppedBackfill.
 func (a *Assembler) AddWindows(beat, tempoBPM float64, samples []int16, numFrames int) []Window {
-	idx := a.cfg.IndexAtBeat(beat)
-
-	var out []Window
-	if a.cur == nil {
-		a.cur = a.newBuf(idx, tempoBPM)
-	} else if idx > a.cur.index {
-		out = a.remainingWindows()
-		a.cur = a.newBuf(idx, tempoBPM)
-	} else if idx < a.cur.index {
-		a.droppedLate++
+	_, out, ok := a.place(beat, tempoBPM, true)
+	if !ok {
 		return nil
 	}
-
-	off := a.cfg.FrameOffset(beat, a.cur.index, a.sampleRate, tempoBPM)
-	if lim := a.cur.emitted * a.windowFrames; off < lim {
-		a.droppedBackfill++
-		skip := lim - off
-		if skip >= numFrames {
-			return out
-		}
-		samples = samples[skip*a.channels:]
-		numFrames -= skip
-		off = lim
+	if k := a.pendingSlew; k != 0 {
+		a.pendingSlew = 0
+		samples, numFrames = a.slewAdjust(samples, numFrames, k)
 	}
-	a.write(off, samples, numFrames)
-	return append(out, a.readyWindows()...)
+	for numFrames > 0 {
+		if a.nextOff >= a.cur.frames {
+			out = append(out, a.remainingWindows()...) // no-op after exact coverage
+			a.cur = a.newBuf(a.cur.index+1, tempoBPM)
+			a.nextOff = 0
+		}
+		if lim := a.cur.emitted * a.windowFrames; a.nextOff < lim {
+			a.droppedBackfill++
+			skip := lim - a.nextOff
+			if skip >= numFrames {
+				return out
+			}
+			samples = samples[skip*a.channels:]
+			numFrames -= skip
+			a.nextOff = lim
+		}
+		n := a.cur.frames - a.nextOff
+		if n > numFrames {
+			n = numFrames
+		}
+		a.write(a.nextOff, samples[:n*a.channels], n)
+		a.nextOff += n
+		samples = samples[n*a.channels:]
+		numFrames -= n
+		out = append(out, a.readyWindows()...)
+	}
+	return out
 }
 
 // FlushWindows emits the current interval's remaining windows (zero-padded,

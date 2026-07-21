@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -38,9 +40,18 @@ import (
 const (
 	engineInternalRate = 48000
 	engineTickInterval = 5 * time.Millisecond
-	engineBitrateKbps  = 128
+	engineBitrateKbps  = 256 // quality-first: music at 48k stereo; ~34KB/s per stream
 	discoveryInterval  = 1 * time.Second
 	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
+	// emitCushionMs is how far ahead of the playhead each sink is kept fed —
+	// stall tolerance for the emit loop. Receivers tolerate near-future stamps
+	// (the reference renderer stalls on far-future buffers and plays ~4 beats
+	// behind; Live's policy is unverified, so stay well under 100ms ≈ "now").
+	emitCushionMs     = 80
+	emitCushionFrames = engineInternalRate * emitCushionMs / 1000
+	// plcMaxFramesPerGap caps Opus packet-loss concealment per seq gap (120ms):
+	// libopus fades PLC to silence past ~100ms; a deeper gap's tail stays silent.
+	plcMaxFramesPerGap = 6
 
 	// Outgoing WAIF frames are paced at 2× real time (frames are 20ms of audio)
 	// so a whole interval never bursts into the send queue or the relay's rate
@@ -66,10 +77,19 @@ type linkAudioEngine struct {
 	wireDecodeFailures atomic.Uint64 // WAIF wire-decode errors (pre-Opus)
 	unlabeledWindows   atomic.Uint64 // capture windows dropped before a room anchor
 
+	// Capture-dump debug toggle. dumpEnabled/dumpGen are read lock-free on the
+	// hot path; dumpDir (resolved fresh per enable) is read under mu only when a
+	// drain goroutine actually opens a dump. The dump files themselves are owned
+	// entirely by each channel's drain goroutine (open/write/close), so nothing
+	// races with the SetCaptureDump toggle.
+	dumpEnabled atomic.Bool
+	dumpGen     atomic.Uint64
+
 	mu       sync.Mutex
 	labeler  interval.RoomLabeler
 	cfg      interval.Config
 	tempoBPM float64
+	dumpDir  string // guarded by mu; current dump session directory
 
 	capture      map[string]*captureChannel // by channel-id hex
 	emit         map[affinity.Key]*emitStream
@@ -91,6 +111,21 @@ type captureChannel struct {
 	seq    uint32
 	drain  context.CancelFunc
 	pacer  *pace.Sender
+
+	// Cumulative diagnostics, mirrored from drain-goroutine-owned state each
+	// tick so Health() can read them race-free from other goroutines.
+	statRingDropped atomic.Uint64
+	statLANLost     atomic.Uint64
+	statLANGaps     atomic.Uint64
+	statResnaps     atomic.Uint64
+	statSlews       atomic.Uint64
+	statLate        atomic.Uint64
+	statBackfill    atomic.Uint64
+
+	// Capture dump (debug). Owned by the drain goroutine; dumpGen tracks which
+	// dump session this writer belongs to so a toggle-off/on reopens fresh files.
+	dump    *captureDump
+	dumpGen uint64
 }
 
 type emitStream struct {
@@ -108,14 +143,23 @@ type emitStream struct {
 	lastDisplayName string
 	lastStreamName  string
 
-	reader *emit.PacedReader
+	feeder *emit.Feeder // cushion-ahead sink feeder (owned by the emit loop)
 
-	// Observability (ADR-0003 / pillar 8), currently surfaced only via
-	// rate-limited logs. Atomic so a future Stats() sampler on another goroutine
-	// can read them race-free: decodeFailures is bumped on the session goroutine,
-	// intervalsIncomplete on the emit-loop goroutine.
+	// Stream-order tracking for PLC (session-goroutine-owned, like dec): a seq
+	// gap in arrival order is a permanent loss on our TCP transport.
+	haveSeq   bool
+	expectSeq uint32
+	lastPos   emit.FramePos
+
+	// Observability (ADR-0003 / pillar 8). Atomic so Health() on another
+	// goroutine reads them race-free: decodeFailures/framesConcealed are bumped
+	// on the session goroutine, the rest on the emit-loop goroutine.
 	decodeFailures      atomic.Uint64 // Opus decode errors
-	intervalsIncomplete atomic.Uint64 // intervals not fully delivered by their N+D boundary
+	intervalsIncomplete atomic.Uint64 // released before the streaming tail arrived (benign)
+	sinkUnderrunEvents  atomic.Uint64 // paced feed fell behind the playhead past the cushion
+	sinkUnderrunFrames  atomic.Uint64 // frames skipped (played as silence) due to underrun
+	framesMissedAtPlay  atomic.Uint64 // frames still absent when their interval retired
+	framesConcealed     atomic.Uint64 // missing frames masked by Opus PLC
 }
 
 func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), offsetD int) AudioEngine {
@@ -239,6 +283,71 @@ func (e *linkAudioEngine) SetCaptureEnabled(channelID string, on bool) {
 	}
 }
 
+// SetCaptureDump toggles the debug capture-to-WAV dump (pre-Opus + post-Opus)
+// for every enabled capture channel. Enabling resolves a fresh session
+// directory and bumps the generation; each channel's drain goroutine notices on
+// its next tick and opens/closes its own files (so file I/O never leaves that
+// goroutine — no race with this toggle).
+func (e *linkAudioEngine) SetCaptureDump(enabled bool) {
+	if !enabled {
+		if e.dumpEnabled.CompareAndSwap(true, false) {
+			log.Printf("[audio] capture dump: disabled")
+		}
+		return
+	}
+	if e.dumpEnabled.Load() {
+		return // already on
+	}
+	dir := filepath.Join(defaultDataDir(), "dumps", time.Now().Format("2006-01-02_15-04-05"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("[audio] capture dump: cannot create %s: %v", dir, err)
+		return
+	}
+	e.mu.Lock()
+	e.dumpDir = dir
+	e.mu.Unlock()
+	// Bump generation before flipping the flag: any goroutine that observes the
+	// flag as on (Go atomics are sequentially consistent) also sees the new gen.
+	e.dumpGen.Add(1)
+	e.dumpEnabled.Store(true)
+	log.Printf("[audio] capture dump: enabled → %s", dir)
+}
+
+// reconcileDump opens or closes ch.dump to match the engine's dump toggle. Runs
+// only on ch's drain goroutine, which therefore owns the dump files exclusively.
+func (e *linkAudioEngine) reconcileDump(ch *captureChannel) {
+	if e.dumpEnabled.Load() {
+		gen := e.dumpGen.Load()
+		if ch.dump != nil && ch.dumpGen == gen {
+			return // already dumping this session
+		}
+		if ch.dump != nil {
+			ch.dump.Close()
+			ch.dump = nil
+		}
+		e.mu.Lock()
+		dir := e.dumpDir
+		e.mu.Unlock()
+		name := sanitizeFilename(ch.name)
+		if name == "" {
+			name = "channel"
+		}
+		name = fmt.Sprintf("%s_stream%d", name, ch.streamID)
+		d, err := newCaptureDump(dir, name, 2, engineInternalRate)
+		if err != nil {
+			log.Printf("[audio] capture dump: open failed for %q: %v", ch.name, err)
+			return
+		}
+		ch.dump = d
+		ch.dumpGen = gen
+		log.Printf("[audio] capture dump: writing %q → %s", ch.name, dir)
+	} else if ch.dump != nil {
+		ch.dump.Close()
+		ch.dump = nil
+		log.Printf("[audio] capture dump: stopped for %q", ch.name)
+	}
+}
+
 // --- capture ---
 
 // discoveryLoop periodically reconciles discovered local Link Audio channels
@@ -350,6 +459,14 @@ func (e *linkAudioEngine) stopCaptureLocked(ch *captureChannel) {
 
 func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) {
 	defer e.wg.Done()
+	// Close any active dump on the same goroutine that writes it (teardown races
+	// only against a context cancel, never a concurrent write).
+	defer func() {
+		if ch.dump != nil {
+			ch.dump.Close()
+			ch.dump = nil
+		}
+	}()
 	ss := abllink.NewSessionState()
 	defer ss.Close()
 	t := time.NewTicker(engineTickInterval)
@@ -360,6 +477,17 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			e.reconcileDump(ch)
+			ch.statRingDropped.Store(ch.source.Dropped())
+			ch.statLANLost.Store(ch.loss.LostBuffers())
+			ch.statLANGaps.Store(ch.loss.GapEvents())
+			if n := ch.asm.Resnaps(); n > ch.statResnaps.Load() {
+				log.Printf("[audio] capture re-anchored on %q: stamp diverged past threshold — audible splice (total %d)", ch.name, n)
+				ch.statResnaps.Store(n)
+			}
+			ch.statSlews.Store(ch.asm.SlewedFrames())
+			ch.statLate.Store(ch.asm.DroppedLate())
+			ch.statBackfill.Store(ch.asm.DroppedBackfill())
 			e.link.CaptureAppSessionState(ss)
 			quantum := e.quantumSnapshot() // stable within a tick; snapshot once, not per buffer
 			for {
@@ -370,6 +498,10 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 				if gap := ch.loss.Observe(buf.Count); gap != nil {
 					log.Printf("[audio] LAN loss on %q: %d buffers (count %d→%d)",
 						ch.name, gap.LostBuffers, gap.ExpectedCount, gap.GotCount)
+					// Real discontinuity: place the next buffer by its beat stamp
+					// so the lost span reads as silence (placement is otherwise
+					// sample-contiguous; see capture.Assembler).
+					ch.asm.Reanchor()
 				}
 				beat, mapped := ch.source.BeginBeats(&buf, ss, quantum)
 				if !mapped {
@@ -421,6 +553,9 @@ func (e *linkAudioEngine) emitWindow(ch *captureChannel, w capture.Window) {
 		return
 	}
 	ch.seq++
+	if ch.dump != nil {
+		ch.dump.writePair(w.Samples, wire)
+	}
 	ch.pacer.Enqueue([][]byte{wire})
 }
 
@@ -464,11 +599,13 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			reasm:           emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
 			sched:           playout.New(e.offsetD),
 			sink:            e.link.NewSink(sinkName, engineInternalRate*2),
+			feeder:          emit.NewFeeder(emitCushionFrames, emitChunkFrames),
 			lastDisplayName: displayName,
 			lastStreamName:  streamName,
 		}
 		e.own.Published(sinkName)
 		e.emit[key] = st
+		log.Printf("[audio] publishing Link Audio channel %q for %s stream %d", sinkName, fromIdentity, f.StreamID)
 	} else if st.lastDisplayName != displayName || st.lastStreamName != streamName {
 		// Name became known / changed: rename the existing channel in place, don't
 		// re-mint it (affinity preserves the channel).
@@ -481,10 +618,42 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		st.lastStreamName = streamName
 	}
 	dec := st.dec // st.dec is only touched on this (session) goroutine
+	cur := emit.FramePos{Interval: f.IntervalIndex, Frame: int(f.FrameNumber)}
+
+	// Seq-gap detection: frames ride one TCP stream in send order, so a gap in
+	// arrival order is a permanent loss (reconnect gap / sender queue drop) —
+	// never the benign still-in-flight tail. Map the gap to frame slots while
+	// the reassembler totals are at hand (under the lock).
+	var plcSlots []emit.FramePos
+	if st.haveSeq && f.FrameSeq != st.expectSeq && !seqLess(f.FrameSeq, st.expectSeq) {
+		gap := int(f.FrameSeq - st.expectSeq)
+		cfgFrames := roundUp(e.cfg.IntervalSamples(engineInternalRate, e.tempoBPM),
+			samplesPerWaifFrame(engineInternalRate)) / samplesPerWaifFrame(engineInternalRate)
+		reasm := st.reasm
+		plcSlots = emit.MissingSlots(st.lastPos, cur, gap, func(iv int64) int {
+			if _, _, total, ok := reasm.Interval(iv); ok && total > 0 {
+				return total
+			}
+			return cfgFrames
+		}, plcMaxFramesPerGap)
+	}
 	e.mu.Unlock()
 
 	// Decode off-lock (heavy); place under the lock (reasm/sched are shared with
-	// the emit-loop goroutine).
+	// the emit-loop goroutine). PLC windows synthesize first, in stream order,
+	// so the decoder state stays continuous through the gap and the next real
+	// frame splices smoothly.
+	var concealed [][]int16
+	for range plcSlots {
+		pcm, perr := dec.DecodePLC()
+		if perr != nil {
+			concealed = append(concealed, nil)
+			continue
+		}
+		cp := make([]int16, len(pcm))
+		copy(cp, pcm)
+		concealed = append(concealed, cp)
+	}
 	pcm, derr := dec.DecodeFrame(f.OpusData)
 	if derr != nil {
 		n := st.decodeFailures.Add(1)
@@ -493,7 +662,22 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		}
 		return
 	}
+	if !st.haveSeq || !seqLess(f.FrameSeq, st.expectSeq) {
+		st.haveSeq = true
+		st.expectSeq = f.FrameSeq + 1
+		st.lastPos = cur
+	}
+
 	e.mu.Lock()
+	for i, slot := range plcSlots {
+		if concealed[i] == nil {
+			continue
+		}
+		if st.sched.OnFrame(slot.Interval) != playout.TooLate {
+			st.reasm.AddPLC(slot.Interval, slot.Frame, concealed[i])
+			st.framesConcealed.Add(1)
+		}
+	}
 	switch st.sched.OnFrame(f.IntervalIndex) {
 	case playout.TooLate:
 		// interval already finished playing; drop
@@ -504,8 +688,36 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 	e.mu.Unlock()
 }
 
-// emitLoop detects local interval boundaries and paces released intervals into
-// their sinks a few ms at a time (deep-queue top-up, ADR-0002).
+// Health sums the per-channel and per-stream diagnostic counters. Capture-side
+// values are drain-goroutine mirrors (atomics); emit-side counters are atomics
+// on their streams; the maps themselves are guarded by e.mu.
+func (e *linkAudioEngine) Health() EngineHealth {
+	var h EngineHealth
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, ch := range e.capture {
+		h.CaptureRingDropped += ch.statRingDropped.Load()
+		h.CaptureLANLostBuffers += ch.statLANLost.Load()
+		h.CaptureLANGapEvents += ch.statLANGaps.Load()
+		h.CaptureResnaps += ch.statResnaps.Load()
+		h.CaptureSlews += ch.statSlews.Load()
+		h.CaptureDroppedLate += ch.statLate.Load()
+		h.CaptureDroppedBackfill += ch.statBackfill.Load()
+	}
+	for _, st := range e.emit {
+		h.EmitIntervalsIncomplete += st.intervalsIncomplete.Load()
+		h.EmitSinkUnderrunEvents += st.sinkUnderrunEvents.Load()
+		h.EmitSinkUnderrunFrames += st.sinkUnderrunFrames.Load()
+		h.EmitFramesMissingAtPlay += st.framesMissedAtPlay.Load()
+		h.EmitFramesConcealed += st.framesConcealed.Load()
+		h.OpusDecodeFailures += st.decodeFailures.Load()
+	}
+	h.WireDecodeFailures = e.wireDecodeFailures.Load()
+	return h
+}
+
+// emitLoop detects local interval boundaries and keeps each sink fed a bounded
+// cushion ahead of the playhead (emit.Feeder; ADR-0002 deep-queue emit).
 func (e *linkAudioEngine) emitLoop() {
 	defer e.wg.Done()
 	ss := abllink.NewSessionState()
@@ -537,14 +749,16 @@ func (e *linkAudioEngine) emitLoop() {
 				lastLocalIdx = localIdx
 				haveLast = true
 			}
-			e.topUpSinks(ss, q, cfg, tempo)
+			e.topUpSinks(ss, q, localBeat)
 		}
 	}
 }
 
-// onBoundary releases each stream's due interval at this local boundary.
+// onBoundary releases each stream's due interval at this local boundary:
+// retire the finished interval (measuring what never arrived), then promote
+// the feeder's pre-rolled reader — or install a fresh one — for the release.
 func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localIdx, roomLabel int64) {
-	startBeat, _ := cfg.BeatWindow(localIdx)
+	startBeat, endBeat := cfg.BeatWindow(localIdx)
 	totalFrames := roundUp(cfg.IntervalSamples(engineInternalRate, tempo), samplesPerWaifFrame(engineInternalRate))
 
 	e.mu.Lock()
@@ -555,44 +769,64 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 			continue
 		}
 		idx := release
-		// Late/incomplete at the N+D boundary → play-partial (below) + warn +
-		// per-stream "interval incomplete" metric, distinct from LAN loss and
-		// decode failures (ADR-0003).
+
+		// Retire the interval that just finished playing. Live-append had its
+		// whole playback window; slots still empty were rendered as silence —
+		// the honest audible-loss measure (PLC-concealed slots are not empty).
+		if missing, _ := st.reasm.Missing(idx - 1); missing > 0 {
+			st.framesMissedAtPlay.Add(uint64(missing))
+		}
+		st.reasm.Drop(idx - 1)
+
+		// Released before its streaming tail arrived: expected with real-time
+		// senders (the last frames are in flight at the boundary) — informational.
 		if !st.reasm.Complete(idx) {
 			n := st.intervalsIncomplete.Add(1)
-			if n == 1 || n%50 == 0 {
+			if n == 1 || n%100 == 0 {
 				_, recv, total, _ := st.reasm.Interval(idx)
-				log.Printf("[audio] warn: interval %d incomplete at boundary for %v (%d/%d frames, %d total) — playing partial",
-					idx, st.key, recv, total, n)
+				log.Printf("[audio] interval %d released with %d/%d frames for %v (tail in flight — expected with streaming send; %d total)",
+					idx, recv, total, st.key, n)
 			}
 		}
-		st.reasm.Drop(idx - 1) // intervals before the one we're releasing can never play
+
 		reasm := st.reasm
-		st.reader = emit.NewPacedReader(
-			func() []int16 { s, _, _, _ := reasm.Interval(idx); return s },
-			st.channels, engineInternalRate, tempo, startBeat, totalFrames,
-		)
+		nextIdx := idx + 1
+		makeNext := func() (*emit.PacedReader, int64) {
+			return emit.NewPacedReader(
+				func() []int16 { s, _, _, _ := reasm.Interval(nextIdx); return s },
+				st.channels, engineInternalRate, tempo, endBeat, totalFrames,
+			), nextIdx
+		}
+		if st.feeder.Promote(idx, makeNext) {
+			// Adopted the pre-rolled reader; re-anchor if tempo moved since pre-roll.
+			if cur := st.feeder.Current(); cur != nil && cur.TempoBPM() != tempo {
+				cur.Rebase(tempo, totalFrames)
+			}
+		} else {
+			st.feeder.SetCurrent(idx, emit.NewPacedReader(
+				func() []int16 { s, _, _, _ := reasm.Interval(idx); return s },
+				st.channels, engineInternalRate, tempo, startBeat, totalFrames,
+			), makeNext)
+		}
 	}
 }
 
-// topUpSinks writes the next paced chunk of each playing interval to its sink.
-func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, quantum float64, cfg interval.Config, tempo float64) {
+// topUpSinks advances each stream's feeder to playhead+cushion, writing paced
+// chunks into its sink (multiple chunks per tick when catching up after a stall).
+func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, quantum float64, localBeat float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, st := range e.emit {
-		if st.reader == nil || st.sink == nil {
+		if st.sink == nil {
 			continue
 		}
-		samples, beat, done := st.reader.Next(emitChunkFrames)
-		if len(samples) > 0 {
+		st.feeder.Advance(localBeat, func(samples []int16, beat float64) {
 			frames := len(samples) / st.channels
 			st.sink.WriteInterleaved(samples, ss, beat, quantum, frames, st.channels, engineInternalRate)
-		}
-		if done {
-			st.reader = nil
-			playing, _ := st.sched.Playing()
-			st.reasm.Drop(playing)
-		}
+		})
+		ev, fr := st.feeder.Underruns()
+		st.sinkUnderrunEvents.Store(ev)
+		st.sinkUnderrunFrames.Store(fr)
 	}
 }
 

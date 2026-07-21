@@ -128,3 +128,82 @@ func TestPacedReaderLiveAppend(t *testing.T) {
 		t.Fatalf("live-appended second half not visible: s[0]=%d done=%v", s[0], done)
 	}
 }
+
+// --- Slot provenance (PLC support) ---
+
+func TestAddPLCFillsOnlyEmptySlots(t *testing.T) {
+	r := New(1, 960)
+	r.Add(0, 0, frame(960, 1, 1), false, 0)
+	r.AddPLC(0, 1, frame(960, 1, 8)) // conceal missing slot 1
+	r.AddPLC(0, 0, frame(960, 1, 9)) // must NOT overwrite the real slot 0
+
+	pcm, received, _, _ := r.Interval(0)
+	if pcm[0] != 1 {
+		t.Fatalf("PLC overwrote a real slot: pcm[0]=%d, want 1", pcm[0])
+	}
+	if pcm[960] != 8 {
+		t.Fatalf("PLC slot content = %d, want 8", pcm[960])
+	}
+	if received != 1 {
+		t.Fatalf("received = %d, want 1 — PLC must not count as received", received)
+	}
+	missing, concealed := r.Missing(0)
+	if missing != 0 || concealed != 1 {
+		t.Fatalf("Missing = (%d,%d), want (0,1)", missing, concealed)
+	}
+}
+
+func TestRealFrameReplacesPLC(t *testing.T) {
+	r := New(1, 960)
+	r.AddPLC(3, 0, frame(960, 1, 8))
+	r.Add(3, 0, frame(960, 1, 5), false, 0) // late real frame wins
+
+	pcm, received, _, _ := r.Interval(3)
+	if pcm[0] != 5 {
+		t.Fatalf("real frame should replace PLC: pcm[0]=%d, want 5", pcm[0])
+	}
+	if received != 1 {
+		t.Fatalf("received = %d, want 1", received)
+	}
+	if _, concealed := r.Missing(3); concealed != 0 {
+		t.Fatalf("concealed = %d, want 0 after real replacement", concealed)
+	}
+}
+
+func TestDuplicateAddDoesNotDoubleCountReceived(t *testing.T) {
+	r := New(1, 960)
+	r.Add(7, 0, frame(960, 1, 1), false, 0)
+	r.Add(7, 0, frame(960, 1, 1), false, 0) // duplicate delivery
+	r.Add(7, 2, frame(960, 1, 3), true, 3)  // final: 3 total, frame 1 missing
+
+	if r.Complete(7) {
+		t.Fatal("interval with a missing frame must not be Complete after duplicates")
+	}
+	_, received, _, _ := r.Interval(7)
+	if received != 2 {
+		t.Fatalf("received = %d, want 2 distinct frames", received)
+	}
+	missing, _ := r.Missing(7)
+	if missing != 1 {
+		t.Fatalf("missing = %d, want 1", missing)
+	}
+}
+
+func TestMissingCountsAgainstTotalAndMaxFrame(t *testing.T) {
+	r := New(1, 960)
+	if m, c := r.Missing(9); m != 0 || c != 0 {
+		t.Fatalf("unknown interval Missing = (%d,%d), want (0,0)", m, c)
+	}
+	// Total unknown: count against maxFrame.
+	r.Add(9, 2, frame(960, 1, 3), false, 0) // slots 0,1 empty, maxFrame 3
+	if m, _ := r.Missing(9); m != 2 {
+		t.Fatalf("missing = %d, want 2 (against maxFrame)", m)
+	}
+	// Final announces 5 total: slots 0,1,3,4 empty.
+	r.Add(9, 4, frame(960, 1, 5), true, 5)
+	r.AddPLC(9, 0, frame(960, 1, 8))
+	m, c := r.Missing(9)
+	if m != 2 || c != 1 {
+		t.Fatalf("Missing = (%d,%d), want (2,1)", m, c)
+	}
+}

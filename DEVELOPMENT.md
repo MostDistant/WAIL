@@ -118,3 +118,11 @@ relay — useful on its own for running headless against a self-hosted relay.
 
 For a full hardware run, point a Link-Audio DAW (Ableton Live 12.3+) at two
 machines instead of the probe; the emit path is identical.
+
+A single-instance variant uses the server-echo loopback: run one headless WAIL
+with `-wav <file> -loopback` against a local relay and probe the republished
+`(loopback)` channel — the full encode → relay → decode → playout round trip in
+one process. `cmd/gen-complex` generates dense music-like test material (detuned
+pad, bass, percussive transients) that stresses the codec path harder than the
+sweep; `TestComplexProgramRoundTrip` runs the same material through the streaming
+encode/decode path in-process and asserts it comes back gap-free.

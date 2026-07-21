@@ -33,14 +33,14 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
 	StreamIndex *uint16
 	WavFile     string
 	ChannelID   string // SetCaptureEnabled
-	Enabled     bool   // SetCaptureEnabled
+	Enabled     bool   // SetCaptureEnabled, SetCaptureDump, SetLoopback
 }
 
 // SessionHandle represents a running session.
@@ -189,6 +189,16 @@ func sessionLoop(
 	var wavSenderBoundaryCh chan IntervalBoundaryInfo
 	var wavSenderCancelFn context.CancelFunc
 	var wavSenderStream *uint16
+
+	// Server-echo loopback (debug): the relay echoes our own audio frames back
+	// and we republish them as a "(loopback)" Link Audio channel. loopbackState
+	// is a detached PeerState for loss tracking only — self is not a peer.
+	loopbackEnabled := false
+	loopbackState := NewPeerState(nil)
+
+	// Engine diagnostics: diffed each status tick so every likely-audible event
+	// (capture loss, re-anchor, incomplete interval, …) surfaces in the log panel.
+	var lastHealth EngineHealth
 
 	// In-app senders (test tone / WAV) push completed WAIF frames here; the loop
 	// forwards them to the relay. Real capture goes straight through the Link
@@ -395,6 +405,13 @@ func sessionLoop(
 			case "SetCaptureEnabled":
 				audioEngine.SetCaptureEnabled(cmd.ChannelID, cmd.Enabled)
 				logInfo("[capture] channel %s enabled=%v", cmd.ChannelID, cmd.Enabled)
+			case "SetCaptureDump":
+				audioEngine.SetCaptureDump(cmd.Enabled)
+				logInfo("[capture] dump enabled=%v", cmd.Enabled)
+			case "SetLoopback":
+				loopbackEnabled = cmd.Enabled
+				mesh.SendLoopback(cmd.Enabled)
+				logInfo("[loopback] server echo enabled=%v", cmd.Enabled)
 			case "Disconnect":
 				logInfo("Disconnecting...")
 				goto cleanup
@@ -437,6 +454,14 @@ func sessionLoop(
 			case "PeerListReceived":
 				peers.SeedLastSeen()
 				logInfo("Joined room with %d peer(s)", ev.PeerCount)
+				if ev.PeerCount == 0 {
+					// Founding an empty room: assert tempo + interval config so the
+					// relay can anchor the room clock now. Without an anchor the
+					// engine has no room labels and releases nothing — a solo peer
+					// monitoring their own loopback would hear silence.
+					mesh.Broadcast(NewTempoChange(bpm, quantum, time.Now().UnixMicro()))
+					mesh.Broadcast(NewIntervalConfig(bars, quantum))
+				}
 			}
 
 		case <-sigClosedCh:
@@ -475,6 +500,11 @@ func sessionLoop(
 				currentSyncRx = newChannels.SyncCh
 				currentAudioRx = newChannels.AudioCh
 				sigMu.Unlock()
+
+				// The relay resets loopback on rejoin; re-arm it.
+				if loopbackEnabled {
+					mesh.SendLoopback(true)
+				}
 
 				// Restart signaling poll goroutine
 				sigEventCh2 := make(chan *MeshEvent, 64)
@@ -613,6 +643,26 @@ func sessionLoop(
 		case fpa := <-currentAudioRx:
 			from := fpa.From
 			data := fpa.Data
+
+			// Server-echo loopback: our own frames round-tripped through the
+			// relay. Self is not a peer — skip the registry/slots/recorder and
+			// hand straight to the engine under a distinct identity so it
+			// republishes as a "(loopback)" monitor channel.
+			if from == peerID {
+				if header := PeekWaifHeader(data); header != nil {
+					if loss := recordFrame(loopbackState, header); loss != nil {
+						logWarn("loopback packet_loss stream=%d lost=%d expected_seq=%d got_seq=%d interval=%d",
+							loss.StreamID, loss.Lost, loss.ExpectedSeq, loss.GotSeq, loss.IntervalIdx)
+					}
+				}
+				audioIntervalsReceived++
+				audioBytesRecv += uint64(len(data))
+				intervalFramesRecv++
+				intervalBytesRecv += uint64(len(data))
+				audioEngine.HandleRemoteAudio(identity+":loopback", displayName+" (loopback)", "", data)
+				continue
+			}
+
 			peers.WithPeer(from, func(p *PeerState) {
 				p.LastSeen = time.Now()
 				p.EverReceivedMessage = true
@@ -865,9 +915,34 @@ func sessionLoop(
 			audioStatusSeq++
 			mesh.Broadcast(NewAudioStatus(dcOpen, audioIntervalsSent, audioIntervalsReceived, true, audioStatusSeq))
 
+			// Engine health: log any counter that moved (each increment is a
+			// likely-audible event), then ship the snapshot with the network event.
+			health := audioEngine.Health()
+			if health != lastHealth {
+				delta := func(logf func(string, ...any), what string, prev, now uint64) {
+					if now > prev {
+						logf("[audio] %s +%d (total %d)", what, now-prev, now)
+					}
+				}
+				delta(logWarn, "capture ring dropped buffers (drain stalled — audible gap)", lastHealth.CaptureRingDropped, health.CaptureRingDropped)
+				delta(logWarn, "capture LAN loss: buffers lost on the Link Audio hop", lastHealth.CaptureLANLostBuffers, health.CaptureLANLostBuffers)
+				delta(logWarn, "capture LAN loss events", lastHealth.CaptureLANGapEvents, health.CaptureLANGapEvents)
+				delta(logWarn, "capture re-anchor (stamp discontinuity — audible splice)", lastHealth.CaptureResnaps, health.CaptureResnaps)
+				delta(logInfo, "capture drift micro-slew frames (inaudible correction)", lastHealth.CaptureSlews, health.CaptureSlews)
+				delta(logWarn, "capture dropped late buffers", lastHealth.CaptureDroppedLate, health.CaptureDroppedLate)
+				delta(logWarn, "capture dropped backfill buffers", lastHealth.CaptureDroppedBackfill, health.CaptureDroppedBackfill)
+				delta(logWarn, "sink underrun: paced audio late past the cushion (audible dropout)", lastHealth.EmitSinkUnderrunEvents, health.EmitSinkUnderrunEvents)
+				delta(logWarn, "frames never arrived by playout retirement (played as silence)", lastHealth.EmitFramesMissingAtPlay, health.EmitFramesMissingAtPlay)
+				delta(logInfo, "frames concealed by Opus PLC (masked loss)", lastHealth.EmitFramesConcealed, health.EmitFramesConcealed)
+				delta(logInfo, "intervals released before their streaming tail arrived (benign)", lastHealth.EmitIntervalsIncomplete, health.EmitIntervalsIncomplete)
+				delta(logWarn, "WAIF wire decode failures", lastHealth.WireDecodeFailures, health.WireDecodeFailures)
+				delta(logWarn, "Opus decode failures", lastHealth.OpusDecodeFailures, health.OpusDecodeFailures)
+				lastHealth = health
+			}
+
 			// Send metrics + build network event
 			perPeer := make(map[string]PeerFrameReport)
-			networkInfos := make([]PeerNetworkInfo, 0, len(connected))
+			networkInfos := make([]PeerNetworkInfo, 0, len(connected)+1)
 			for _, p := range connected {
 				var fr, lost, lossEvents, reorderEvents, audioRecv uint64
 				peers.WithPeer(p, func(ps *PeerState) {
@@ -901,7 +976,20 @@ func sessionLoop(
 					FramesReceived: fr, PacketsLost: lost, LossEvents: lossEvents,
 				})
 			}
-			emitter.Emit("peers:network", PeersNetwork{Peers: networkInfos})
+			// The loopback echo is not a peer, but its receive/loss stats are —
+			// show them as their own row while it has seen traffic.
+			if loopbackState.TotalFramesReceived > 0 {
+				name := displayName + " (loopback)"
+				networkInfos = append(networkInfos, PeerNetworkInfo{
+					PeerID: "loopback", DisplayName: &name,
+					ConnectionState: "loopback",
+					AudioRecv:       loopbackState.TotalFramesReceived,
+					FramesReceived:  loopbackState.TotalFramesReceived,
+					PacketsLost:     loopbackState.PacketsLost,
+					LossEvents:      loopbackState.LossEvents,
+				})
+			}
+			emitter.Emit("peers:network", PeersNetwork{Peers: networkInfos, Health: health})
 			mesh.SendMetricsReport(dcOpen, true, perPeer, localDropCount.Load(), boundaryDriftUs)
 		}
 	}

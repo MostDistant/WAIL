@@ -232,3 +232,189 @@ func TestStreamingMatchesBatchAssembly(t *testing.T) {
 		}
 	}
 }
+
+// --- Contiguous-placement regression tests (2026-07 live capture clicks) ---
+//
+// Measured live: the sender's per-buffer beat stamps drift against its sample
+// stream (~78 ppm audio-vs-host clock drift, relieved in ~5-frame stamp jumps
+// every 64000 samples). Beat-positioned placement turned that into 5-frame
+// zero-gaps every 1.33s and a ~100-frame pop at every interval boundary.
+// Placement must be sample-contiguous; stamps only anchor the stream start and
+// genuine discontinuities (divergence beyond ~250ms).
+
+// TestStampDriftStaysContiguous feeds buffers whose stamps carry bounded
+// drift/jitter and asserts the assembled audio is exactly the input stream —
+// no zero-gaps within intervals and none at interval boundaries.
+func TestStampDriftStaysContiguous(t *testing.T) {
+	a := NewWindowed(wcfg(), 1, wsr, wframes)
+
+	// 200 buffers × 10 frames = 2000 frames = 2.5 intervals of 800.
+	// Stamp jitter stays within the slew deadband (1 frame at wsr), so
+	// placement must be bit-exact contiguous — no slew, no gaps.
+	jitter := []int{0, 1}
+	var windows []Window
+	for i := 0; i < 200; i++ {
+		pos := i * 10
+		stamp := beatAt(pos + jitter[i%len(jitter)])
+		windows = collectWindows(windows, a.AddWindows(stamp, 120, fill(10, 1, int16(i+1)), 10))
+	}
+
+	if got := len(windows); got != 20 { // 2000 frames: 2×8 full intervals + 4 ready in interval 2
+		t.Fatalf("expected 20 windows, got %d", got)
+	}
+	// Reconstruct: frame f must hold value f/10+1 — bit-exact, gap-free.
+	frame := 0
+	for _, w := range windows {
+		if w.IntervalIndex != int64(frame/800) || w.Number != (frame%800)/wframes {
+			t.Fatalf("window out of order: %+v at frame %d", w, frame)
+		}
+		for k := 0; k < wframes; k++ {
+			want := int16(frame/10 + 1)
+			if w.Samples[k] != want {
+				t.Fatalf("frame %d (interval %d win %d k %d) = %d, want %d — placement not contiguous",
+					frame, w.IntervalIndex, w.Number, k, w.Samples[k], want)
+			}
+			frame++
+		}
+	}
+	if a.Resnaps() != 0 {
+		t.Fatalf("bounded stamp jitter must not resnap, got %d", a.Resnaps())
+	}
+	if a.DroppedBackfill() != 0 || a.DroppedLate() != 0 {
+		t.Fatal("bounded stamp jitter must not drop anything")
+	}
+}
+
+// TestBoundaryStraddleContiguous is the boundary-pop regression: a buffer
+// spanning an interval boundary must fill the old tail AND the new head with
+// audio — no zero-gap at the start of the next interval.
+func TestBoundaryStraddleContiguous(t *testing.T) {
+	a := NewWindowed(wcfg(), 1, wsr, wframes)
+	a.AddWindows(beatAt(0), 120, fill(790, 1, 1), 790)
+	w := a.AddWindows(beatAt(790), 120, fill(30, 1, 2), 30)
+	// Coverage 790→820: window 7 of interval 0 completes (final), nothing from
+	// interval 1 yet (only 20/100 frames).
+	if len(w) != 1 || !w[0].IsFinal || w[0].IntervalIndex != 0 || w[0].Number != 7 {
+		t.Fatalf("expected final window of interval 0, got %+v", w)
+	}
+	if w[0].Samples[89] != 1 || w[0].Samples[90] != 2 || w[0].Samples[99] != 2 {
+		t.Fatal("straddling buffer must fill the interval tail")
+	}
+	// Finish interval 1's window 0 and check its head carried the remainder.
+	w = a.AddWindows(beatAt(820), 120, fill(80, 1, 3), 80)
+	if len(w) != 1 || w[0].IntervalIndex != 1 || w[0].Number != 0 {
+		t.Fatalf("expected window 0 of interval 1, got %+v", w)
+	}
+	if w[0].Samples[0] != 2 || w[0].Samples[19] != 2 || w[0].Samples[20] != 3 {
+		t.Fatalf("interval 1 head = %d,%d,%d — boundary gap not fixed",
+			w[0].Samples[0], w[0].Samples[19], w[0].Samples[20])
+	}
+}
+
+// TestReanchorFollowsStampAfterDiscontinuity: after an explicit Reanchor()
+// (e.g. the engine observed a LAN-loss count gap), the next buffer is placed
+// by its stamp again — the lost span honestly reads as silence.
+func TestReanchorFollowsStampAfterDiscontinuity(t *testing.T) {
+	a := NewWindowed(wcfg(), 1, wsr, wframes)
+	a.AddWindows(beatAt(0), 120, fill(100, 1, 1), 100)
+	a.Reanchor()
+	// Next buffer stamped 15 frames ahead of contiguous coverage (sub-threshold,
+	// but Reanchor forces stamp placement).
+	w := a.AddWindows(beatAt(115), 120, fill(85, 1, 2), 85)
+	if len(w) != 1 || w[0].Number != 1 {
+		t.Fatalf("expected window 1, got %+v", w)
+	}
+	if w[0].Samples[14] != 0 || w[0].Samples[15] != 2 {
+		t.Fatalf("lost span must read as silence: got %d,%d", w[0].Samples[14], w[0].Samples[15])
+	}
+}
+
+// TestAutoResnapOnLargeDivergence: a stamp diverging beyond the threshold is a
+// genuine discontinuity — placement follows the stamp and the resnap is counted.
+func TestAutoResnapOnLargeDivergence(t *testing.T) {
+	a := NewWindowed(wcfg(), 1, wsr, wframes)
+	a.AddWindows(beatAt(0), 120, fill(100, 1, 1), 100)
+	w := a.AddWindows(beatAt(200), 120, fill(100, 1, 2), 100) // +100 frames = 1s ≫ threshold
+	if len(w) != 2 {
+		t.Fatalf("expected windows 1 (silence) and 2, got %d", len(w))
+	}
+	if w[0].Samples[50] != 0 || w[1].Samples[50] != 2 {
+		t.Fatal("divergent buffer must be placed by its stamp")
+	}
+	if a.Resnaps() != 1 {
+		t.Fatalf("Resnaps = %d, want 1", a.Resnaps())
+	}
+}
+
+// --- Micro-slew drift corrector ---
+
+// TestSlewTracksSustainedDrift: stamps advance faster than samples (sustained
+// clock drift, well past the deadband). The slew corrector must keep the
+// cursor tracking the beat grid with tiny inaudible stretches — never letting
+// divergence reach the re-anchor threshold — and must not punch zero-gaps.
+func TestSlewTracksSustainedDrift(t *testing.T) {
+	a := NewWindowed(wcfg(), 1, wsr, wframes)
+
+	// 100-frame buffers whose stamps advance 102 frames each: +2 frames/buffer
+	// of drift. Uncorrected, divergence would cross the 25-frame re-anchor
+	// threshold by buffer ~13; the slew (≤4 frames/buffer) must absorb it.
+	var windows []Window
+	stampPos := 0
+	for i := 0; i < 60; i++ {
+		windows = collectWindows(windows, a.AddWindows(beatAt(stampPos), 120, fill(100, 1, 7), 100))
+		stampPos += 102
+	}
+
+	if a.Resnaps() != 0 {
+		t.Fatalf("slew should prevent re-anchors under sustained drift, got %d", a.Resnaps())
+	}
+	if a.SlewedFrames() == 0 {
+		t.Fatal("sustained drift must engage the slew corrector")
+	}
+	// Constant input ⇒ any placement gap would read as zeros in emitted windows.
+	for _, w := range windows {
+		for k, s := range w.Samples {
+			if s != 7 {
+				t.Fatalf("interval %d win %d sample %d = %d — slew punched a gap",
+					w.IntervalIndex, w.Number, k, s)
+			}
+		}
+	}
+}
+
+// TestSlewSeamContinuity: slewing a ramp must not create sample jumps beyond
+// the ramp's own slope (no clicks at the stretch window).
+func TestSlewSeamContinuity(t *testing.T) {
+	a := NewWindowed(wcfg(), 1, wsr, wframes)
+
+	ramp := func(start int16, n int) []int16 {
+		s := make([]int16, n)
+		for i := range s {
+			s[i] = start + int16(i)
+		}
+		return s
+	}
+	stampPos := 0
+	var windows []Window
+	var v int16
+	for i := 0; i < 40; i++ {
+		windows = collectWindows(windows, a.AddWindows(beatAt(stampPos), 120, ramp(v, 100), 100))
+		v += 100
+		stampPos += 103 // +3/buffer drift
+	}
+	if a.SlewedFrames() == 0 {
+		t.Fatal("drift must engage slew")
+	}
+	prev := int16(-1)
+	for _, w := range windows {
+		for _, s := range w.Samples {
+			if prev >= 0 && s != 0 {
+				d := int(s) - int(prev)
+				if d < -3 || d > 3 {
+					t.Fatalf("seam jump of %d (prev %d → %d) — slew clicked", d, prev, s)
+				}
+			}
+			prev = s
+		}
+	}
+}

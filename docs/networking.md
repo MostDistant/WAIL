@@ -41,7 +41,7 @@ WAIL connects musicians over the internet using WebRTC DataChannels for both syn
 │            signaling-server/main.go (Go + SQLite)       │
 │   WebSocket server: join / signal / leave               │
 │   SQLite: peers, rooms                                  │
-│   Deployed to fly.io (wail-signal.fly.dev)              │
+│   Deployed to fly.io (wail-relay.fly.dev)              │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -69,7 +69,7 @@ Peers communicate directly (P2P) once WebRTC connects. The signaling server is o
 
 ### Architecture
 
-The signaling server is a Go WebSocket server (`signaling-server/main.go`) using gorilla/websocket and modernc.org/sqlite (pure-Go SQLite). It is deployed to fly.io at `wss://wail-signal.fly.dev`.
+The signaling server is a Go WebSocket server (`signaling-server/main.go`) using gorilla/websocket and modernc.org/sqlite (pure-Go SQLite). It is deployed to fly.io at `wss://wail-relay.fly.dev`.
 
 ### Storage
 

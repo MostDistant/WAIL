@@ -40,6 +40,12 @@ func NewIntervalEncoder(channels, sampleRate, bitrateKbps int) (*IntervalEncoder
 			log.Printf("[audio] warn: set Opus bitrate %dkbps failed, using default: %v", bitrateKbps, err)
 		}
 	}
+	// Max encoder effort: a few % of one core per stereo stream, off the RT
+	// thread — pure quality win. (No DTX, no in-band FEC: DTX adds comfort-noise
+	// transitions to music; FEC is SILK-only and pointless on our TCP transport.)
+	if err := enc.SetComplexity(10); err != nil {
+		log.Printf("[audio] warn: set Opus complexity failed, using default: %v", err)
+	}
 	spf := samplesPerWaifFrame(sampleRate)
 	return &IntervalEncoder{
 		enc:             enc,
@@ -169,6 +175,7 @@ type IntervalDecoder struct {
 	channels        int
 	samplesPerFrame int
 	out             []int16
+	plcOut          []int16 // separate scratch: a PLC window must survive the next real decode
 }
 
 // NewIntervalDecoder creates a decoder for the given channels and rate.
@@ -196,4 +203,20 @@ func (d *IntervalDecoder) DecodeFrame(opusData []byte) ([]int16, error) {
 		return nil, err
 	}
 	return d.out[:n*d.channels], nil
+}
+
+// DecodePLC synthesizes one 20ms window of packet-loss concealment from the
+// decoder's current state — libopus extrapolates the previous audio and fades
+// over sustained loss. Call it in stream order for each frame that never
+// arrived, between the decodes of its neighbors, so the decoder state stays
+// continuous and the next real frame splices smoothly. The returned slice
+// aliases an internal buffer valid until the next DecodePLC call — copy it.
+func (d *IntervalDecoder) DecodePLC() ([]int16, error) {
+	if d.plcOut == nil {
+		d.plcOut = make([]int16, d.samplesPerFrame*d.channels)
+	}
+	if err := d.dec.DecodePLC(d.plcOut); err != nil {
+		return nil, err
+	}
+	return d.plcOut, nil
 }
