@@ -90,6 +90,17 @@ func (p *PacedReader) TotalFrames() int { return p.totalFrames }
 // TempoBPM returns the tempo the reader stamps beats at.
 func (p *PacedReader) TempoBPM() float64 { return p.tempoBPM }
 
+// SetTotalFrames extends (or shortens, never below the cursor) the interval's
+// frame count. Used at the boundary handoff when the interval's continuation
+// padding carries real audio: the reader plays through the pad while the next
+// interval starts past its twice-encoded head. Stamps stay on the same grid.
+func (p *PacedReader) SetTotalFrames(n int) {
+	if n < p.cursor {
+		n = p.cursor
+	}
+	p.totalFrames = n
+}
+
 // Skip advances the cursor to toFrame without emitting (underrun skip-ahead —
 // frames behind the playhead would be stamped in the past and dropped by
 // receivers). Never moves backward; clamps to the interval end.

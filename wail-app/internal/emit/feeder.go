@@ -22,7 +22,8 @@ package emit
 type Feeder struct {
 	cur, next       *PacedReader
 	curIdx, nextIdx int64
-	makeNext        func() (*PacedReader, int64)
+	nextStart       int // frame the next reader starts at (continuation handoff)
+	makeNext        func() (*PacedReader, int64, int)
 	cushionFrames   int
 	chunkFrames     int
 
@@ -43,22 +44,26 @@ func NewFeeder(cushionFrames, chunkFrames int) *Feeder {
 }
 
 // SetCurrent installs the playing interval's reader. makeNext lazily builds
-// the following interval's reader for boundary pre-roll (nil disables pre-roll).
-func (f *Feeder) SetCurrent(idx int64, r *PacedReader, makeNext func() (*PacedReader, int64)) {
+// the following interval's reader for boundary pre-roll (nil disables
+// pre-roll); it runs once, when the cushion first crosses the current
+// interval's end, and returns the next reader, its index, and the frame it
+// starts at. It may extend the current reader (SetTotalFrames) when the
+// interval's continuation padding carries real audio.
+func (f *Feeder) SetCurrent(idx int64, r *PacedReader, makeNext func() (*PacedReader, int64, int)) {
 	f.cur, f.curIdx = r, idx
-	f.next, f.nextIdx = nil, 0
+	f.next, f.nextIdx, f.nextStart = nil, 0, 0
 	f.makeNext = makeNext
 }
 
 // Promote adopts the pre-rolled next reader as current (at the real boundary).
 // Returns false when no pre-roll exists for idx — the caller falls back to
 // SetCurrent with a fresh reader.
-func (f *Feeder) Promote(idx int64, makeNext func() (*PacedReader, int64)) bool {
+func (f *Feeder) Promote(idx int64, makeNext func() (*PacedReader, int64, int)) bool {
 	if f.next == nil || f.nextIdx != idx {
 		return false
 	}
 	f.cur, f.curIdx = f.next, f.nextIdx
-	f.next, f.nextIdx = nil, 0
+	f.next, f.nextIdx, f.nextStart = nil, 0, 0
 	f.makeNext = makeNext
 	return true
 }
@@ -76,7 +81,9 @@ func (f *Feeder) Underruns() (events, frames uint64) {
 // Advance tops the sink up to playhead+cushion at wall-clock beat nowBeat,
 // emitting as many chunks as needed (catch-up burst after a stall), skipping
 // ahead when the playhead overtook the cursor, and pre-rolling the next
-// interval when the cushion window crosses the interval end.
+// interval when the cushion window crosses the interval end. The handoff
+// (makeNext) may extend the current reader, so it runs before the crossover
+// math and the current reader is topped up again afterwards.
 func (f *Feeder) Advance(nowBeat float64, emit func(samples []int16, beatAtBegin float64)) {
 	if f.cur == nil {
 		return
@@ -87,21 +94,31 @@ func (f *Feeder) Advance(nowBeat float64, emit func(samples []int16, beatAtBegin
 	}
 	f.fill(f.cur, play, play+f.cushionFrames, emit)
 
-	over := play + f.cushionFrames - f.cur.TotalFrames()
-	if over <= 0 {
+	if play+f.cushionFrames <= f.cur.TotalFrames() {
 		return
 	}
-	if f.next == nil && f.makeNext != nil {
-		f.next, f.nextIdx = f.makeNext()
-	}
 	if f.next == nil {
+		if f.makeNext == nil {
+			return
+		}
+		f.next, f.nextIdx, f.nextStart = f.makeNext()
+		if f.next == nil {
+			return
+		}
+		if f.next.Cursor() < f.nextStart {
+			f.next.Skip(f.nextStart)
+		}
+		f.fill(f.cur, play, play+f.cushionFrames, emit)
+	}
+	over := play + f.cushionFrames - f.cur.TotalFrames()
+	if over <= 0 {
 		return
 	}
 	overPlay := play - f.cur.TotalFrames()
 	if overPlay < 0 {
 		overPlay = 0
 	}
-	f.fill(f.next, overPlay, over, emit)
+	f.fill(f.next, f.nextStart+overPlay, f.nextStart+over, emit)
 }
 
 // fill brings one reader's cursor up to targetFrame, first skipping (and

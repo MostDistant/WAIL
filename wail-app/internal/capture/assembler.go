@@ -59,6 +59,12 @@ type Assembler struct {
 	// Windowed (streaming) mode: 0 in batch mode.
 	windowFrames    int
 	droppedBackfill uint64
+
+	// A short final window is held here until the next interval's head arrives
+	// to pad it: feeding the encoder zeros instead splices a hard transient
+	// into every boundary of the decoded stream. Zero-padded only when no
+	// continuation can exist (flush, re-anchor discontinuity).
+	pending *intervalBuf
 }
 
 type intervalBuf struct {
@@ -189,7 +195,7 @@ func (a *Assembler) place(beat, tempoBPM float64, windowed bool) (flushedC *Comp
 	a.anchored = true
 	if beatIdx > a.cur.index {
 		if windowed {
-			flushedW = a.remainingWindows()
+			flushedW = append(a.flushPending(), a.remainingWindows()...)
 		} else {
 			flushedC = a.finish()
 		}
@@ -285,7 +291,11 @@ func (a *Assembler) AddWindows(beat, tempoBPM float64, samples []int16, numFrame
 	}
 	for numFrames > 0 {
 		if a.nextOff >= a.cur.frames {
-			out = append(out, a.remainingWindows()...) // no-op after exact coverage
+			if a.shortFinal(a.cur) && a.cur.emitted == a.cur.totalWindows-1 {
+				a.pending = a.cur // hold the short final for its continuation
+			} else {
+				out = append(out, a.remainingWindows()...) // no-op after exact coverage
+			}
 			a.cur = a.newBuf(a.cur.index+1, tempoBPM)
 			a.nextOff = 0
 		}
@@ -307,20 +317,71 @@ func (a *Assembler) AddWindows(beat, tempoBPM float64, samples []int16, numFrame
 		a.nextOff += n
 		samples = samples[n*a.channels:]
 		numFrames -= n
+		out = append(out, a.releasePending()...)
 		out = append(out, a.readyWindows()...)
 	}
 	return out
 }
 
-// FlushWindows emits the current interval's remaining windows (zero-padded,
-// ending with its final window) and clears it — the streaming counterpart of
-// Flush, for shutdown / channel removal.
-func (a *Assembler) FlushWindows() []Window {
-	if a.cur == nil {
+// shortFinal reports whether b's final window is shorter than a full window
+// (the interval length isn't window-aligned) and so needs continuation padding.
+func (a *Assembler) shortFinal(b *intervalBuf) bool {
+	return a.windowFrames > 0 && b.frames%a.windowFrames != 0
+}
+
+// releasePending emits the held final window once its successor interval has
+// accumulated enough head samples to pad it with real audio.
+func (a *Assembler) releasePending() []Window {
+	p := a.pending
+	if p == nil {
 		return nil
 	}
-	w := a.remainingWindows()
-	a.cur = nil
+	pad := p.totalWindows*a.windowFrames - p.frames
+	if a.cur == nil || a.cur.index != p.index+1 || a.cur.writtenFrames < pad {
+		return nil
+	}
+	a.pending = nil
+	return []Window{a.finalWindow(p, a.cur.pcm[:pad*a.channels])}
+}
+
+// flushPending emits the held final window zero-padded — for paths where no
+// continuation can exist (flush, re-anchor discontinuity).
+func (a *Assembler) flushPending() []Window {
+	p := a.pending
+	if p == nil {
+		return nil
+	}
+	a.pending = nil
+	return []Window{a.finalWindow(p, nil)}
+}
+
+// finalWindow builds b's final window: the interval tail plus continuation
+// samples (or zeros when cont is nil/short).
+func (a *Assembler) finalWindow(b *intervalBuf, cont []int16) Window {
+	k := b.totalWindows - 1
+	s := make([]int16, a.windowFrames*a.channels)
+	start := k * a.windowFrames * a.channels
+	tail := copy(s, b.pcm[start:])
+	copy(s[tail:], cont)
+	return Window{
+		IntervalIndex: b.index,
+		Number:        k,
+		Total:         b.totalWindows,
+		IsFinal:       true,
+		Samples:       s,
+	}
+}
+
+// FlushWindows emits any held final window plus the current interval's
+// remaining windows (zero-padded, ending with its final window) and clears the
+// assembler — the streaming counterpart of Flush, for shutdown / channel
+// removal.
+func (a *Assembler) FlushWindows() []Window {
+	w := a.flushPending()
+	if a.cur != nil {
+		w = append(w, a.remainingWindows()...)
+		a.cur = nil
+	}
 	if len(w) == 0 {
 		return nil
 	}
@@ -332,12 +393,17 @@ func (a *Assembler) FlushWindows() []Window {
 func (a *Assembler) DroppedBackfill() uint64 { return a.droppedBackfill }
 
 // readyWindows emits every window whose end is covered. Exact full coverage
-// also readies the (possibly short) final window without waiting for close.
+// also readies a full-length final window; a short final is withheld for the
+// continuation-pad path (releasePending / flushPending).
 func (a *Assembler) readyWindows() []Window {
 	b := a.cur
+	full := b.totalWindows
+	if a.shortFinal(b) {
+		full = b.totalWindows - 1
+	}
 	ready := b.writtenFrames / a.windowFrames
-	if b.writtenFrames >= b.frames || ready > b.totalWindows {
-		ready = b.totalWindows
+	if b.writtenFrames >= b.frames || ready > full {
+		ready = full
 	}
 	var out []Window
 	for k := b.emitted; k < ready; k++ {

@@ -767,6 +767,7 @@ func (e *linkAudioEngine) emitLoop() {
 func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localIdx, roomLabel int64) {
 	startBeat, endBeat := cfg.BeatWindow(localIdx)
 	totalFrames := intervalPlayoutFrames(cfg, engineInternalRate, tempo)
+	paddedFrames := intervalPaddedFrames(cfg, engineInternalRate, tempo)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -797,12 +798,28 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 		}
 
 		reasm := st.reasm
+		feeder := st.feeder
+		channels := st.channels
 		nextIdx := idx + 1
-		makeNext := func() (*emit.PacedReader, int64) {
+		// Runs when the cushion first crosses the playing interval's end
+		// (~cushion before the boundary, under e.mu via topUpSinks). When the
+		// final window's padding carries the next interval's real head (a
+		// continuation-padding sender), play the current reader through the
+		// pad and start the next reader past its twice-encoded head — the
+		// decoded stream then has no boundary discontinuity at all. Silent
+		// padding (old senders) keeps the truncate-at-interval-end handoff.
+		makeNext := func() (*emit.PacedReader, int64, int) {
+			start := 0
+			if cur := feeder.Current(); cur != nil && paddedFrames > totalFrames {
+				if s, _, _, ok := reasm.Interval(idx); ok && padCarriesAudio(s, totalFrames, paddedFrames, channels) {
+					cur.SetTotalFrames(paddedFrames)
+					start = paddedFrames - totalFrames
+				}
+			}
 			return emit.NewPacedReader(
 				func() []int16 { s, _, _, _ := reasm.Interval(nextIdx); return s },
-				st.channels, engineInternalRate, tempo, endBeat, totalFrames,
-			), nextIdx
+				channels, engineInternalRate, tempo, endBeat, totalFrames,
+			), nextIdx, start
 		}
 		if st.feeder.Promote(idx, makeNext) {
 			// Adopted the pre-rolled reader; re-anchor if tempo moved since pre-roll.
@@ -865,11 +882,4 @@ func max1(n int) int {
 		return 1
 	}
 	return n
-}
-
-func roundUp(n, multiple int) int {
-	if multiple <= 0 {
-		return n
-	}
-	return ((n + multiple - 1) / multiple) * multiple
 }

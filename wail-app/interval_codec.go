@@ -23,12 +23,48 @@ func samplesPerWaifFrame(sampleRate int) int { return sampleRate * waifFrameMs /
 
 // intervalPlayoutFrames is the exact frame count the playout reader emits for
 // one interval — deliberately NOT rounded up to WAIF-frame granularity. When
-// the interval isn't a multiple of the 20ms window (most tempos), the sender
-// zero-pads the final window; playing that padding splices silence into
-// continuous audio and stamps it past the next interval's anchor — an audible
-// click at every boundary. The pad stays in the reassembler, never read.
+// the interval isn't a multiple of the 20ms window (most tempos), the final
+// window carries padding past the interval end; playing zero padding splices
+// silence into continuous audio and stamps it past the next interval's anchor
+// — an audible click at every boundary.
 func intervalPlayoutFrames(cfg interval.Config, sampleRate uint32, tempoBPM float64) int {
 	return cfg.IntervalSamples(sampleRate, tempoBPM)
+}
+
+// intervalPaddedFrames is the interval length rounded up to whole WAIF
+// windows — the full extent of the reassembled buffer including the final
+// window's padding.
+func intervalPaddedFrames(cfg interval.Config, sampleRate uint32, tempoBPM float64) int {
+	return roundUp(intervalPlayoutFrames(cfg, sampleRate, tempoBPM), samplesPerWaifFrame(int(sampleRate)))
+}
+
+// padAudioFloor is the peak below which final-window padding is treated as
+// silence (a zero-padding pre-continuation sender): decoded zeros stay within
+// codec ringing of a few dozen; real program material sits far above.
+const padAudioFloor = 256
+
+// padCarriesAudio reports whether interval PCM s holds real audio in
+// [fromFrame, toFrame) — the continuation region a new sender fills with the
+// next interval's head. False when the region is absent or silent, keeping
+// old zero-padding senders on the truncate-at-interval-end playout path.
+func padCarriesAudio(s []int16, fromFrame, toFrame, channels int) bool {
+	lo, hi := fromFrame*channels, toFrame*channels
+	if lo < 0 || hi > len(s) {
+		return false
+	}
+	for _, v := range s[lo:hi] {
+		if v > padAudioFloor || v < -padAudioFloor {
+			return true
+		}
+	}
+	return false
+}
+
+func roundUp(n, multiple int) int {
+	if multiple <= 0 {
+		return n
+	}
+	return ((n + multiple - 1) / multiple) * multiple
 }
 
 // IntervalEncoder Opus-encodes interval PCM into WAIF frames for one stream.

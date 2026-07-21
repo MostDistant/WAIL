@@ -10,16 +10,18 @@ import (
 	"github.com/nicholasgasior/wail/wail-app/internal/playout"
 )
 
-// Interval-boundary continuity test: capture a continuous signal through the
+// Interval-boundary continuity tests: capture a continuous signal through the
 // real sender pieces (windowed assembler → reassembler), play it back through
 // the real receiver pieces (playout scheduler → paced readers → cushion
 // feeder) wired exactly like onBoundary/topUpSinks, and assert the emitted
 // stream is gapless in both PCM and beat stamps across interval boundaries.
 //
 // At tempos where the interval length is not a multiple of the 960-frame WAIF
-// window (e.g. 124.59 BPM → 369,853 frames), the sender zero-pads the final
-// window; playing that padding splices ~15ms of silence into continuous audio
-// and overlaps the next interval's stamps — an audible click at every boundary.
+// window (e.g. 124.59 BPM → 369,853 frames), the final window runs past the
+// interval end. A continuation-padding sender fills that pad with the next
+// interval's real head — the receiver plays through it and starts the next
+// interval past its twice-encoded head. A zero-padding (old) sender leaves it
+// silent — the receiver truncates at the exact interval end instead.
 
 const (
 	testEmitRate     = 48000
@@ -41,19 +43,15 @@ type emittedChunk struct {
 	samples []int16
 }
 
-// runBoundaryPlayback pushes nIntervals of continuous audio through capture
-// assembly into a reassembler, then plays it back across the interval
-// boundaries, returning the committed chunks in commit order.
-func runBoundaryPlayback(t *testing.T, tempo float64, cfg interval.Config, nIntervals int) []emittedChunk {
+// fillViaAssembler runs the continuous source through the real capture
+// assembler (a continuation-padding sender) into the reassembler.
+func fillViaAssembler(t *testing.T, reasm *emit.Reassembler, tempo float64, cfg interval.Config, nIntervals int) {
 	t.Helper()
 	windowFrames := samplesPerWaifFrame(testEmitRate)
 	intervalFrames := cfg.IntervalSamples(testEmitRate, tempo)
-	frameBeats := tempo / 60.0 / testEmitRate // beats spanned by one frame
+	frameBeats := tempo / 60.0 / testEmitRate
 
-	// --- sender: continuous signal through the windowed assembler ---
 	asm := capture.NewWindowed(cfg, testEmitChannels, testEmitRate, windowFrames)
-	reasm := emit.New(testEmitChannels, windowFrames)
-
 	const bufFrames = 480 // 10ms capture buffers
 	totalFeed := intervalFrames*nIntervals + testEmitRate/10
 	buf := make([]int16, bufFrames*testEmitChannels)
@@ -68,13 +66,44 @@ func runBoundaryPlayback(t *testing.T, tempo float64, cfg interval.Config, nInte
 			reasm.Add(w.IntervalIndex, w.Number, w.Samples, w.IsFinal, w.Total)
 		}
 	}
+}
+
+// fillZeroPad synthesizes an old sender: every interval's final window is
+// zero-padded past the interval end.
+func fillZeroPad(t *testing.T, reasm *emit.Reassembler, tempo float64, cfg interval.Config, nIntervals int) {
+	t.Helper()
+	windowFrames := samplesPerWaifFrame(testEmitRate)
+	intervalFrames := cfg.IntervalSamples(testEmitRate, tempo)
+	total := (intervalFrames + windowFrames - 1) / windowFrames
+
+	for idx := 0; idx < nIntervals; idx++ {
+		for k := 0; k < total; k++ {
+			w := make([]int16, windowFrames*testEmitChannels)
+			for f := 0; f < windowFrames; f++ {
+				src := k*windowFrames + f
+				if src >= intervalFrames {
+					break // zero pad
+				}
+				l, r := testSourceFrame(idx*intervalFrames + src)
+				w[f*testEmitChannels] = l
+				w[f*testEmitChannels+1] = r
+			}
+			reasm.Add(int64(idx), k, w, k == total-1, total)
+		}
+	}
+}
+
+// runBoundaryPlayback plays nIntervals of reassembled audio across the
+// interval boundaries, wired exactly like onBoundary + topUpSinks, returning
+// the committed chunks in commit order.
+func runBoundaryPlayback(t *testing.T, reasm *emit.Reassembler, tempo float64, cfg interval.Config, nIntervals int) []emittedChunk {
+	t.Helper()
 	for idx := int64(0); idx < int64(nIntervals); idx++ {
 		if !reasm.Complete(idx) {
 			t.Fatalf("interval %d not fully captured", idx)
 		}
 	}
 
-	// --- receiver: boundary handoff wired like onBoundary + topUpSinks ---
 	sched := playout.New(1) // D=1
 	feeder := emit.NewFeeder(testEmitCushion, testEmitChunk)
 	var out []emittedChunk
@@ -99,15 +128,24 @@ func runBoundaryPlayback(t *testing.T, tempo float64, cfg interval.Config, nInte
 		if !haveLast || localIdx > lastIdx {
 			ws, we := cfg.BeatWindow(localIdx)
 			totalFrames := intervalPlayoutFrames(cfg, testEmitRate, tempo)
+			paddedFrames := intervalPaddedFrames(cfg, testEmitRate, tempo)
 			release, advanced := sched.OnBoundary(localIdx)
 			if advanced {
 				reasm.Drop(release - 1)
 				nextIdx := release + 1
-				makeNext := func() (*emit.PacedReader, int64) {
+				idx := release
+				makeNext := func() (*emit.PacedReader, int64, int) {
+					start := 0
+					if cur := feeder.Current(); cur != nil && paddedFrames > totalFrames {
+						if s, _, _, ok := reasm.Interval(idx); ok && padCarriesAudio(s, totalFrames, paddedFrames, testEmitChannels) {
+							cur.SetTotalFrames(paddedFrames)
+							start = paddedFrames - totalFrames
+						}
+					}
 					return emit.NewPacedReader(
 						func() []int16 { s, _, _, _ := reasm.Interval(nextIdx); return s },
 						testEmitChannels, testEmitRate, tempo, we, totalFrames,
-					), nextIdx
+					), nextIdx, start
 				}
 				if !feeder.Promote(release, makeNext) {
 					feeder.SetCurrent(release, emit.NewPacedReader(
@@ -136,10 +174,9 @@ func assertBoundaryContinuity(t *testing.T, tempo float64, cfg interval.Config, 
 	frameBeats := tempo / 60.0 / testEmitRate
 	bpi := cfg.BeatsPerInterval()
 
-	// Beat stamps must be exactly contiguous chunk to chunk: any overlap (the
-	// padded tail stamped past the next interval's anchor) or gap is a splice
-	// on the Link Audio timeline. Allow one frame of slack for the sub-sample
-	// rounding residual of IntervalSamples at the interval handoff.
+	// Beat stamps must be exactly contiguous chunk to chunk: any overlap or
+	// gap is a splice on the Link Audio timeline. Allow one frame of slack for
+	// the sub-sample rounding residual of IntervalSamples at the handoff.
 	for i := 1; i < len(out); i++ {
 		prev := out[i-1]
 		want := prev.beat + float64(len(prev.samples)/testEmitChannels)*frameBeats
@@ -150,23 +187,25 @@ func assertBoundaryContinuity(t *testing.T, tempo float64, cfg interval.Config, 
 	}
 
 	// The emitted PCM must be the source signal, sample for sample — no
-	// inserted silence at boundaries. The first chunk may start a few frames
-	// into the stream (boundary detected a tick late; the feeder skips the
-	// shortfall silently), so align by the first chunk's beat stamp.
+	// inserted silence or repeats at boundaries. The first chunk may start a
+	// few frames into the stream (boundary detected a tick late; the feeder
+	// skips the shortfall silently), so align by the first chunk's beat stamp.
+	// Both handoff modes keep the concatenated stream contiguous in the source
+	// domain: a continuation handoff plays interval N through its pad and
+	// resumes N+1 past its twice-encoded head; a truncate handoff stops at the
+	// exact interval end and resumes N+1 at frame 0.
 	skip := int(math.Round((out[0].beat - bpi) * 60.0 / tempo * testEmitRate))
 	pos := skip // frame index into the continuous source signal
 	for ci, c := range out {
 		frames := len(c.samples) / testEmitChannels
 		for k := 0; k < frames; k++ {
-			// Interval N's reader frame f replays source frame
-			// intervalFrames*N + f, so pos indexes source frames directly.
 			srcIdx := pos + k
 			wl, wr := testSourceFrame(srcIdx)
 			gl, gr := c.samples[k*testEmitChannels], c.samples[k*testEmitChannels+1]
 			if gl != wl || gr != wr {
 				boundary := srcIdx / intervalFrames
 				into := srcIdx % intervalFrames
-				t.Fatalf("PCM mismatch in chunk %d at source frame %d (interval %d, frame %d, %.1fms from interval end): got (%d,%d), want (%d,%d) — inserted padding?",
+				t.Fatalf("PCM mismatch in chunk %d at source frame %d (interval %d, frame %d, %.1fms from interval end): got (%d,%d), want (%d,%d)",
 					ci, srcIdx, boundary, into,
 					float64(intervalFrames-into)*1000/testEmitRate, gl, gr, wl, wr)
 			}
@@ -181,7 +220,18 @@ func TestEmitBoundaryAtNonFrameAlignedTempo(t *testing.T) {
 	if cfg.IntervalSamples(testEmitRate, tempo)%samplesPerWaifFrame(testEmitRate) == 0 {
 		t.Fatal("test tempo unexpectedly frame-aligned; pick another tempo")
 	}
-	out := runBoundaryPlayback(t, tempo, cfg, 3)
+	reasm := emit.New(testEmitChannels, samplesPerWaifFrame(testEmitRate))
+	fillViaAssembler(t, reasm, tempo, cfg, 3)
+	out := runBoundaryPlayback(t, reasm, tempo, cfg, 3)
+	assertBoundaryContinuity(t, tempo, cfg, out)
+}
+
+func TestEmitBoundaryZeroPadSenderCompat(t *testing.T) {
+	cfg := interval.Config{Bars: 4, Quantum: 4}
+	tempo := 124.59
+	reasm := emit.New(testEmitChannels, samplesPerWaifFrame(testEmitRate))
+	fillZeroPad(t, reasm, tempo, cfg, 3)
+	out := runBoundaryPlayback(t, reasm, tempo, cfg, 3)
 	assertBoundaryContinuity(t, tempo, cfg, out)
 }
 
@@ -191,6 +241,8 @@ func TestEmitBoundaryAtFrameAlignedTempo(t *testing.T) {
 	if cfg.IntervalSamples(testEmitRate, tempo)%samplesPerWaifFrame(testEmitRate) != 0 {
 		t.Fatal("test tempo unexpectedly unaligned")
 	}
-	out := runBoundaryPlayback(t, tempo, cfg, 3)
+	reasm := emit.New(testEmitChannels, samplesPerWaifFrame(testEmitRate))
+	fillViaAssembler(t, reasm, tempo, cfg, 3)
+	out := runBoundaryPlayback(t, reasm, tempo, cfg, 3)
 	assertBoundaryContinuity(t, tempo, cfg, out)
 }
