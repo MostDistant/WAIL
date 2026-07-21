@@ -103,6 +103,15 @@ type captureChannel struct {
 	drain  context.CancelFunc
 	pacer  *pace.Sender
 
+	// Cumulative diagnostics, mirrored from drain-goroutine-owned state each
+	// tick so Health() can read them race-free from other goroutines.
+	statRingDropped atomic.Uint64
+	statLANLost     atomic.Uint64
+	statLANGaps     atomic.Uint64
+	statResnaps     atomic.Uint64
+	statLate        atomic.Uint64
+	statBackfill    atomic.Uint64
+
 	// Capture dump (debug). Owned by the drain goroutine; dumpGen tracks which
 	// dump session this writer belongs to so a toggle-off/on reopens fresh files.
 	dump    *captureDump
@@ -450,6 +459,15 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 			return
 		case <-t.C:
 			e.reconcileDump(ch)
+			ch.statRingDropped.Store(ch.source.Dropped())
+			ch.statLANLost.Store(ch.loss.LostBuffers())
+			ch.statLANGaps.Store(ch.loss.GapEvents())
+			if n := ch.asm.Resnaps(); n > ch.statResnaps.Load() {
+				log.Printf("[audio] capture re-anchored on %q: stamp diverged past threshold — audible splice (total %d)", ch.name, n)
+				ch.statResnaps.Store(n)
+			}
+			ch.statLate.Store(ch.asm.DroppedLate())
+			ch.statBackfill.Store(ch.asm.DroppedBackfill())
 			e.link.CaptureAppSessionState(ss)
 			quantum := e.quantumSnapshot() // stable within a tick; snapshot once, not per buffer
 			for {
@@ -600,6 +618,29 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		st.reasm.Add(f.IntervalIndex, int(f.FrameNumber), pcm, f.IsFinal, int(f.TotalFrames))
 	}
 	e.mu.Unlock()
+}
+
+// Health sums the per-channel and per-stream diagnostic counters. Capture-side
+// values are drain-goroutine mirrors (atomics); emit-side counters are atomics
+// on their streams; the maps themselves are guarded by e.mu.
+func (e *linkAudioEngine) Health() EngineHealth {
+	var h EngineHealth
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, ch := range e.capture {
+		h.CaptureRingDropped += ch.statRingDropped.Load()
+		h.CaptureLANLostBuffers += ch.statLANLost.Load()
+		h.CaptureLANGapEvents += ch.statLANGaps.Load()
+		h.CaptureResnaps += ch.statResnaps.Load()
+		h.CaptureDroppedLate += ch.statLate.Load()
+		h.CaptureDroppedBackfill += ch.statBackfill.Load()
+	}
+	for _, st := range e.emit {
+		h.EmitIntervalsIncomplete += st.intervalsIncomplete.Load()
+		h.OpusDecodeFailures += st.decodeFailures.Load()
+	}
+	h.WireDecodeFailures = e.wireDecodeFailures.Load()
+	return h
 }
 
 // emitLoop detects local interval boundaries and paces released intervals into

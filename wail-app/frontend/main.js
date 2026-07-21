@@ -784,6 +784,29 @@ function renderStatus(s) {
   }
 }
 
+// Engine health counters: [json key, friendly label]. Each increment is a
+// likely-audible event on the local audio path.
+const HEALTH_FIELDS = [
+  ['capture_ring_dropped', 'Capture ring drops'],
+  ['capture_lan_lost_buffers', 'Capture LAN loss (buffers)'],
+  ['capture_lan_gap_events', 'Capture LAN loss (events)'],
+  ['capture_resnaps', 'Capture re-anchors (drift snaps)'],
+  ['capture_dropped_late', 'Capture late drops'],
+  ['capture_dropped_backfill', 'Capture backfill drops'],
+  ['emit_intervals_incomplete', 'Incomplete intervals (played partial)'],
+  ['wire_decode_failures', 'Wire decode failures'],
+  ['opus_decode_failures', 'Opus decode failures'],
+];
+
+function renderHealth(health) {
+  const el = document.getElementById('network-health');
+  if (!el || !health) return;
+  el.innerHTML = HEALTH_FIELDS.map(([key, label]) => {
+    const v = health[key] || 0;
+    return `<div class="health-row"><span>${label}</span><span class="${v > 0 ? 'health-bad' : ''}">${v}</span></div>`;
+  }).join('');
+}
+
 function renderNetwork(peers) {
   const tbody = document.getElementById('network-table-body');
   if (peers.length === 0) {
@@ -872,6 +895,7 @@ async function setupListeners() {
     networkSnapshots.push(snap);
     if (networkSnapshots.length > STATS_WINDOW_SIZE) networkSnapshots.shift();
     renderNetwork(peers);
+    renderHealth(event.payload.health);
   }));
 }
 

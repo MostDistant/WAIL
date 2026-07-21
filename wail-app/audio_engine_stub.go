@@ -19,3 +19,4 @@ func (s *stubAudioEngine) RoomIndex(_ int64) (int64, bool)                      
 func (s *stubAudioEngine) CaptureChannels() []CaptureChannelInfo                 { return nil }
 func (s *stubAudioEngine) SetCaptureEnabled(_ string, _ bool)                    {}
 func (s *stubAudioEngine) SetCaptureDump(_ bool)                                 {}
+func (s *stubAudioEngine) Health() EngineHealth                                  { return EngineHealth{} }

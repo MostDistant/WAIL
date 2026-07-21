@@ -36,6 +36,23 @@ type AudioEngine interface {
 	// writes two WAV files — the PCM fed to Opus and that audio decoded as a
 	// receiver would — for diagnosing where transmitted audio degrades.
 	SetCaptureDump(enabled bool)
+	// Health snapshots the engine's cumulative diagnostic counters. Each
+	// increment marks an event that risks an audible artifact; the session
+	// diffs snapshots to surface them in the log panel and Network tab.
+	Health() EngineHealth
+}
+
+// EngineHealth is a snapshot of cumulative audio-path diagnostics.
+type EngineHealth struct {
+	CaptureRingDropped      uint64 `json:"capture_ring_dropped"`       // RT ring overwrote buffers (drainer stalled)
+	CaptureLANLostBuffers   uint64 `json:"capture_lan_lost_buffers"`   // Link Audio buffers lost on the capture hop
+	CaptureLANGapEvents     uint64 `json:"capture_lan_gap_events"`     // distinct capture-hop loss events
+	CaptureResnaps          uint64 `json:"capture_resnaps"`            // assembler re-anchors (stamp discontinuity)
+	CaptureDroppedLate      uint64 `json:"capture_dropped_late"`       // buffers for already-emitted intervals
+	CaptureDroppedBackfill  uint64 `json:"capture_dropped_backfill"`   // buffers behind the emitted-window boundary
+	EmitIntervalsIncomplete uint64 `json:"emit_intervals_incomplete"`  // intervals released with missing frames
+	WireDecodeFailures      uint64 `json:"wire_decode_failures"`       // WAIF wire-decode errors
+	OpusDecodeFailures      uint64 `json:"opus_decode_failures"`       // Opus decode errors
 }
 
 // CaptureChannelInfo describes a discovered local Link Audio channel for the UI.

@@ -196,6 +196,10 @@ func sessionLoop(
 	loopbackEnabled := false
 	loopbackState := NewPeerState(nil)
 
+	// Engine diagnostics: diffed each status tick so every likely-audible event
+	// (capture loss, re-anchor, incomplete interval, …) surfaces in the log panel.
+	var lastHealth EngineHealth
+
 	// In-app senders (test tone / WAV) push completed WAIF frames here; the loop
 	// forwards them to the relay. Real capture goes straight through the Link
 	// Audio engine (audio_engine_real.go).
@@ -911,9 +915,30 @@ func sessionLoop(
 			audioStatusSeq++
 			mesh.Broadcast(NewAudioStatus(dcOpen, audioIntervalsSent, audioIntervalsReceived, true, audioStatusSeq))
 
+			// Engine health: log any counter that moved (each increment is a
+			// likely-audible event), then ship the snapshot with the network event.
+			health := audioEngine.Health()
+			if health != lastHealth {
+				delta := func(what string, prev, now uint64) {
+					if now > prev {
+						logWarn("[audio] %s +%d (total %d)", what, now-prev, now)
+					}
+				}
+				delta("capture ring dropped buffers (drain stalled — audible gap)", lastHealth.CaptureRingDropped, health.CaptureRingDropped)
+				delta("capture LAN loss: buffers lost on the Link Audio hop", lastHealth.CaptureLANLostBuffers, health.CaptureLANLostBuffers)
+				delta("capture LAN loss events", lastHealth.CaptureLANGapEvents, health.CaptureLANGapEvents)
+				delta("capture re-anchor (stamp discontinuity — audible splice)", lastHealth.CaptureResnaps, health.CaptureResnaps)
+				delta("capture dropped late buffers", lastHealth.CaptureDroppedLate, health.CaptureDroppedLate)
+				delta("capture dropped backfill buffers", lastHealth.CaptureDroppedBackfill, health.CaptureDroppedBackfill)
+				delta("playout released incomplete intervals (played partial — audible dropout)", lastHealth.EmitIntervalsIncomplete, health.EmitIntervalsIncomplete)
+				delta("WAIF wire decode failures", lastHealth.WireDecodeFailures, health.WireDecodeFailures)
+				delta("Opus decode failures", lastHealth.OpusDecodeFailures, health.OpusDecodeFailures)
+				lastHealth = health
+			}
+
 			// Send metrics + build network event
 			perPeer := make(map[string]PeerFrameReport)
-			networkInfos := make([]PeerNetworkInfo, 0, len(connected))
+			networkInfos := make([]PeerNetworkInfo, 0, len(connected)+1)
 			for _, p := range connected {
 				var fr, lost, lossEvents, reorderEvents, audioRecv uint64
 				peers.WithPeer(p, func(ps *PeerState) {
@@ -947,7 +972,20 @@ func sessionLoop(
 					FramesReceived: fr, PacketsLost: lost, LossEvents: lossEvents,
 				})
 			}
-			emitter.Emit("peers:network", PeersNetwork{Peers: networkInfos})
+			// The loopback echo is not a peer, but its receive/loss stats are —
+			// show them as their own row while it has seen traffic.
+			if loopbackState.TotalFramesReceived > 0 {
+				name := displayName + " (loopback)"
+				networkInfos = append(networkInfos, PeerNetworkInfo{
+					PeerID: "loopback", DisplayName: &name,
+					ConnectionState: "loopback",
+					AudioRecv:       loopbackState.TotalFramesReceived,
+					FramesReceived:  loopbackState.TotalFramesReceived,
+					PacketsLost:     loopbackState.PacketsLost,
+					LossEvents:      loopbackState.LossEvents,
+				})
+			}
+			emitter.Emit("peers:network", PeersNetwork{Peers: networkInfos, Health: health})
 			mesh.SendMetricsReport(dcOpen, true, perPeer, localDropCount.Load(), boundaryDriftUs)
 		}
 	}
