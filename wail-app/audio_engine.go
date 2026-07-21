@@ -32,6 +32,10 @@ type AudioEngine interface {
 	CaptureChannels() []CaptureChannelInfo
 	// SetCaptureEnabled toggles whether a discovered channel is bridged.
 	SetCaptureEnabled(channelID string, on bool)
+	// SetCaptureDump toggles a debug dump: while on, each enabled capture channel
+	// writes two WAV files — the PCM fed to Opus and that audio decoded as a
+	// receiver would — for diagnosing where transmitted audio degrades.
+	SetCaptureDump(enabled bool)
 }
 
 // CaptureChannelInfo describes a discovered local Link Audio channel for the UI.

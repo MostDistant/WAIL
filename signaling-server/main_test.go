@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -311,5 +312,139 @@ func TestJoinExemptFromTextRateLimit(t *testing.T) {
 			continue // skip warnings, keep reading
 		}
 		t.Fatalf("unexpected message type: %v", resp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Loopback (server echo of own audio) tests
+// ---------------------------------------------------------------------------
+
+// readBinaryFrame reads until a binary frame arrives (skipping text messages),
+// returning its sender-prefix and payload; ok=false on read timeout. The
+// connection must not be reused after a timeout.
+func readBinaryFrame(t *testing.T, ws *websocket.Conn, timeout time.Duration) (string, []byte, bool) {
+	t.Helper()
+	ws.SetReadDeadline(time.Now().Add(timeout))
+	for {
+		msgType, data, err := ws.ReadMessage()
+		if err != nil {
+			return "", nil, false
+		}
+		if msgType != websocket.BinaryMessage {
+			continue
+		}
+		if len(data) < 1 || len(data) < 1+int(data[0]) {
+			t.Fatalf("malformed binary frame: %v", data)
+		}
+		pidLen := int(data[0])
+		return string(data[1 : 1+pidLen]), data[1+pidLen:], true
+	}
+}
+
+func setLoopback(t *testing.T, ws *websocket.Conn, enabled bool) {
+	t.Helper()
+	if err := ws.WriteJSON(map[string]any{"type": "set_loopback", "enabled": enabled}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoopbackEchoesOwnAudio(t *testing.T) {
+	_, srv := testServer(t)
+	wsA := dialWS(t, srv)
+	wsB := dialWS(t, srv)
+	joinRoom(t, wsA, "loop-room", "looper", 1)
+	joinRoom(t, wsB, "loop-room", "listener", 1)
+
+	setLoopback(t, wsA, true)
+	payload := []byte("WAIF-test-payload")
+	if err := wsA.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sender gets its own frame back, prefixed with its own peer ID.
+	from, data, ok := readBinaryFrame(t, wsA, 2*time.Second)
+	if !ok {
+		t.Fatal("expected loopback echo, got none")
+	}
+	if from != "looper" {
+		t.Fatalf("echo from = %q, want %q", from, "looper")
+	}
+	if !bytes.Equal(data, payload) {
+		t.Fatalf("echo payload = %q, want %q", data, payload)
+	}
+
+	// Normal broadcast to the other peer is unaffected.
+	from, data, ok = readBinaryFrame(t, wsB, 2*time.Second)
+	if !ok || from != "looper" || !bytes.Equal(data, payload) {
+		t.Fatalf("listener frame = (%q, %q, %v), want (looper, payload, true)", from, data, ok)
+	}
+}
+
+func TestNoLoopbackByDefault(t *testing.T) {
+	_, srv := testServer(t)
+	wsA := dialWS(t, srv)
+	wsB := dialWS(t, srv)
+	joinRoom(t, wsA, "noloop-room", "sender", 1)
+	joinRoom(t, wsB, "noloop-room", "receiver", 1)
+
+	payload := []byte("no-echo-please")
+	if err := wsA.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+		t.Fatal(err)
+	}
+
+	// Receiver gets it — proves the frame was relayed.
+	from, data, ok := readBinaryFrame(t, wsB, 2*time.Second)
+	if !ok || from != "sender" || !bytes.Equal(data, payload) {
+		t.Fatalf("receiver frame = (%q, %q, %v), want (sender, payload, true)", from, data, ok)
+	}
+
+	// Sender must NOT get an echo.
+	if from, _, ok := readBinaryFrame(t, wsA, 500*time.Millisecond); ok {
+		t.Fatalf("unexpected echo to sender from %q with loopback off", from)
+	}
+}
+
+func TestLoopbackDisable(t *testing.T) {
+	_, srv := testServer(t)
+	ws := dialWS(t, srv)
+	joinRoom(t, ws, "toggle-room", "toggler", 1)
+
+	setLoopback(t, ws, true)
+	if err := ws.WriteMessage(websocket.BinaryMessage, []byte("on")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := readBinaryFrame(t, ws, 2*time.Second); !ok {
+		t.Fatal("expected echo while enabled")
+	}
+
+	setLoopback(t, ws, false)
+	if err := ws.WriteMessage(websocket.BinaryMessage, []byte("off")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := readBinaryFrame(t, ws, 500*time.Millisecond); ok {
+		t.Fatal("unexpected echo after disable")
+	}
+}
+
+func TestLoopbackResetsOnRejoin(t *testing.T) {
+	_, srv := testServer(t)
+	ws := dialWS(t, srv)
+	joinRoom(t, ws, "rejoin-room", "rejoiner", 1)
+
+	setLoopback(t, ws, true)
+	if err := ws.WriteMessage(websocket.BinaryMessage, []byte("pre")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := readBinaryFrame(t, ws, 2*time.Second); !ok {
+		t.Fatal("expected echo while enabled")
+	}
+
+	// Re-joining resets loopback to off (clients must re-send after reconnect).
+	joinRoom(t, ws, "rejoin-room", "rejoiner", 1)
+	if err := ws.WriteMessage(websocket.BinaryMessage, []byte("post")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := readBinaryFrame(t, ws, 500*time.Millisecond); ok {
+		t.Fatal("unexpected echo after rejoin — loopback should reset")
 	}
 }

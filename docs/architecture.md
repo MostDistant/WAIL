@@ -166,6 +166,9 @@ On the receiver side, `internal/emit.Reassembler` collects decoded WAIF frames p
 3. All sync and audio data flows through the server (no direct P2P connections)
    - Sync: JSON text frames relayed via "sync" / "sync_to" message types
    - Audio: binary WebSocket frames relayed with sender header prepended by server
+   - Loopback (debug): a "set_loopback" message opts the sender into receiving its
+     own audio frames back from the relay (off by default, reset on rejoin); the
+     client republishes them as a "(loopback)" Link Audio channel one interval late
 ```
 
 ### LAN Peer Detection

@@ -135,6 +135,9 @@ type SignalMessage struct {
 	Message     string `json:"message,omitempty"`
 	TimestampUs uint64 `json:"timestamp_us,omitempty"`
 
+	// Loopback (set_loopback: relay echoes our own audio frames back)
+	Enabled bool `json:"enabled,omitempty"`
+
 	// MetricsReport
 	DCOpen          bool                       `json:"dc_open,omitempty"`
 	PluginConnected bool                       `json:"plugin_connected,omitempty"`

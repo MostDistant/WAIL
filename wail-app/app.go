@@ -309,6 +309,30 @@ func (a *App) SetCaptureEnabled(channelID string, enabled bool) error {
 	return nil
 }
 
+// SetCaptureDump toggles the debug capture-to-WAV dump. While on, each enabled
+// capture channel writes a pre-Opus and a post-Opus WAV under ~/.wail/dumps/
+// (the destination is logged); used to diagnose where transmitted audio degrades.
+func (a *App) SetCaptureDump(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetCaptureDump", Enabled: enabled}
+	}
+	return nil
+}
+
+// SetLoopback toggles the server-echo loopback: the relay sends our own audio
+// frames back to us and they are republished as a "(loopback)" Link Audio
+// channel one interval late — a live monitor of exactly what peers hear.
+func (a *App) SetLoopback(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetLoopback", Enabled: enabled}
+	}
+	return nil
+}
+
 // RenameStream updates a stream name.
 func (a *App) RenameStream(streamIndex uint16, name string) error {
 	a.mu.Lock()

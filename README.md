@@ -87,6 +87,8 @@ WAIL has two components that work together:
 
 **Changing tempo mid-jam** — Not recommended. WAIL uses NINJAM-style intervals, so audio is recorded and played back in full interval chunks. If you change the tempo, the current interval must finish before the new tempo takes effect. If you do need to change tempo, agree on it beforehand and have one person change it — Link will propagate it to all peers within a few seconds.
 
+**Debugging what you're sending** — Two live toggles under *Capture channels*: **Dump capture to WAV** writes each enabled channel's audio to pre-Opus and post-Opus WAV files under `~/.wail/dumps` (A/B them to localize where audio degrades). **Loopback my audio via server** asks the relay to echo your own audio back; it reappears one interval late as a `(loopback)` Link Audio channel — subscribe to it in your DAW to hear exactly what remote peers hear, including the full encode → relay → decode round trip.
+
 ## Development
 
 See [DEVELOPMENT.md](DEVELOPMENT.md) for build instructions, project structure, and testing.

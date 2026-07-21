@@ -1034,6 +1034,24 @@ summary:hover {
   width: auto;
   margin: 0;
 }
+/* Debug dump toggle — a normal checkbox row, overriding the `.capture-mixer > label`
+   header styling it would otherwise inherit as a direct child. */
+.capture-dump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.capture-dump input {
+  width: auto;
+  margin: 0;
+}
 
 /* --- Stats mode toggle --- */
 .stats-mode-toggle {

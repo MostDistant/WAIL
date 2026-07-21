@@ -334,6 +334,11 @@ func ConnectSignaling(
 						"ipc_drops":         msg.IPCDrops,
 						"boundary_drift_us": msg.BoundaryDriftUs,
 					}
+				case "Loopback":
+					raw = map[string]any{
+						"type":    "set_loopback",
+						"enabled": msg.Enabled,
+					}
 				default:
 					continue
 				}
@@ -520,6 +525,12 @@ func (m *PeerMesh) SendLog(level, target, message string, timestampUs uint64) {
 		Type: "LogBroadcast", Level: level, Target: target,
 		Message: message, TimestampUs: timestampUs,
 	})
+}
+
+// SendLoopback asks the relay to echo (or stop echoing) our own audio frames
+// back to us — the server-echo loopback debug monitor.
+func (m *PeerMesh) SendLoopback(enabled bool) {
+	m.signaling.SendControl(SignalMessage{Type: "Loopback", Enabled: enabled})
 }
 
 // SendMetricsReport sends a metrics report to the signaling server.

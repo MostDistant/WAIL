@@ -63,6 +63,8 @@ type clientMsg struct {
 	To            string          `json:"to,omitempty"`
 	From          string          `json:"from,omitempty"`
 	Payload       json.RawMessage `json:"payload,omitempty"`
+	// set_loopback: echo the sender's own audio frames back to it
+	Enabled bool `json:"enabled,omitempty"`
 	// Log broadcast fields
 	Level       string `json:"level,omitempty"`
 	Target      string `json:"target,omitempty"`
@@ -594,7 +596,8 @@ func (h *hub) syncTo(room, peerID string, c *conn, msg clientMsg) {
 // broadcastAudioBinary is the hot path (~50 calls/sec/peer). No locks held during iteration.
 // room and peerID are passed as value parameters captured by readPump at join time,
 // avoiding unsynchronized reads of c.room/c.peerID (which may be cleared by eviction/leave).
-func (h *hub) broadcastAudioBinary(room, peerID string, c *conn, data []byte) {
+// loopback additionally echoes the frame back to the sender (set_loopback opt-in).
+func (h *hub) broadcastAudioBinary(room, peerID string, c *conn, data []byte, loopback bool) {
 	if room == "" { return }
 	r := h.getRoom(room)
 	if r == nil { return }
@@ -607,7 +610,7 @@ func (h *hub) broadcastAudioBinary(room, peerID string, c *conn, data []byte) {
 
 	wsMsg := wsMessage{websocket.BinaryMessage, frame}
 	for _, e := range r.loadConns() {
-		if e.peerID != peerID { e.c.sendWS(wsMsg) }
+		if e.peerID != peerID || loopback { e.c.sendWS(wsMsg) }
 	}
 }
 
@@ -769,6 +772,8 @@ func (c *conn) readPump(h *hub) {
 	var binaryBucket *tokenBucket
 	var violations int
 	var warned bool
+	// Echo this peer's own audio back to it (set_loopback opt-in; reset on join).
+	var loopback bool
 
 	for {
 		msgType, raw, err := c.ws.ReadMessage()
@@ -790,7 +795,7 @@ func (c *conn) readPump(h *hub) {
 				}
 				continue
 			}
-			h.broadcastAudioBinary(room, peerID, c, raw)
+			h.broadcastAudioBinary(room, peerID, c, raw, loopback)
 			continue
 		}
 
@@ -820,6 +825,7 @@ func (c *conn) readPump(h *hub) {
 			if room != "" { h.leave(room, peerID, c) }
 			var sc int
 			room, peerID, sc = h.join(c, msg)
+			loopback = false
 			if room != "" {
 				bb := newTokenBucket(baseBinaryRate*float64(sc), baseBinaryBurst*float64(sc))
 				binaryBucket = &bb
@@ -839,6 +845,11 @@ func (c *conn) readPump(h *hub) {
 			room, peerID = "", ""
 		case "metrics_report":
 			h.metricsReport(room, peerID, c, msg)
+		case "set_loopback":
+			if room != "" {
+				loopback = msg.Enabled
+				log.Printf("peer %s loopback=%v in room %s", peerID, loopback, room)
+			}
 		}
 	}
 }

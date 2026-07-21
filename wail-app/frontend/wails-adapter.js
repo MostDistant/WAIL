@@ -42,6 +42,8 @@
         'cleanup_recordings': 'main.App.CleanupRecordings',
         'get_active_session': 'main.App.GetActiveSession',
         'set_capture_enabled': 'main.App.SetCaptureEnabled',
+        'set_capture_dump': 'main.App.SetCaptureDump',
+        'set_loopback': 'main.App.SetLoopback',
         'rename_stream': 'main.App.RenameStream',
         'get_app_version': 'main.App.GetAppVersion',
     };
@@ -61,6 +63,8 @@
         'cleanup_recordings': ['directory', 'retentionDays'],
         'rename_stream': ['streamIndex', 'name'],
         'set_capture_enabled': ['channelID', 'enabled'],
+        'set_capture_dump': ['enabled'],
+        'set_loopback': ['enabled'],
     };
 
     async function invoke(command, args) {

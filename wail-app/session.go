@@ -33,14 +33,14 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
 	StreamIndex *uint16
 	WavFile     string
 	ChannelID   string // SetCaptureEnabled
-	Enabled     bool   // SetCaptureEnabled
+	Enabled     bool   // SetCaptureEnabled, SetCaptureDump, SetLoopback
 }
 
 // SessionHandle represents a running session.
@@ -189,6 +189,12 @@ func sessionLoop(
 	var wavSenderBoundaryCh chan IntervalBoundaryInfo
 	var wavSenderCancelFn context.CancelFunc
 	var wavSenderStream *uint16
+
+	// Server-echo loopback (debug): the relay echoes our own audio frames back
+	// and we republish them as a "(loopback)" Link Audio channel. loopbackState
+	// is a detached PeerState for loss tracking only — self is not a peer.
+	loopbackEnabled := false
+	loopbackState := NewPeerState(nil)
 
 	// In-app senders (test tone / WAV) push completed WAIF frames here; the loop
 	// forwards them to the relay. Real capture goes straight through the Link
@@ -395,6 +401,13 @@ func sessionLoop(
 			case "SetCaptureEnabled":
 				audioEngine.SetCaptureEnabled(cmd.ChannelID, cmd.Enabled)
 				logInfo("[capture] channel %s enabled=%v", cmd.ChannelID, cmd.Enabled)
+			case "SetCaptureDump":
+				audioEngine.SetCaptureDump(cmd.Enabled)
+				logInfo("[capture] dump enabled=%v", cmd.Enabled)
+			case "SetLoopback":
+				loopbackEnabled = cmd.Enabled
+				mesh.SendLoopback(cmd.Enabled)
+				logInfo("[loopback] server echo enabled=%v", cmd.Enabled)
 			case "Disconnect":
 				logInfo("Disconnecting...")
 				goto cleanup
@@ -475,6 +488,11 @@ func sessionLoop(
 				currentSyncRx = newChannels.SyncCh
 				currentAudioRx = newChannels.AudioCh
 				sigMu.Unlock()
+
+				// The relay resets loopback on rejoin; re-arm it.
+				if loopbackEnabled {
+					mesh.SendLoopback(true)
+				}
 
 				// Restart signaling poll goroutine
 				sigEventCh2 := make(chan *MeshEvent, 64)
@@ -613,6 +631,26 @@ func sessionLoop(
 		case fpa := <-currentAudioRx:
 			from := fpa.From
 			data := fpa.Data
+
+			// Server-echo loopback: our own frames round-tripped through the
+			// relay. Self is not a peer — skip the registry/slots/recorder and
+			// hand straight to the engine under a distinct identity so it
+			// republishes as a "(loopback)" monitor channel.
+			if from == peerID {
+				if header := PeekWaifHeader(data); header != nil {
+					if loss := recordFrame(loopbackState, header); loss != nil {
+						logWarn("loopback packet_loss stream=%d lost=%d expected_seq=%d got_seq=%d interval=%d",
+							loss.StreamID, loss.Lost, loss.ExpectedSeq, loss.GotSeq, loss.IntervalIdx)
+					}
+				}
+				audioIntervalsReceived++
+				audioBytesRecv += uint64(len(data))
+				intervalFramesRecv++
+				intervalBytesRecv += uint64(len(data))
+				audioEngine.HandleRemoteAudio(identity+":loopback", displayName+" (loopback)", "", data)
+				continue
+			}
+
 			peers.WithPeer(from, func(p *PeerState) {
 				p.LastSeen = time.Now()
 				p.EverReceivedMessage = true

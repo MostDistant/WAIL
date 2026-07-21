@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -66,10 +68,19 @@ type linkAudioEngine struct {
 	wireDecodeFailures atomic.Uint64 // WAIF wire-decode errors (pre-Opus)
 	unlabeledWindows   atomic.Uint64 // capture windows dropped before a room anchor
 
+	// Capture-dump debug toggle. dumpEnabled/dumpGen are read lock-free on the
+	// hot path; dumpDir (resolved fresh per enable) is read under mu only when a
+	// drain goroutine actually opens a dump. The dump files themselves are owned
+	// entirely by each channel's drain goroutine (open/write/close), so nothing
+	// races with the SetCaptureDump toggle.
+	dumpEnabled atomic.Bool
+	dumpGen     atomic.Uint64
+
 	mu       sync.Mutex
 	labeler  interval.RoomLabeler
 	cfg      interval.Config
 	tempoBPM float64
+	dumpDir  string // guarded by mu; current dump session directory
 
 	capture      map[string]*captureChannel // by channel-id hex
 	emit         map[affinity.Key]*emitStream
@@ -91,6 +102,11 @@ type captureChannel struct {
 	seq    uint32
 	drain  context.CancelFunc
 	pacer  *pace.Sender
+
+	// Capture dump (debug). Owned by the drain goroutine; dumpGen tracks which
+	// dump session this writer belongs to so a toggle-off/on reopens fresh files.
+	dump    *captureDump
+	dumpGen uint64
 }
 
 type emitStream struct {
@@ -239,6 +255,71 @@ func (e *linkAudioEngine) SetCaptureEnabled(channelID string, on bool) {
 	}
 }
 
+// SetCaptureDump toggles the debug capture-to-WAV dump (pre-Opus + post-Opus)
+// for every enabled capture channel. Enabling resolves a fresh session
+// directory and bumps the generation; each channel's drain goroutine notices on
+// its next tick and opens/closes its own files (so file I/O never leaves that
+// goroutine — no race with this toggle).
+func (e *linkAudioEngine) SetCaptureDump(enabled bool) {
+	if !enabled {
+		if e.dumpEnabled.CompareAndSwap(true, false) {
+			log.Printf("[audio] capture dump: disabled")
+		}
+		return
+	}
+	if e.dumpEnabled.Load() {
+		return // already on
+	}
+	dir := filepath.Join(defaultDataDir(), "dumps", time.Now().Format("2006-01-02_15-04-05"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("[audio] capture dump: cannot create %s: %v", dir, err)
+		return
+	}
+	e.mu.Lock()
+	e.dumpDir = dir
+	e.mu.Unlock()
+	// Bump generation before flipping the flag: any goroutine that observes the
+	// flag as on (Go atomics are sequentially consistent) also sees the new gen.
+	e.dumpGen.Add(1)
+	e.dumpEnabled.Store(true)
+	log.Printf("[audio] capture dump: enabled → %s", dir)
+}
+
+// reconcileDump opens or closes ch.dump to match the engine's dump toggle. Runs
+// only on ch's drain goroutine, which therefore owns the dump files exclusively.
+func (e *linkAudioEngine) reconcileDump(ch *captureChannel) {
+	if e.dumpEnabled.Load() {
+		gen := e.dumpGen.Load()
+		if ch.dump != nil && ch.dumpGen == gen {
+			return // already dumping this session
+		}
+		if ch.dump != nil {
+			ch.dump.Close()
+			ch.dump = nil
+		}
+		e.mu.Lock()
+		dir := e.dumpDir
+		e.mu.Unlock()
+		name := sanitizeFilename(ch.name)
+		if name == "" {
+			name = "channel"
+		}
+		name = fmt.Sprintf("%s_stream%d", name, ch.streamID)
+		d, err := newCaptureDump(dir, name, 2, engineInternalRate)
+		if err != nil {
+			log.Printf("[audio] capture dump: open failed for %q: %v", ch.name, err)
+			return
+		}
+		ch.dump = d
+		ch.dumpGen = gen
+		log.Printf("[audio] capture dump: writing %q → %s", ch.name, dir)
+	} else if ch.dump != nil {
+		ch.dump.Close()
+		ch.dump = nil
+		log.Printf("[audio] capture dump: stopped for %q", ch.name)
+	}
+}
+
 // --- capture ---
 
 // discoveryLoop periodically reconciles discovered local Link Audio channels
@@ -350,6 +431,14 @@ func (e *linkAudioEngine) stopCaptureLocked(ch *captureChannel) {
 
 func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) {
 	defer e.wg.Done()
+	// Close any active dump on the same goroutine that writes it (teardown races
+	// only against a context cancel, never a concurrent write).
+	defer func() {
+		if ch.dump != nil {
+			ch.dump.Close()
+			ch.dump = nil
+		}
+	}()
 	ss := abllink.NewSessionState()
 	defer ss.Close()
 	t := time.NewTicker(engineTickInterval)
@@ -360,6 +449,7 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			e.reconcileDump(ch)
 			e.link.CaptureAppSessionState(ss)
 			quantum := e.quantumSnapshot() // stable within a tick; snapshot once, not per buffer
 			for {
@@ -421,6 +511,9 @@ func (e *linkAudioEngine) emitWindow(ch *captureChannel, w capture.Window) {
 		return
 	}
 	ch.seq++
+	if ch.dump != nil {
+		ch.dump.writePair(w.Samples, wire)
+	}
 	ch.pacer.Enqueue([][]byte{wire})
 }
 

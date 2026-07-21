@@ -62,6 +62,22 @@ function renderCaptureMixer(channels) {
   });
 }
 
+// Debug capture-to-WAV dump toggle (live; engine defaults to off per session).
+const captureDumpToggle = document.getElementById('capture-dump-toggle');
+if (captureDumpToggle) {
+  captureDumpToggle.addEventListener('change', () => {
+    invoke('set_capture_dump', { enabled: captureDumpToggle.checked }).catch(() => {});
+  });
+}
+
+// Debug server-echo loopback toggle (live; relay defaults to off per session).
+const loopbackToggle = document.getElementById('loopback-toggle');
+if (loopbackToggle) {
+  loopbackToggle.addEventListener('change', () => {
+    invoke('set_loopback', { enabled: loopbackToggle.checked }).catch(() => {});
+  });
+}
+
 
 // --- Room Name Generator ---
 // Dictionary 1: synthesis techniques, sound qualities, processing descriptors
@@ -567,6 +583,8 @@ function showSession(room) {
   joinScreen.style.display = 'none';
   sessionScreen.style.display = '';
   sessionError.style.display = 'none';
+  if (captureDumpToggle) captureDumpToggle.checked = false; // new session → dump off
+  if (loopbackToggle) loopbackToggle.checked = false; // new session → loopback off
   resetStatsWindow();
   clearLog();
   clearChatMessages();
