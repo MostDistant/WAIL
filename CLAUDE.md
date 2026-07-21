@@ -22,7 +22,8 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 ├── audio_engine.go       AudioEngine interface (Link Audio capture + emit path)
 ├── audio_engine_real.go  Capture + emit engine (//go:build !linkstub)
 ├── audio_engine_stub.go  No-op AudioEngine under -tags linkstub (no audio path)
-├── interval_codec.go     Interval Opus↔WAIF codec (encode/decode, loopback-tested)
+├── interval_codec.go     Interval Opus↔WAIF codec (encode/decode + PLC, loopback-tested)
+├── capture_dump.go       Debug GUI toggle: dump capture audio pre/post-Opus to WAV
 ├── clock.go              NTP-style RTT/clock sync
 ├── protocol.go           SyncMessage + SignalMessage types (incl. interval_anchor)
 ├── wire.go               WAIF binary wire format
@@ -46,8 +47,9 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 │   ├── playout/          Hold-until-N+D playout scheduler (interval offset D, default 1)
 │   ├── lanloss/          Link Audio count-gap loss detection (LAN capture hop)
 │   ├── affinity/         (identity, stream) → stable published Link Audio channel
-│   ├── capture/          Interval assembler (buckets capture buffers into intervals)
-│   └── emit/             Reassembler + paced sink reader (playback side)
+│   ├── capture/          Interval assembler: sample-contiguous placement + micro-slew
+│   │                     drift correction (buckets capture buffers into intervals)
+│   └── emit/             Reassembler (PLC-aware) + cushioned sink feeder (playback side)
 └── frontend/             Bundled web UI (HTML/JS/CSS)
 
 signaling-server/         Go WebSocket relay server (deployed to fly.io)
