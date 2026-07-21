@@ -1,8 +1,8 @@
 # fly.toml app configuration for the WAIL relay.
 #
-# Renamed wail-signal → wail-relay (2026-07-20). Fly can't rename apps in
-# place, so wail-relay is a separate app; wail-signal stays deployed for
-# clients released before the switch. Deploy relay changes to wail-relay only.
+# Renamed wail-signal → wail-relay (2026-07-20; fly can't rename apps in
+# place). The old wail-signal app was destroyed the same day — clients older
+# than 3.2.0 must upgrade to connect.
 # Run exactly ONE machine: rooms live in process memory, so a second machine
 # silently splits rooms (fly deploy's --ha default creates two — scale back).
 #

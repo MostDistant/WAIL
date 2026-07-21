@@ -16,7 +16,7 @@ import (
 // ws://localhost:8899) to point at a local or self-hosted relay — the Tier 2
 // E2E harness (scripts/tier2-e2e.sh) uses this to run against a local server.
 // wail-relay.fly.dev replaced wail-signal.fly.dev (fly apps can't be renamed);
-// the old app stays up for clients released before the switch.
+// the old app was destroyed 2026-07-20 — clients older than 3.2.0 must upgrade.
 var signalingURL = func() string {
 	if u := os.Getenv("WAIL_SIGNAL_URL"); u != "" {
 		return u
