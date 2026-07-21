@@ -106,15 +106,20 @@ func (f *Feeder) Advance(nowBeat float64, emit func(samples []int16, beatAtBegin
 
 // fill brings one reader's cursor up to targetFrame, first skipping (and
 // counting) any shortfall behind playFrame — stale-stamped chunks would be
-// dropped by receivers, so emitting them is dead work.
+// dropped by receivers, so emitting them is dead work. A fresh reader's first
+// tick is inherently ~one tick behind its start beat (boundaries are detected
+// on the tick after the beat), so a small shortfall at cursor 0 skips silently
+// instead of tainting the underrun counter.
 func (f *Feeder) fill(r *PacedReader, playFrame, targetFrame int, emit func([]int16, float64)) {
 	if playFrame > r.Cursor() && r.Cursor() < r.TotalFrames() {
 		skipTo := playFrame
 		if skipTo > r.TotalFrames() {
 			skipTo = r.TotalFrames()
 		}
-		f.underrunEvents++
-		f.underrunFrames += uint64(skipTo - r.Cursor())
+		if r.Cursor() > 0 || skipTo > 2*f.chunkFrames {
+			f.underrunEvents++
+			f.underrunFrames += uint64(skipTo - r.Cursor())
+		}
 		r.Skip(skipTo)
 	}
 	if targetFrame > r.TotalFrames() {

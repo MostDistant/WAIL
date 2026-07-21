@@ -244,3 +244,21 @@ func TestPacedReaderSkipAndRebase(t *testing.T) {
 		t.Fatalf("Next after rebase: beat=%v, want 0.1", beat)
 	}
 }
+
+func TestFeederFreshReaderFirstTickLagIsNotAnUnderrun(t *testing.T) {
+	var out []emitted
+	f, _ := newTestFeeder(0, stampedSource(fTotal, 0))
+	// Boundaries are detected one tick late: the first Advance for a fresh
+	// reader lands a chunk's worth past the start beat. Not a dropout.
+	f.Advance(0.01, collector(&out)) // playhead 10 frames in, cursor 0
+	if ev, _ := f.Underruns(); ev != 0 {
+		t.Fatalf("first-tick lag counted as underrun (%d events)", ev)
+	}
+	// A genuinely late start (beyond 2 chunks) still counts.
+	var out2 []emitted
+	f2, _ := newTestFeeder(0, stampedSource(fTotal, 0))
+	f2.Advance(0.05, collector(&out2)) // 50 frames in at cursor 0
+	if ev, _ := f2.Underruns(); ev != 1 {
+		t.Fatalf("late start past tolerance should count, got %d events", ev)
+	}
+}
