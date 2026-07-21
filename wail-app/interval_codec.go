@@ -51,6 +51,63 @@ func NewIntervalEncoder(channels, sampleRate, bitrateKbps int) (*IntervalEncoder
 	}, nil
 }
 
+// WindowMeta labels one 20ms window for WAIF encoding. FrameNumber is the
+// window's index within its interval; Seq is the running per-stream frame
+// sequence (WAN loss detection). The trailer fields (TotalFrames, BPM,
+// Quantum, Bars) are written only when IsFinal is set.
+type WindowMeta struct {
+	RoomIndex   int64
+	StreamID    uint16
+	FrameNumber uint32
+	Seq         uint32
+	IsFinal     bool
+	TotalFrames uint32
+	BPM         float64
+	Quantum     float64
+	Bars        uint32
+}
+
+// EncodeWindow Opus-encodes one 20ms window into one WAIF frame. A chunk
+// shorter than a full window is zero-padded; windows must be fed in order on
+// one encoder (Opus is stateful). This is the streaming unit: the capture path
+// calls it as each window fills, so frames leave in real time during the
+// interval instead of bursting at its boundary.
+func (e *IntervalEncoder) EncodeWindow(chunk []int16, m WindowMeta) ([]byte, error) {
+	frameLen := e.samplesPerFrame * e.channels
+	if len(chunk) < frameLen {
+		padded := e.zeroScratch()
+		copy(padded, chunk)
+		chunk = padded
+	} else if len(chunk) > frameLen {
+		chunk = chunk[:frameLen]
+	}
+
+	n, err := e.enc.Encode(chunk, e.opusBuf)
+	if err != nil {
+		return nil, err
+	}
+	opusData := make([]byte, n)
+	copy(opusData, e.opusBuf[:n])
+
+	f := &AudioFrame{
+		IntervalIndex: m.RoomIndex,
+		StreamID:      m.StreamID,
+		FrameNumber:   m.FrameNumber,
+		FrameSeq:      m.Seq,
+		Channels:      uint16(e.channels),
+		OpusData:      opusData,
+		IsFinal:       m.IsFinal,
+	}
+	if m.IsFinal {
+		f.SampleRate = uint32(e.sampleRate)
+		f.TotalFrames = m.TotalFrames
+		f.BPM = m.BPM
+		f.Quantum = m.Quantum
+		f.Bars = m.Bars
+	}
+	return EncodeAudioFrameWire(f), nil
+}
+
 // EncodeInterval splits interleaved interval PCM into 20ms Opus WAIF frames
 // labeled with the shared room interval index. seqStart is the running per-stream
 // frame sequence (for WAN loss detection); the returned nextSeq continues it. The
@@ -72,40 +129,28 @@ func (e *IntervalEncoder) EncodeInterval(pcm []int16, roomIndex int64, streamID 
 		start := i * frameLen
 		var chunk []int16
 		if start >= len(pcm) {
-			chunk = e.zeroScratch()
+			chunk = nil // EncodeWindow pads to a full frame of silence
 		} else if end := start + frameLen; end <= len(pcm) {
 			chunk = pcm[start:end]
 		} else {
-			// Short trailing chunk: pad with silence to a full Opus frame.
-			chunk = e.zeroScratch()
-			copy(chunk, pcm[start:])
+			chunk = pcm[start:]
 		}
 
-		n, err := e.enc.Encode(chunk, e.opusBuf)
+		wire, err := e.EncodeWindow(chunk, WindowMeta{
+			RoomIndex:   roomIndex,
+			StreamID:    streamID,
+			FrameNumber: uint32(i),
+			Seq:         seq,
+			IsFinal:     i == numFrames-1,
+			TotalFrames: uint32(numFrames),
+			BPM:         bpm,
+			Quantum:     quantum,
+			Bars:        bars,
+		})
 		if err != nil {
 			return frames, seq, err
 		}
-		opusData := make([]byte, n)
-		copy(opusData, e.opusBuf[:n])
-
-		isFinal := i == numFrames-1
-		f := &AudioFrame{
-			IntervalIndex: roomIndex,
-			StreamID:      streamID,
-			FrameNumber:   uint32(i),
-			FrameSeq:      seq,
-			Channels:      uint16(e.channels),
-			OpusData:      opusData,
-			IsFinal:       isFinal,
-		}
-		if isFinal {
-			f.SampleRate = uint32(e.sampleRate)
-			f.TotalFrames = uint32(numFrames)
-			f.BPM = bpm
-			f.Quantum = quantum
-			f.Bars = bars
-		}
-		frames = append(frames, EncodeAudioFrameWire(f))
+		frames = append(frames, wire)
 		seq++
 	}
 	return frames, seq, nil

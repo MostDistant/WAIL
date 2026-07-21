@@ -90,8 +90,8 @@ Interval N+1: [CAPTURE local Link Audio] ──→ on boundary ──→ Opus-en
               [EMIT remote audio for room interval N+1-D]
 ```
 
-- **Capture** (`internal/capture`): each Link Audio buffer is written at its sample offset in a fixed-length interval PCM buffer; when a buffer opens the next interval, the completed one is handed off for Opus encoding + transmission.
-- **Send pacing** (`internal/pace`): the encoded interval (hundreds of WAIF frames) is never burst into the socket. A per-stream paced sender emits one frame per 10ms (2× real time). With the default offset `D=1`, playback of interval `N` starts at the same boundary at which sending starts, so delivery is concurrent with playback — the invariant is that the send position stays ahead of the playhead (frame `k` is sent at `k×10ms`, played at `k×20ms`), without overflowing send queues or the relay's per-peer rate limiter. The first frames of an interval arrive network-latency late and are live-appended by `internal/playout`, as with any `D=1` delivery.
+- **Capture** (`internal/capture`): each Link Audio buffer is written at its sample offset in a fixed-length interval PCM buffer. Capture **streams**: as coverage passes each 20ms window, the window is emitted for immediate Opus encoding + transmission (NINJAM-style — the interval is a playout concept, not a transmission one), so WAIF frames leave in real time *during* the interval. When a buffer opens the next interval, the previous interval's remaining windows flush zero-padded (gaps read as silence), ending with the final frame that carries the interval trailer. With the default offset `D=1`, every frame therefore arrives roughly a full interval before the receiver's playout boundary needs it.
+- **Send pacing** (`internal/pace`): defense in depth behind streaming capture. Normal operation emits single frames at real-time cadence, which pass through the pacer untouched; only abnormal batches (an interval-close flush after a capture stall, config edges) are spaced out at one frame per 10ms instead of bursting into the send queue or the relay's per-peer rate limiter.
 - **Playback** (`internal/emit` + `internal/playout`): decoded frames are reassembled per room interval index; the hold-until-boundary scheduler releases interval `N` at the local boundary labeled `N+D` (offset D, default 1), and a paced reader tops the Link Audio sink up a few ms at a time (never a burst). Late frames for the interval currently playing are **live-appended** (play-partial) rather than dropped or delayed a whole interval.
 - **Channel affinity** (`internal/affinity`): each remote `(persistent identity, stream index)` maps to a stable published Link Audio channel. When a peer disconnects and reconnects (new session peer id, same identity), it reclaims the same channel/sink, so LAN apps' routing survives the blip. There is no fixed 15-slot cap — each remote stream is its own channel.
 - **Own-channel exclusion** (`internal/affinity.OwnChannels`): capture discovery must skip WAIL's own republished channels (feedback loop) but must not hide a third-party publisher that merely shares WAIL's Link peer name. Since the sink channel ID isn't exposed by the `abl_link` C API, the classifier records every sink name WAIL mints and learns each sink's channel ID from the first discovery snapshot that pairs a minted name with WAIL's peer name; from then on exclusion is by ID (rename-proof).
@@ -103,9 +103,10 @@ Interval N+1: [CAPTURE local Link Audio] ──→ on boundary ──→ Opus-en
 ```
 DAW / Link-Audio app A publishes a Link Audio channel on LAN A
   → WAIL A subscribes (LinkAudioSource); pure-C callback → C ring → Go drainer
-  → internal/capture buckets buffers into a fixed-length interval (local index)
-  → interval_codec.go Opus-encodes each 20ms frame → WAIF frames (labeled with the room index)
-  → internal/pace spaces the frames out (one per 10ms, 2× real time)
+  → internal/capture buckets buffers into a fixed-length interval (local index),
+    emitting each 20ms window as its audio arrives
+  → interval_codec.go Opus-encodes the window → one WAIF frame (labeled with the room
+    index), sent immediately — frames stream in real time during the interval
   → WebSocket binary frame → relay server → Peer B
   → WAIL B receives WAIF
   → interval_codec.go Opus-decodes; internal/emit reassembles per (identity, stream index)

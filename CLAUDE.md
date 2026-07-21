@@ -108,9 +108,9 @@ WAIL is an Ableton Link Audio peer. There are no plugins and no IPC — the whol
 
 **Capture (send side):**
 1. Subscribe to local Link Audio channels (`LinkAudioSource`). The realtime capture callback is pure C (`internal/abllink/capture.c`) and pushes buffers into a lock-free ring; a Go goroutine drains it off-thread (ADR-0002 invariant: never a Go callback on the audio thread).
-2. `internal/capture` buckets buffers into fixed-length NINJAM intervals (local index).
-3. `interval_codec.go` Opus-encodes the interval into 20ms WAIF frames.
-4. Frames are broadcast over the WebSocket relay (binary) to all room peers.
+2. `internal/capture` buckets buffers into fixed-length NINJAM intervals (local index), emitting each 20ms window as its audio arrives (the interval is a playout concept, not a transmission one).
+3. `interval_codec.go` Opus-encodes each window into a WAIF frame as it fills.
+4. Frames stream over the WebSocket relay (binary) to all room peers in real time during the interval.
 
 **Playback (recv side):**
 1. Receive WAIF frames from the relay.
