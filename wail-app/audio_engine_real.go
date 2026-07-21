@@ -64,6 +64,7 @@ type linkAudioEngine struct {
 	wg     sync.WaitGroup
 
 	wireDecodeFailures atomic.Uint64 // WAIF wire-decode errors (pre-Opus)
+	unlabeledWindows   atomic.Uint64 // capture windows dropped before a room anchor
 
 	mu       sync.Mutex
 	labeler  interval.RoomLabeler
@@ -314,7 +315,7 @@ func (e *linkAudioEngine) startCaptureLocked(ch *captureChannel) {
 		return
 	}
 	ch.enc = enc
-	ch.asm = capture.New(e.cfg, 2, engineInternalRate)
+	ch.asm = capture.NewWindowed(e.cfg, 2, engineInternalRate, samplesPerWaifFrame(engineInternalRate))
 	name := ch.name // stable copy: the onDrop callback runs off the pacer goroutine
 	ch.pacer = pace.New(sendFrameGap, sendQueueBatches, e.send, func(n int) {
 		log.Printf("[audio] WARN: send backlog on %q — dropped a batch of %d frames", name, n)
@@ -379,31 +380,48 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 					pcm = dsp.ResampleLinearInterleaved(pcm, buf.NumChannels, int(buf.SampleRate), engineInternalRate)
 				}
 				nFrames := len(pcm) / max1(buf.NumChannels)
-				if done := ch.asm.Add(beat, buf.TempoBPM, pcm, nFrames); done != nil {
-					e.emitCaptured(ch, done)
+				for _, w := range ch.asm.AddWindows(beat, buf.TempoBPM, pcm, nFrames) {
+					e.emitWindow(ch, w)
 				}
 			}
 		}
 	}
 }
 
-// emitCaptured labels a completed local interval with the room index and ships
-// it as WAIF frames to the relay.
-func (e *linkAudioEngine) emitCaptured(ch *captureChannel, done *capture.CompletedInterval) {
+// emitWindow labels one capture window with the room index, encodes it, and
+// ships it. Windows arrive as their 20ms of audio fills, so WAIF frames leave
+// in real time during the interval — the receiver has nearly the whole
+// interval before its N+D playout boundary instead of racing the playhead.
+func (e *linkAudioEngine) emitWindow(ch *captureChannel, w capture.Window) {
 	e.mu.Lock()
-	roomIdx, ok := e.labeler.RoomIndex(done.Index)
+	roomIdx, ok := e.labeler.RoomIndex(w.IntervalIndex)
 	bpm, cfg := e.tempoBPM, e.cfg
 	e.mu.Unlock()
 	if !ok {
-		return // no room anchor yet; can't label
+		// No room anchor yet; can't label. Same drop as the old whole-interval
+		// path, now per window.
+		if n := e.unlabeledWindows.Add(1); n == 1 || n%1000 == 0 {
+			log.Printf("[audio] warn: dropping unlabeled capture windows on %q (%d total)", ch.name, n)
+		}
+		return
 	}
-	frames, next, err := ch.enc.EncodeInterval(done.Samples, roomIdx, ch.streamID, ch.seq, bpm, cfg.Quantum, cfg.Bars)
+	wire, err := ch.enc.EncodeWindow(w.Samples, WindowMeta{
+		RoomIndex:   roomIdx,
+		StreamID:    ch.streamID,
+		FrameNumber: uint32(w.Number),
+		Seq:         ch.seq,
+		IsFinal:     w.IsFinal,
+		TotalFrames: uint32(w.Total),
+		BPM:         bpm,
+		Quantum:     cfg.Quantum,
+		Bars:        cfg.Bars,
+	})
 	if err != nil {
 		log.Printf("[audio] encode failed on %q: %v", ch.name, err)
 		return
 	}
-	ch.seq = next
-	ch.pacer.Enqueue(frames)
+	ch.seq++
+	ch.pacer.Enqueue([][]byte{wire})
 }
 
 // --- emit ---

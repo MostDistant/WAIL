@@ -145,9 +145,14 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 **Decision:** Peer-name-only matching hid a third-party publisher (Bitwig VoidLinkAudioSend defaulting its peer name to the machine name) in a live test. The `abl_link` C API still doesn't expose a sink's channel id, so `affinity.OwnChannels` records every sink name WAIL mints and learns each sink's id from the first discovery snapshot pairing a minted name with our peer name; exclusion is by learned id thereafter (rename-proof). Residual theoretical false-skip: a same-LAN publisher matching both our peer name and a minted name.
 
 ### Send pacing rate and relay burst limits
-**Status:** Decided (issue #352)
-**File:** `wail-app/internal/pace/pace.go`, `wail-app/audio_engine_real.go`, `signaling-server/main.go`
-**Decision:** Outgoing interval frames are paced at 2× real time (one 20ms frame per 10ms). With D=1, delivery is concurrent with playback (both start at the same boundary), so the requirement is staying ahead of the playhead: frame k is sent at k×10ms and plays at k×20ms, a linearly growing margin. 1× would leave zero catch-up margin after any hiccup; much faster re-approaches the burst that overflowed queues. The relay keeps a flat per-stream token bucket (rate 100/s, burst 2500) rather than an interval-aware limit derived from bars/quantum/BPM — simpler, and the burst covers a full interval even at slow tempos (1200 frames at 40 BPM / 4 bars). Revisit if intervals ever exceed ~25s.
+**Status:** Superseded by streaming capture (kept as defense in depth)
+**File:** `wail-app/internal/pace/pace.go`, `wail-app/internal/capture/assembler.go`, `signaling-server/main.go`
+**Decision:** Capture now streams each 20ms window as it fills (like the old plugins / NINJAM), so frames leave at real-time cadence during the interval and arrive ~a full interval before the D=1 playout boundary — no burst exists in normal operation. The pacer (2× real time, one frame per 10ms) stays wired as defense in depth for abnormal batches (interval-close flushes after a capture stall). The relay keeps the flat per-stream bucket (rate 100/s, burst 2500) rather than an interval-aware limit — simpler, and now far above steady-state.
+
+### Emitted capture windows are immutable
+**Status:** Decided
+**File:** `wail-app/internal/capture/assembler.go` (`AddWindows`)
+**Decision:** Streaming capture emits a window once coverage passes its end; a buffer that lands behind the emitted boundary is trimmed/dropped and counted (`DroppedBackfill`). Link Audio buffers arrive in temporal order from the C ring, so backfill only occurs on pathological reordering — accepted in exchange for real-time transmission. The relay keeps a flat per-stream token bucket (rate 100/s, burst 2500) rather than an interval-aware limit derived from bars/quantum/BPM — simpler, and the burst covers a full interval even at slow tempos (1200 frames at 40 BPM / 4 bars). Revisit if intervals ever exceed ~25s.
 
 ### Cross-platform binding link unverified
 **Status:** Open
