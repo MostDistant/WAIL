@@ -460,6 +460,10 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 				if gap := ch.loss.Observe(buf.Count); gap != nil {
 					log.Printf("[audio] LAN loss on %q: %d buffers (count %d→%d)",
 						ch.name, gap.LostBuffers, gap.ExpectedCount, gap.GotCount)
+					// Real discontinuity: place the next buffer by its beat stamp
+					// so the lost span reads as silence (placement is otherwise
+					// sample-contiguous; see capture.Assembler).
+					ch.asm.Reanchor()
 				}
 				beat, mapped := ch.source.BeginBeats(&buf, ss, quantum)
 				if !mapped {
