@@ -154,6 +154,11 @@ Deferred decisions and remaining code quality items. Each entry has enough conte
 **File:** `wail-app/internal/capture/assembler.go` (`AddWindows`)
 **Decision:** Streaming capture emits a window once coverage passes its end; a buffer that lands behind the emitted boundary is trimmed/dropped and counted (`DroppedBackfill`). Link Audio buffers arrive in temporal order from the C ring, so backfill only occurs on pathological reordering — accepted in exchange for real-time transmission. The relay keeps a flat per-stream token bucket (rate 100/s, burst 2500) rather than an interval-aware limit derived from bars/quantum/BPM — simpler, and the burst covers a full interval even at slow tempos (1200 frames at 40 BPM / 4 bars). Revisit if intervals ever exceed ~25s.
 
+### Residual splices are hard cuts (no crosslap) and drift accrues as latency
+**Status:** Open (polish)
+**File:** `wail-app/internal/capture/assembler.go`, `wail-app/audio_engine_real.go` (emit path)
+**Decision:** Capture placement is sample-contiguous (2026-07 click fix), so the only remaining discontinuities are genuine ones: re-anchor snaps (LAN loss, >250ms stamp divergence), zero-padded interval tails after capture stalls, and partial-interval playout seams. These are still hard zero-splices — a short (1–5ms) crossfade at every splice point (NINJAM/Vorbis "crosslap") would make them inaudible. Separately, sender clock drift now accumulates as playout latency (~0.6ms/min at the measured 78ppm) until the 250ms re-anchor; a resampling drift corrector would bound it silently. Both deferred until live sessions show they matter. NINJAM forum precedent: REAPER's clipsort import had the same per-interval rounding disease (zeros inserted per interval + up-to-a-sample-per-interval drift); their fix — place audio at its true sample time, not on the rounded grid — is the approach taken here. Fractional interval lengths (e.g. 44.1k/117BPM → 180923.077 samples) also mean each playout seam can be off by ±1 sample at non-integer tempos; inaudible so far, revisit with crosslap.
+
 ### Cross-platform binding link unverified
 **Status:** Open
 **File:** `wail-app/internal/abllink/{abllink.go,wrap.cpp}`
