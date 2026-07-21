@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.0.2 (2026-07-21)
+
+### Fixes
+
+- lossless interval audio delivery — pace WAIF sends, absorb bursts at the relay, and fix own-channel discovery (#353)
+
 ## 3.0.1 (2026-07-21)
 
 ### Fixes
