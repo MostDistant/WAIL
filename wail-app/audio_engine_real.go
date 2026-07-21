@@ -45,12 +45,14 @@ const (
 	discoveryInterval  = 1 * time.Second
 	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
 	// emitCushionMs is how far ahead of the playhead each sink is kept fed —
-	// stall tolerance for the emit loop. Receivers tolerate near-future stamps
-	// (the reference renderer stalls on far-future buffers and plays ~4 beats
-	// behind; Live's policy is unverified, so stay well under 100ms ≈ "now").
-	// The cushion adds directly to a subscriber's reported buffering (stamps
-	// lead "now" by up to this much); WAIL_EMIT_CUSHION_MS overrides it.
-	emitCushionMs = 80
+	// stall tolerance for the emit loop (rides out App-Nap-adjacent scheduler
+	// stalls). It adds directly to a subscriber's reported buffering (stamps
+	// lead "now" by up to this much), so the practical ceiling is the
+	// subscriber's configured Link Audio Latency, not a fixed figure. Field
+	// A/B: 40ms let Live's buffer meter swing 0→max, 80ms held steady, 160ms
+	// best absorbed tab-switch stalls — hence the default. WAIL_EMIT_CUSHION_MS
+	// overrides it; drop it below a Link Latency setting under ~160ms.
+	emitCushionMs = 160
 	// plcMaxFramesPerGap caps Opus packet-loss concealment per seq gap (120ms):
 	// libopus fades PLC to silence past ~100ms; a deeper gap's tail stays silent.
 	plcMaxFramesPerGap = 6
