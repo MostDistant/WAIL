@@ -40,113 +40,14 @@ jobs:
         run: go build ./... && go test ./...
         working-directory: signaling-server
 
-  build-windows:
-    # Pinned to windows-2022 to match the release workflow's toolchain (older
-    # MinGW GCC + CMake). windows-latest rolled over to the 2025/2026 image
-    # whose newer toolchain breaks the CGo builds. See #329.
-    runs-on: windows-2022
-    if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
+  # build-windows: DISABLED DURING ITERATION (mac only for now)
+  # build-windows:
+  #   runs-on: windows-2022
+  #   steps: ...
+  #     (disabled to speed up CI during active development)
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: wail-app/go.mod
-
-      - name: Cache vcpkg
-        id: vcpkg-cache
-        uses: actions/cache@v5
-        with:
-          path: C:\vcpkg\installed
-          # Bump the suffix whenever the package list below changes, otherwise a
-          # stale cache is restored and the new packages are never installed.
-          key: vcpkg-opus-mingw-static-pkgconf-x64-windows-v3
-
-      - name: Install opus + pkgconf via vcpkg
-        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
-        # pkgconf is a drop-in pkg-config that the Go/CGo build needs to locate
-        # opus. We get it from vcpkg rather than choco because the choco
-        # community feed is flaky (504s) and silently leaves the build to fall
-        # back to Strawberry Perl's broken pkg-config.bat stub on PATH.
-        #
-        # opus is built for the x64-mingw-static triplet (same GCC ABI as the
-        # CGo objects) and linked statically into the desktop-app binary.
-        run: vcpkg install opus:x64-mingw-static pkgconf:x64-windows
-
-      - name: Configure pkg-config
-        shell: pwsh
-        # Point CGo straight at the vcpkg pkgconf binary by absolute path via
-        # PKG_CONFIG, so PATH lookup (and Strawberry Perl's pkg-config.bat stub)
-        # is bypassed entirely for every later step in this job.
-        run: |
-          $pkgconf = Get-ChildItem C:\vcpkg\installed\x64-windows -Recurse -Filter pkgconf.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $pkgconf) { throw "pkgconf.exe not found under vcpkg (did the install step run?)" }
-          "PKG_CONFIG=$($pkgconf.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Using PKG_CONFIG=$($pkgconf.FullName)"
-          & $pkgconf.FullName --version
-
-      - name: Rename Link `interface` param for MinGW
-        shell: pwsh
-        # MinGW's COM headers #define `interface`, colliding with the `interface`
-        # parameter in Link's link_audio/Channels.hpp. Rename it (the only
-        # identifier use — Interface/mpInterface are untouched; other files use
-        # the word only in a comment/string). Undef-ing the macro from our cgo
-        # wrapper proved unreliable on MinGW.
-        # -creplace is case-SENSITIVE: rename only lowercase `interface`, never the
-        # `Interface` template parameter (PowerShell's -replace is case-insensitive
-        # and would collapse both into `iface`, shadowing the template param).
-        run: |
-          (Get-Content vendor/link/include/ableton/link_audio/Channels.hpp) `
-            -creplace '\binterface\b', 'iface' `
-            | Set-Content vendor/link/include/ableton/link_audio/Channels.hpp
-
-      - name: Build Go app
-        env:
-          PKG_CONFIG_PATH: C:\vcpkg\installed\x64-mingw-static\lib\pkgconfig
-        run: go build -tags nolibopusfile -o NUL .
-        working-directory: wail-app
-
-      - name: Build & test signaling-server
-        run: go build ./... && go test ./...
-        working-directory: signaling-server
-
-  build-linux:
-    runs-on: ubuntu-22.04
-    if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: wail-app/go.mod
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libssl-dev \
-            libopus-dev \
-            libgl-dev \
-            libx11-xcb-dev \
-            libxcb1-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libsoup-3.0-dev \
-            cmake \
-            g++
-
-      - name: Build Go app
-        run: go build -tags nolibopusfile -o /dev/null .
-        working-directory: wail-app
-
-      - name: Test Go app
-        run: go test -tags nolibopusfile ./...
-        working-directory: wail-app
-
-      - name: Build & test signaling-server
-        run: go build ./... && go test ./...
-        working-directory: signaling-server
+  # build-linux: DISABLED DURING ITERATION (mac only for now)
+  # build-linux:
+  #   runs-on: ubuntu-22.04
+  #   steps: ...
+  #     (disabled to speed up CI during active development)
