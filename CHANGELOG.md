@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.1.0 (2026-07-21)
+
+### Features
+
+- stream capture audio in real time during the interval, like the old plugins (#355)
+
 ## 3.0.2 (2026-07-21)
 
 ### Fixes
