@@ -382,9 +382,9 @@ func TestSlewTracksSustainedDrift(t *testing.T) {
 	}
 }
 
-// TestSlewSeamContinuity: slewing a ramp must not create sample jumps beyond
+// TestSlewContinuity: slewing a ramp must not create sample jumps beyond
 // the ramp's own slope (no clicks at the stretch window).
-func TestSlewSeamContinuity(t *testing.T) {
+func TestSlewContinuity(t *testing.T) {
 	a := NewWindowed(wcfg(), 1, wsr, wframes)
 
 	ramp := func(start int16, n int) []int16 {
@@ -411,7 +411,7 @@ func TestSlewSeamContinuity(t *testing.T) {
 			if prev >= 0 && s != 0 {
 				d := int(s) - int(prev)
 				if d < -3 || d > 3 {
-					t.Fatalf("seam jump of %d (prev %d → %d) — slew clicked", d, prev, s)
+					t.Fatalf("boundary jump of %d (prev %d → %d) — slew clicked", d, prev, s)
 				}
 			}
 			prev = s

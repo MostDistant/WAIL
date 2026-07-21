@@ -20,9 +20,9 @@ import (
 	"github.com/nicholasgasior/wail/wail-app/internal/capture"
 	"github.com/nicholasgasior/wail/wail-app/internal/dsp"
 	"github.com/nicholasgasior/wail/wail-app/internal/emit"
-	"github.com/nicholasgasior/wail/wail-app/internal/pace"
 	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 	"github.com/nicholasgasior/wail/wail-app/internal/lanloss"
+	"github.com/nicholasgasior/wail/wail-app/internal/pace"
 	"github.com/nicholasgasior/wail/wail-app/internal/playout"
 )
 
@@ -145,6 +145,11 @@ type emitStream struct {
 
 	feeder *emit.Feeder // cushion-ahead sink feeder (owned by the emit loop)
 
+	// Previous WriteInterleaved result (emit-loop-owned). A refusal can mean
+	// "no listener" (constant while idle — not an event) or "queue full"; only
+	// the success→failure edge marks a hole in audio a listener was receiving.
+	lastWriteOK bool
+
 	// Stream-order tracking for PLC (session-goroutine-owned, like dec): a seq
 	// gap in arrival order is a permanent loss on our TCP transport.
 	haveSeq   bool
@@ -160,6 +165,7 @@ type emitStream struct {
 	sinkUnderrunFrames  atomic.Uint64 // frames skipped (played as silence) due to underrun
 	framesMissedAtPlay  atomic.Uint64 // frames still absent when their interval retired
 	framesConcealed     atomic.Uint64 // missing frames masked by Opus PLC
+	sinkWriteRejected   atomic.Uint64 // sink refused a chunk mid-stream (queue full / listener left)
 }
 
 func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), offsetD int) AudioEngine {
@@ -710,6 +716,7 @@ func (e *linkAudioEngine) Health() EngineHealth {
 		h.EmitSinkUnderrunFrames += st.sinkUnderrunFrames.Load()
 		h.EmitFramesMissingAtPlay += st.framesMissedAtPlay.Load()
 		h.EmitFramesConcealed += st.framesConcealed.Load()
+		h.EmitSinkWriteRejected += st.sinkWriteRejected.Load()
 		h.OpusDecodeFailures += st.decodeFailures.Load()
 	}
 	h.WireDecodeFailures = e.wireDecodeFailures.Load()
@@ -759,7 +766,7 @@ func (e *linkAudioEngine) emitLoop() {
 // the feeder's pre-rolled reader — or install a fresh one — for the release.
 func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localIdx, roomLabel int64) {
 	startBeat, endBeat := cfg.BeatWindow(localIdx)
-	totalFrames := roundUp(cfg.IntervalSamples(engineInternalRate, tempo), samplesPerWaifFrame(engineInternalRate))
+	totalFrames := intervalPlayoutFrames(cfg, engineInternalRate, tempo)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -822,7 +829,13 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, quantum float64, 
 		}
 		st.feeder.Advance(localBeat, func(samples []int16, beat float64) {
 			frames := len(samples) / st.channels
-			st.sink.WriteInterleaved(samples, ss, beat, quantum, frames, st.channels, engineInternalRate)
+			ok := st.sink.WriteInterleaved(samples, ss, beat, quantum, frames, st.channels, engineInternalRate)
+			// The feeder's cursor has moved past this chunk either way, so a
+			// refusal while a listener was streaming is a permanent hole.
+			if !ok && st.lastWriteOK {
+				st.sinkWriteRejected.Add(1)
+			}
+			st.lastWriteOK = ok
 		})
 		ev, fr := st.feeder.Underruns()
 		st.sinkUnderrunEvents.Store(ev)

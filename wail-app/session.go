@@ -932,6 +932,7 @@ func sessionLoop(
 				delta(logWarn, "capture dropped late buffers", lastHealth.CaptureDroppedLate, health.CaptureDroppedLate)
 				delta(logWarn, "capture dropped backfill buffers", lastHealth.CaptureDroppedBackfill, health.CaptureDroppedBackfill)
 				delta(logWarn, "sink underrun: paced audio late past the cushion (audible dropout)", lastHealth.EmitSinkUnderrunEvents, health.EmitSinkUnderrunEvents)
+				delta(logWarn, "sink write rejected mid-stream (chunk lost — audible hole for listeners)", lastHealth.EmitSinkWriteRejected, health.EmitSinkWriteRejected)
 				delta(logWarn, "frames never arrived by playout retirement (played as silence)", lastHealth.EmitFramesMissingAtPlay, health.EmitFramesMissingAtPlay)
 				delta(logInfo, "frames concealed by Opus PLC (masked loss)", lastHealth.EmitFramesConcealed, health.EmitFramesConcealed)
 				delta(logInfo, "intervals released before their streaming tail arrived (benign)", lastHealth.EmitIntervalsIncomplete, health.EmitIntervalsIncomplete)

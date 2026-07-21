@@ -4,6 +4,8 @@ import (
 	"log"
 
 	"gopkg.in/hraban/opus.v2"
+
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 )
 
 // Interval Opus codec: turns a full interval of PCM into a sequence of 20ms WAIF
@@ -18,6 +20,16 @@ const (
 
 // samplesPerWaifFrame returns the per-channel sample count of one 20ms frame.
 func samplesPerWaifFrame(sampleRate int) int { return sampleRate * waifFrameMs / 1000 }
+
+// intervalPlayoutFrames is the exact frame count the playout reader emits for
+// one interval — deliberately NOT rounded up to WAIF-frame granularity. When
+// the interval isn't a multiple of the 20ms window (most tempos), the sender
+// zero-pads the final window; playing that padding splices silence into
+// continuous audio and stamps it past the next interval's anchor — an audible
+// click at every boundary. The pad stays in the reassembler, never read.
+func intervalPlayoutFrames(cfg interval.Config, sampleRate uint32, tempoBPM float64) int {
+	return cfg.IntervalSamples(sampleRate, tempoBPM)
+}
 
 // IntervalEncoder Opus-encodes interval PCM into WAIF frames for one stream.
 type IntervalEncoder struct {
