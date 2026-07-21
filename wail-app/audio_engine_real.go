@@ -562,6 +562,7 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		}
 		e.own.Published(sinkName)
 		e.emit[key] = st
+		log.Printf("[audio] publishing Link Audio channel %q for %s stream %d", sinkName, fromIdentity, f.StreamID)
 	} else if st.lastDisplayName != displayName || st.lastStreamName != streamName {
 		// Name became known / changed: rename the existing channel in place, don't
 		// re-mint it (affinity preserves the channel).

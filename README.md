@@ -59,6 +59,7 @@ WAIL can run without the GUI for scripted or automated use. The `-headless` flag
 | `-bpm` | Tempo in BPM (default: 120) |
 | `-name` | Display name (auto-generated if empty) |
 | `-password` | Room password (optional) |
+| `-loopback` | Relay echoes our own audio back; republished as a `(loopback)` Link Audio channel |
 
 Stop with Ctrl+C or SIGTERM for clean shutdown.
 
