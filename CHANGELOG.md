@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.2.1 (2026-07-21)
+
+### Fixes
+
+- docs: record that wail-signal was destroyed (pre-3.2.0 clients must upgrade) (#360)
+
 ## 3.2.0 (2026-07-21)
 
 ### Features
