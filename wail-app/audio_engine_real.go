@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,8 +48,9 @@ const (
 	// stall tolerance for the emit loop. Receivers tolerate near-future stamps
 	// (the reference renderer stalls on far-future buffers and plays ~4 beats
 	// behind; Live's policy is unverified, so stay well under 100ms ≈ "now").
-	emitCushionMs     = 80
-	emitCushionFrames = engineInternalRate * emitCushionMs / 1000
+	// The cushion adds directly to a subscriber's reported buffering (stamps
+	// lead "now" by up to this much); WAIL_EMIT_CUSHION_MS overrides it.
+	emitCushionMs = 80
 	// plcMaxFramesPerGap caps Opus packet-loss concealment per seq gap (120ms):
 	// libopus fades PLC to silence past ~100ms; a deeper gap's tail stays silent.
 	plcMaxFramesPerGap = 6
@@ -95,6 +97,25 @@ type linkAudioEngine struct {
 	emit         map[affinity.Key]*emitStream
 	own          *affinity.OwnChannels // our published sinks, for discovery exclusion
 	nextStreamID uint16
+
+	cushionFrames int // per-sink feed-ahead (emitCushionMs or WAIL_EMIT_CUSHION_MS)
+}
+
+// engineCushionFrames resolves the emit cushion: emitCushionMs unless
+// WAIL_EMIT_CUSHION_MS overrides it (clamped to 10..500ms — below one tick's
+// jitter the feeder can't keep up; far above, receivers may drop far-future
+// stamps).
+func engineCushionFrames() int {
+	ms := emitCushionMs
+	if v := os.Getenv("WAIL_EMIT_CUSHION_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			ms = min(max(n, 10), 500)
+			log.Printf("[audio] emit cushion override: %dms (WAIL_EMIT_CUSHION_MS)", ms)
+		} else {
+			log.Printf("[audio] warn: bad WAIL_EMIT_CUSHION_MS %q: %v", v, err)
+		}
+	}
+	return engineInternalRate * ms / 1000
 }
 
 type captureChannel struct {
@@ -181,6 +202,8 @@ func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), off
 		capture:  make(map[string]*captureChannel),
 		emit:     make(map[affinity.Key]*emitStream),
 		own:      affinity.NewOwnChannels(),
+
+		cushionFrames: engineCushionFrames(),
 	}
 }
 
@@ -606,7 +629,7 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			reasm:           emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
 			sched:           playout.New(e.offsetD),
 			sink:            e.link.NewSink(sinkName, engineInternalRate*2),
-			feeder:          emit.NewFeeder(emitCushionFrames, emitChunkFrames),
+			feeder:          emit.NewFeeder(e.cushionFrames, emitChunkFrames),
 			lastDisplayName: displayName,
 			lastStreamName:  streamName,
 		}

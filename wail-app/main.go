@@ -40,6 +40,7 @@ func main() {
 	defer FlushHoneybadger()
 
 	log.Println("WAIL - WebSocket Audio Interchange for Link (Go/Wails)")
+	disableAppNap()
 
 	appBackend := NewApp(*instance)
 
