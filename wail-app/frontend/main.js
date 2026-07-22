@@ -18,6 +18,7 @@ const settingsPanel = document.getElementById('settings-panel');
 const settingsCloseBtn = document.getElementById('settings-close-btn');
 const settingsForm = document.getElementById('settings-form');
 const settingsDisplayNameInput = document.getElementById('settings-display-name');
+const settingsLinkAudioNameInput = document.getElementById('settings-link-audio-name');
 const settingsTelemetryCheckbox = document.getElementById('settings-telemetry');
 const settingsLogSharingCheckbox = document.getElementById('settings-log-sharing');
 const settingsRememberCheckbox = document.getElementById('settings-remember');
@@ -246,6 +247,8 @@ let lastNetworkPeers = null;
 
 // --- Display Name Storage ---
 const DISPLAY_NAME_KEY = 'wail-display-name';
+const LINK_AUDIO_NAME_KEY = 'wail-link-audio-name';
+const DEFAULT_LINK_AUDIO_NAME = 'WAIL';
 const TELEMETRY_KEY = 'wail-telemetry';
 const LOG_SHARING_KEY = 'wail-log-sharing';
 const REMEMBER_KEY = 'wail-remember';
@@ -256,6 +259,14 @@ function getDisplayName() {
 
 function saveDisplayName(name) {
   localStorage.setItem(DISPLAY_NAME_KEY, name);
+}
+
+function getLinkAudioName() {
+  return localStorage.getItem(LINK_AUDIO_NAME_KEY) || DEFAULT_LINK_AUDIO_NAME;
+}
+
+function saveLinkAudioName(name) {
+  localStorage.setItem(LINK_AUDIO_NAME_KEY, name || DEFAULT_LINK_AUDIO_NAME);
 }
 
 function getTelemetryEnabled() {
@@ -436,6 +447,7 @@ async function joinPublicRoom(room) {
     room: room,
     password: null,
     displayName: getDisplayName(),
+    linkAudioName: getLinkAudioName(),
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
@@ -484,6 +496,7 @@ invoke('get_default_recording_dir').then(dir => {
 // --- Settings Panel ---
 function openSettings() {
   settingsDisplayNameInput.value = getDisplayName();
+  settingsLinkAudioNameInput.value = getLinkAudioName();
   settingsTelemetryCheckbox.checked = getTelemetryEnabled();
   settingsLogSharingCheckbox.checked = getLogSharingEnabled();
   settingsRememberCheckbox.checked = getRememberEnabled();
@@ -509,6 +522,8 @@ settingsForm.addEventListener('submit', (e) => {
   if (name) {
     saveDisplayName(name);
   }
+  // Link Audio name: blank falls back to the default.
+  saveLinkAudioName(settingsLinkAudioNameInput.value.trim());
   // Save telemetry setting
   const telemetryEnabled = settingsTelemetryCheckbox.checked;
   saveTelemetryEnabled(telemetryEnabled);
@@ -621,6 +636,7 @@ joinForm.addEventListener('submit', async (e) => {
     room: document.getElementById('room').value,
     password: document.getElementById('password').value || null,
     displayName: getDisplayName(),
+    linkAudioName: getLinkAudioName(),
     bpm: 120.0,
     bars: parseInt(document.getElementById('bars').value),
     quantum: parseFloat(document.getElementById('quantum').value),
