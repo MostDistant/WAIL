@@ -146,7 +146,12 @@ func sessionLoop(
 		engineFramesSent.Add(1)
 		mesh.BroadcastAudio(waif)
 	}
-	audioEngine := newAudioEngine(link, displayName, engineSend, offsetD)
+	// Advertise as a Link Audio peer under a "WAIL-" prefix so WAIL reads
+	// clearly in a DAW's peer list and stays distinct from native publishers
+	// that default to the machine name. This is also the own-channel filter
+	// key (audio_engine_real.go), so the engine must use the prefixed name
+	// end to end; the room display name is unaffected.
+	audioEngine := newAudioEngine(link, "WAIL-"+displayName, engineSend, offsetD)
 	if err := audioEngine.Start(); err != nil {
 		logWarn("Link Audio engine failed to start: %v", err)
 	}
