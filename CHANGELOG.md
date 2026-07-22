@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.6.0 (2026-07-22)
+
+### Features
+
+- launch-quantization summary in a rounded box above Advanced (#386)
+
+### Fixes
+
+- interval-align audio by asking Link for beats at BPI, not beats-per-bar (#388)
+
 ## 3.5.0 (2026-07-22)
 
 ### Features
