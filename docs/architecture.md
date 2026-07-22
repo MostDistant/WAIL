@@ -175,7 +175,7 @@ On the receiver side, `internal/emit.Reassembler` collects decoded WAIF frames p
 
 The signaling server records each client's public IP (from `Fly-Client-IP`, `X-Forwarded-For`, or `RemoteAddr`). When a peer joins a room, the server checks whether any existing peer shares the same public IP — indicating they are on the same LAN. The `join_ok` response includes a `lan_peer_present` boolean.
 
-WAIL is a **passive** Link peer (ADR-0003): it never `ForceBeat`s the local transport — within-bar beat/phase alignment comes for free from Ableton Link's own LAN multicast sync. `lan_peer_present` is now informational only.
+WAIL is a **passive** Link peer (ADR-0003): it never `ForceBeat`s the local transport — beat/phase alignment comes for free from Ableton Link's own LAN multicast sync, at the interval quantum WAIL asks for. `lan_peer_present` is now informational only.
 
 ## Interval Boundaries
 
@@ -186,6 +186,8 @@ local_interval_index = floor(beat_position / (bars × quantum))
 ```
 
 Example: 4 bars × 4.0 quantum = 16 beats per interval. Beat 15.9 → interval 0. Beat 16.0 → interval 1.
+
+The beat position is obtained from Link at quantum = **bars × quantum (BPI)**, not beats-per-bar. Link shares beat phase only mod the quantum you ask for; asking at the bar pinned `beat mod 4` but left `beat mod 16` — which bar starts the interval — per-peer arbitrary, so audio landed bar-aligned but whole bars apart. At the BPI lens the interval grid is session-shared, and it nests on bar boundaries (quantum grids share a common origin), matching a DAW whose launch quantization is set to the whole interval (ADR-0004). The same BPI quantum is used for capture buffer beat stamps (`BeginBeats`) and sink commits, keeping the (beat, quantum) pairs self-consistent end to end.
 
 **Relay-authoritative room index (ADR-0003):** the relay server owns the room interval index and broadcasts an `interval_anchor` (index + tempo/config + server time). Each client maps its *local* index to the shared *room* index via a constant offset established from the anchor (`internal/interval.RoomLabeler`). Every WAIL agrees on the room index by construction; WAIF frames are tagged with it, and the receiver's hold-until-boundary scheduler releases interval `N` at the local boundary labeled `N+D`.
 

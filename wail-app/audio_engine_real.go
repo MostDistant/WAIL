@@ -70,8 +70,6 @@ type linkAudioEngine struct {
 	send     func(waif []byte)
 	offsetD  int
 
-	quantum float64
-
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -200,7 +198,6 @@ func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), off
 		peerName: peerName,
 		send:     send,
 		offsetD:  offsetD,
-		quantum:  lb.Quantum(),
 		cfg:      interval.Config{Bars: 4, Quantum: lb.Quantum()},
 		tempoBPM: 120,
 		capture:  make(map[string]*captureChannel),
@@ -256,7 +253,7 @@ func (e *linkAudioEngine) SetRoomAnchor(currentIndex int64, bpm float64, bars ui
 	ss := abllink.NewSessionState()
 	defer ss.Close()
 	e.link.CaptureAppSessionState(ss)
-	localBeat := ss.BeatAtTime(e.link.ClockMicros(), quantum)
+	clockMicros := e.link.ClockMicros()
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -268,8 +265,8 @@ func (e *linkAudioEngine) SetRoomAnchor(currentIndex int64, bpm float64, bars ui
 	}
 	if quantum > 0 {
 		e.cfg.Quantum = quantum
-		e.quantum = quantum
 	}
+	localBeat := ss.BeatAtTime(clockMicros, e.cfg.BeatsPerInterval())
 	localIdx := e.cfg.IndexAtBeat(localBeat)
 	e.labeler.Align(currentIndex, localIdx)
 }
@@ -523,7 +520,7 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 			ch.statLate.Store(ch.asm.DroppedLate())
 			ch.statBackfill.Store(ch.asm.DroppedBackfill())
 			e.link.CaptureAppSessionState(ss)
-			quantum := e.quantumSnapshot() // stable within a tick; snapshot once, not per buffer
+			bpi := e.intervalQuantumSnapshot() // stable within a tick; snapshot once, not per buffer
 			for {
 				buf, ok := ch.source.Pop()
 				if !ok {
@@ -537,7 +534,7 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 					// sample-contiguous; see capture.Assembler).
 					ch.asm.Reanchor()
 				}
-				beat, mapped := ch.source.BeginBeats(&buf, ss, quantum)
+				beat, mapped := ch.source.BeginBeats(&buf, ss, bpi)
 				if !mapped {
 					continue // cross-session buffer; can't place it
 				}
@@ -769,12 +766,13 @@ func (e *linkAudioEngine) emitLoop() {
 			return
 		case <-t.C:
 			e.link.CaptureAppSessionState(ss)
-			q := e.quantumSnapshot()
-			localBeat := ss.BeatAtTime(e.link.ClockMicros(), q)
+			clockMicros := e.link.ClockMicros()
 
 			e.mu.Lock()
 			cfg := e.cfg
 			tempo := e.tempoBPM
+			bpi := cfg.BeatsPerInterval()
+			localBeat := ss.BeatAtTime(clockMicros, bpi)
 			localIdx := cfg.IndexAtBeat(localBeat)
 			roomLabel, labeled := e.labeler.RoomIndex(localIdx)
 			e.mu.Unlock()
@@ -784,7 +782,7 @@ func (e *linkAudioEngine) emitLoop() {
 				lastLocalIdx = localIdx
 				haveLast = true
 			}
-			e.topUpSinks(ss, q, localBeat)
+			e.topUpSinks(ss, bpi, localBeat)
 		}
 	}
 }
@@ -865,7 +863,7 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 
 // topUpSinks advances each stream's feeder to playhead+cushion, writing paced
 // chunks into its sink (multiple chunks per tick when catching up after a stall).
-func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, quantum float64, localBeat float64) {
+func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, bpi float64, localBeat float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, st := range e.emit {
@@ -874,7 +872,7 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, quantum float64, 
 		}
 		st.feeder.Advance(localBeat, func(samples []int16, beat float64) {
 			frames := len(samples) / st.channels
-			ok := st.sink.WriteInterleaved(samples, ss, beat, quantum, frames, st.channels, engineInternalRate)
+			ok := st.sink.WriteInterleaved(samples, ss, beat, bpi, frames, st.channels, engineInternalRate)
 			// The feeder's cursor has moved past this chunk either way, so a
 			// refusal while a listener was streaming is a permanent hole.
 			if !ok && st.lastWriteOK {
@@ -888,10 +886,14 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, quantum float64, 
 	}
 }
 
-func (e *linkAudioEngine) quantumSnapshot() float64 {
+// intervalQuantumSnapshot returns the quantum for the audio path's Link timing
+// calls: the whole interval (BPI), not the bar. Link pins beat phase only mod
+// the quantum it is asked for, so asking at the bar left which-bar-of-the-
+// interval per-peer arbitrary — audio landed bar-aligned but bars apart.
+func (e *linkAudioEngine) intervalQuantumSnapshot() float64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.quantum
+	return e.cfg.BeatsPerInterval()
 }
 
 // --- small helpers ---

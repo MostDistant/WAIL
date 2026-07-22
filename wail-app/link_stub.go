@@ -13,21 +13,26 @@ import (
 // LinkBridge stub implementation that simulates Link behavior without the C++ SDK.
 // Build with -tags=linkstub to use this instead of the real abletonlink-go bridge.
 type LinkBridge struct {
-	mu        sync.Mutex
-	bpm       float64
-	quantum   float64
-	beat      float64
-	enabled   bool
-	startTime time.Time
-	detector  *TempoChangeDetector
+	mu      sync.Mutex
+	bpm     float64
+	quantum float64
+	// intervalQuantum mirrors the real bridge's BPI phase lens for State().Beat.
+	// The stub's beat free-runs from origin 0, which is already zero-phase at
+	// every quantum, so only the API needs mirroring.
+	intervalQuantum float64
+	beat            float64
+	enabled         bool
+	startTime       time.Time
+	detector        *TempoChangeDetector
 }
 
 func NewLinkBridge(initialBPM, quantum float64) *LinkBridge {
 	return &LinkBridge{
-		bpm:       initialBPM,
-		quantum:   quantum,
-		startTime: time.Now(),
-		detector:  NewTempoChangeDetector(initialBPM),
+		bpm:             initialBPM,
+		quantum:         quantum,
+		intervalQuantum: quantum,
+		startTime:       time.Now(),
+		detector:        NewTempoChangeDetector(initialBPM),
 	}
 }
 
@@ -88,6 +93,16 @@ func (lb *LinkBridge) State() LinkState {
 		TimestampUs: time.Since(lb.startTime).Microseconds(),
 		NumPeers:    0,
 	}
+}
+
+// SetIntervalQuantum updates the room BPI used as State().Beat's phase lens.
+func (lb *LinkBridge) SetIntervalQuantum(q float64) {
+	if q <= 0 {
+		return
+	}
+	lb.mu.Lock()
+	lb.intervalQuantum = q
+	lb.mu.Unlock()
 }
 
 func (lb *LinkBridge) Detector() *TempoChangeDetector {
