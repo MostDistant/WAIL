@@ -13,6 +13,7 @@ const joinError = document.getElementById('join-error');
 const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
 const sessionBpmInput = document.getElementById('session-bpm');
+const linkClockEl = document.getElementById('link-clock');
 const settingsBtn = document.getElementById('settings-btn');
 const settingsPanel = document.getElementById('settings-panel');
 const settingsCloseBtn = document.getElementById('settings-close-btn');
@@ -629,6 +630,7 @@ function showJoin() {
   joinBtn.textContent = 'Join Room';
   switchSessionTab(sessionTabSessionBtn);
   resetStatsWindow();
+  hideClock();
   cleanup();
 }
 
@@ -653,6 +655,7 @@ function showSession(room) {
   document.getElementById('session-plugin').textContent = 'disconnected';
   document.getElementById('session-plugin').className = 'status-value';
   document.getElementById('session-link-peers').textContent = '0';
+  hideClock(); // stays hidden until the first status:update seeds it
   document.getElementById('session-bpi').value = '';
   document.getElementById('session-interval-bars').textContent = '-';
   document.getElementById('recording-stat').style.display =
@@ -865,6 +868,63 @@ function renderStatus(s) {
   renderPeerTree(s);
 }
 
+// --- Interval clock (Ableton Link) ---
+// A countdown pie in the header: full at each interval boundary, emptying
+// clockwise from noon over one interval (BPI beats). status:update only fires
+// every 2s, so we extrapolate the beat with requestAnimationFrame between events.
+let clockSync = null; // { beat0, bpm, bpi, t0 } re-seeded from each status:update
+let clockRAF = 0;
+
+function seedClock(s) {
+  // BPI = interval_bars × interval_quantum (same derivation as roomBpi above).
+  const bpi = (s.interval_bars || 0) * (s.interval_quantum || 0);
+  clockSync = { beat0: s.beat, bpm: s.bpm, bpi, t0: performance.now() };
+  linkClockEl.style.display = '';
+  startClock();
+}
+
+function startClock() {
+  if (!clockRAF) clockRAF = requestAnimationFrame(tickClock);
+}
+
+function stopClock() {
+  if (clockRAF) cancelAnimationFrame(clockRAF);
+  clockRAF = 0;
+}
+
+function hideClock() {
+  stopClock();
+  clockSync = null;
+  linkClockEl.style.display = 'none';
+  linkClockEl.style.background = '';
+}
+
+function tickClock() {
+  clockRAF = 0;
+  if (!clockSync || clockSync.bpi <= 0 || clockSync.bpm <= 0) {
+    linkClockEl.style.background = 'var(--clock-empty)';
+    return; // nothing to pace; the next status:update will re-seed and restart us
+  }
+  const beat = clockSync.beat0 +
+    ((performance.now() - clockSync.t0) / 1000) * (clockSync.bpm / 60);
+  const into = (((beat % clockSync.bpi) + clockSync.bpi) % clockSync.bpi);
+  const deg = (into / clockSync.bpi) * 360;
+  linkClockEl.style.background =
+    `conic-gradient(var(--clock-empty) 0 ${deg}deg, var(--clock-fill) ${deg}deg 360deg)`;
+  clockRAF = requestAnimationFrame(tickClock);
+}
+
+// Pause the sweep while the window is hidden; on return, re-seed the time origin
+// from the last status so it doesn't jump.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    stopClock();
+  } else if (clockSync) {
+    if (lastStatusPayload) seedClock(lastStatusPayload);
+    else startClock();
+  }
+});
+
 // Engine health counters: [json key, friendly label]. Each increment is a
 // likely-audible event on the local audio path.
 const HEALTH_FIELDS = [
@@ -984,6 +1044,7 @@ async function setupListeners() {
     });
     if (statusSnapshots.length > STATS_WINDOW_SIZE) statusSnapshots.shift();
     renderStatus(s);
+    seedClock(s);
   }));
 
   unlisten.push(await listen('tempo:changed', (event) => {
