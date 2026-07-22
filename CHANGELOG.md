@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.3.0 (2026-07-22)
+
+### Features
+
+- Peers tab — tree of peers with their sent channels (#373)
+- add a user-settable Link Audio Name (defaults to WAIL) (#372)
+
 ## 3.2.4 (2026-07-22)
 
 ### Fixes
