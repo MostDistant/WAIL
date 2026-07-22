@@ -584,7 +584,12 @@ function showSession(room) {
   clearLog();
   clearChatMessages();
   document.getElementById('session-room').textContent = room;
-  document.getElementById('peer-list').innerHTML = '<span class="empty">No peers connected</span>';
+  document.getElementById('sends-section').style.display = 'none';
+  document.getElementById('peer-list').innerHTML = '';
+  document.getElementById('peer-tree').innerHTML = '<span class="empty">No peers connected</span>';
+  const peerCount = document.getElementById('peer-count');
+  peerCount.textContent = '0/0';
+  peerCount.className = 'log-badge';
   document.getElementById('session-audio').textContent = '0 / 0';
   document.getElementById('session-audio-bytes').textContent = '0 B / 0 B';
   document.getElementById('session-plugin').textContent = 'disconnected';
@@ -727,16 +732,14 @@ function renderStatus(s) {
     document.getElementById('recording-size').textContent = `${mb} MB`;
   }
 
-  // Update slot list (local sends first, then remote slots)
-  const slotList = document.getElementById('peer-list');
+  // "Your Sends": in-app senders (test tone / WAV) only. Remote peers and the
+  // channels they send live on the Peers tab. The section stays hidden unless
+  // you're actually sending, and a status tick never clobbers an edit-in-progress.
   const localSends = (s.local_sends || []);
-  const slots = (s.slots || []).slice().sort((a, b) => a.slot - b.slot);
-  if (localSends.length === 0 && slots.length === 0) {
-    slotList.innerHTML = '<span class="empty">No peers connected</span>';
-  } else {
-    // Skip re-rendering local sends if user is editing a stream name
-    const isEditingStreamName = slotList.querySelector('.stream-name-input') != null;
-    const localHtml = isEditingStreamName ? null : localSends.map(ls => {
+  document.getElementById('sends-section').style.display = localSends.length ? '' : 'none';
+  const slotList = document.getElementById('peer-list');
+  if (localSends.length && slotList.querySelector('.stream-name-input') == null) {
+    slotList.innerHTML = localSends.map(ls => {
       const label = ls.stream_name
         ? escapeHtml(ls.stream_name)
         : (localSends.length > 1 ? `My Send (stream ${ls.stream_index})` : 'My Send');
@@ -748,31 +751,9 @@ function renderStatus(s) {
         <span class="peer-rtt"></span>
       </div>`;
     }).join('');
-    const remoteHtml = slots.map(sl => {
-      const streamLabel = sl.stream_name ? ` \u2014 ${escapeHtml(sl.stream_name)}` : '';
-      const name = sl.display_name
-        ? `${escapeHtml(sl.display_name)}${streamLabel} (${escapeHtml(sl.short_id)})`
-        : escapeHtml(sl.short_id);
-      const rtt = sl.rtt_ms != null ? `${sl.rtt_ms.toFixed(0)}ms` : '...';
-      const status = sl.status || 'connecting';
-      const statusClass = `peer-status status-${status}`;
-      return `<div class="peer-item">
-        <span class="peer-slot">Slot ${sl.slot}</span><span class="peer-name">${name}</span>
-        <span class="${statusClass}">${escapeHtml(status)}</span>
-        <span class="peer-rtt">${rtt}</span>
-      </div>`;
-    }).join('');
-    if (isEditingStreamName) {
-      // Only update remote slots, preserve local sends (user is editing)
-      const remoteContainer = slotList.querySelector('.remote-slots');
-      if (remoteContainer) remoteContainer.innerHTML = remoteHtml;
-    } else {
-      slotList.innerHTML = localHtml + `<span class="remote-slots">${remoteHtml}</span>`;
-      // Attach inline edit handlers to local send names
-      slotList.querySelectorAll('.peer-name.editable').forEach(span => {
-        span.addEventListener('click', startStreamNameEdit);
-      });
-    }
+    slotList.querySelectorAll('.peer-name.editable').forEach(span => {
+      span.addEventListener('click', startStreamNameEdit);
+    });
   }
 
   renderPeerTree(s);

@@ -120,11 +120,11 @@
 
     <!-- Session tab -->
     <div id="session-tab-session-content">
-      <section class="session-section">
-        <h3 class="section-label">Peers</h3>
-        <div id="peer-list" class="peer-list">
-          <span class="empty">No peers connected</span>
-        </div>
+      <!-- In-app senders only (test tone / WAV). Remote peers and their sent
+           channels live on the Peers tab. Shown only while you're sending. -->
+      <section class="session-section" id="sends-section" style="display:none">
+        <h3 class="section-label">Your Sends</h3>
+        <div id="peer-list" class="peer-list"></div>
       </section>
 
       <div id="link-no-peers-warning" class="warning" style="display:none">
