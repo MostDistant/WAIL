@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.5.0 (2026-07-22)
+
+### Features
+
+- add Ableton Link interval clock to the session UI (#382)
+
 ## 3.4.0 (2026-07-22)
 
 ### Features
