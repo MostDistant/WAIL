@@ -488,11 +488,14 @@ function bpiMath() {
 }
 
 function updateBpiHelper() {
-  const el = document.getElementById('bpi-helper');
+  const el = document.getElementById('quant-summary');
   const m = bpiMath();
   if (!m) { el.textContent = ''; el.classList.remove('error-text'); return; }
   if (m.whole) {
-    el.textContent = `(e.g. ${m.bars} bar${m.bars !== 1 ? 's' : ''} in ${m.bpb}/4)`;
+    const barsWord = `${m.bars} Bar${m.bars !== 1 ? 's' : ''}`;
+    el.innerHTML =
+      `<span class="quant-summary-eq">BEATS PER INTERVAL ${m.bpi} / BEATS PER BAR ${m.bpb} =</span>` +
+      `<span class="quant-summary-result">Set your Global Launch Quantization to ${barsWord}</span>`;
     el.classList.remove('error-text');
   } else {
     el.textContent = `${m.bars.toFixed(2)} bars in ${m.bpb}/4 — must be a whole number of bars`;
