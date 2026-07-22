@@ -26,8 +26,8 @@ import (
 const (
 	testEmitRate     = 48000
 	testEmitChannels = 2
-	testEmitCushion  = testEmitRate * 160 / 1000 // mirrors emitCushionFrames
-	testEmitChunk    = testEmitRate * 5 / 1000   // mirrors emitChunkFrames
+	testEmitCushion  = testEmitRate * 80 / 1000 // mirrors emitCushionFrames
+	testEmitChunk    = testEmitRate * 5 / 1000  // mirrors emitChunkFrames
 )
 
 // testSourceFrame generates the continuous never-zero test signal: frame i

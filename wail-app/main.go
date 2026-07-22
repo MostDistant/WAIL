@@ -40,7 +40,6 @@ func main() {
 	defer FlushHoneybadger()
 
 	log.Println("WAIL - WebSocket Audio Interchange for Link (Go/Wails)")
-	disableAppNap()
 
 	appBackend := NewApp(*instance)
 
@@ -55,6 +54,9 @@ func main() {
 		appBackend.fileLog = fileWriter
 		appBackend.wsLog = wsLogWriter
 	}
+
+	// After log setup so the status line reaches wail.log, not just stdout.
+	disableAppNap()
 
 	log.Printf("App initialized — identity: %s", appBackend.identity)
 

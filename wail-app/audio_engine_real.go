@@ -45,14 +45,12 @@ const (
 	discoveryInterval  = 1 * time.Second
 	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
 	// emitCushionMs is how far ahead of the playhead each sink is kept fed —
-	// stall tolerance for the emit loop (rides out App-Nap-adjacent scheduler
-	// stalls). It adds directly to a subscriber's reported buffering (stamps
-	// lead "now" by up to this much), so the practical ceiling is the
-	// subscriber's configured Link Audio Latency, not a fixed figure. Field
-	// A/B: 40ms let Live's buffer meter swing 0→max, 80ms held steady, 160ms
-	// best absorbed tab-switch stalls — hence the default. WAIL_EMIT_CUSHION_MS
-	// overrides it; drop it below a Link Latency setting under ~160ms.
-	emitCushionMs = 160
+	// stall tolerance for the emit loop. It adds directly to a subscriber's
+	// reported buffering, and the ceiling is the subscriber's configured Link
+	// Audio Latency. 160 regressed in real 3.2.3 sessions (buffer meter swung
+	// 0→max with audible glitches) while 80 held steady in the field, so 80 it
+	// is; WAIL_EMIT_CUSHION_MS overrides (see tradeoffs.md).
+	emitCushionMs = 80
 	// plcMaxFramesPerGap caps Opus packet-loss concealment per seq gap (120ms):
 	// libopus fades PLC to silence past ~100ms; a deeper gap's tail stays silent.
 	plcMaxFramesPerGap = 6
@@ -109,14 +107,18 @@ type linkAudioEngine struct {
 // stamps).
 func engineCushionFrames() int {
 	ms := emitCushionMs
+	src := "default"
 	if v := os.Getenv("WAIL_EMIT_CUSHION_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			ms = min(max(n, 10), 500)
-			log.Printf("[audio] emit cushion override: %dms (WAIL_EMIT_CUSHION_MS)", ms)
+			src = "WAIL_EMIT_CUSHION_MS"
 		} else {
 			log.Printf("[audio] warn: bad WAIL_EMIT_CUSHION_MS %q: %v", v, err)
 		}
 	}
+	// Always log the effective value — sessions must be diagnosable from the
+	// log alone, without inferring the default from an absent override line.
+	log.Printf("[audio] emit cushion: %dms (%s)", ms, src)
 	return engineInternalRate * ms / 1000
 }
 
