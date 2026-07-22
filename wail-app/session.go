@@ -957,7 +957,9 @@ func sessionLoop(
 				delta(logWarn, "sink write rejected mid-stream (chunk lost — audible hole for listeners)", lastHealth.EmitSinkWriteRejected, health.EmitSinkWriteRejected)
 				delta(logWarn, "frames never arrived by playout retirement (played as silence)", lastHealth.EmitFramesMissingAtPlay, health.EmitFramesMissingAtPlay)
 				delta(logInfo, "frames concealed by Opus PLC (masked loss)", lastHealth.EmitFramesConcealed, health.EmitFramesConcealed)
-				delta(logInfo, "intervals released before their streaming tail arrived (benign)", lastHealth.EmitIntervalsIncomplete, health.EmitIntervalsIncomplete)
+				// EmitIntervalsIncomplete is deliberately not logged: it fires once
+				// per interval in normal operation and never aligned with an audible
+				// glitch in the field. Still counted and shipped in the health snapshot.
 				delta(logWarn, "WAIF wire decode failures", lastHealth.WireDecodeFailures, health.WireDecodeFailures)
 				delta(logWarn, "Opus decode failures", lastHealth.OpusDecodeFailures, health.OpusDecodeFailures)
 				lastHealth = health
