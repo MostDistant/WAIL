@@ -379,7 +379,7 @@ summary:hover {
 
 /* --- Launch-quantization summary (rounded, prominent) --- */
 .quant-summary {
-  margin: 4px 0 10px;
+  margin: 12px 0 10px;
   padding: 12px 14px;
   border: 1px solid var(--accent);
   border-radius: var(--radius-lg);
