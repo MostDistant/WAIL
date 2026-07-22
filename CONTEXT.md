@@ -47,6 +47,9 @@ The room-wide interval counter, owned by the relay (NINJAM-style) so every WAIL 
 **Interval boundary**:
 Where one interval ends and the next begins. Each WAIL places boundaries on its own local Link phase and labels them with the shared interval index; completed audio ships and pending remote audio is released at the boundary.
 
+**BPI (beats per interval)**:
+The room interval's length in beats — bars × beats per bar (default 16). How interval length is displayed and chosen in the UI; the internal model and wire format remain bars × quantum.
+
 **Interval offset**:
 The NINJAM delay: audio captured during interval N is played by remote peers during their interval N+D. D is configurable (default one). A design constant, not network lag.
 _Avoid_: latency (reserved for network timing), one-interval offset (D is not fixed at one)
@@ -71,6 +74,13 @@ A local Link Audio channel WAIL subscribes to; the source of a stream.
 **Published channel**:
 A Link Audio channel WAIL publishes onto the LAN, carrying one remote stream one interval late.
 _Avoid_: slot, aux output (plugin-era names)
+
+**Beats per bar**:
+WAIL's quantum — the local phase lens passed to Link's beat/phase math. Per-peer and never shared by Link (Live ties its own to Global Quantization). Default 4.
+_Avoid_: meter, time signature (neither travels over Link; beats per bar is the number Link uses)
+
+**Launch quantization**:
+A DAW-local setting (e.g. Live's Global Quantization) that aligns clip launches to a bar multiple. Invisible to Link and WAIL — it can be communicated (prompts, display) but never read or enforced.
 
 **Channel affinity**:
 Republishing a reconnecting identity's streams under the same channel identities, so LAN apps' routing survives the blip.

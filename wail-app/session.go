@@ -37,14 +37,16 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetInterval", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
 	StreamIndex *uint16
 	WavFile     string
-	ChannelID   string // SetCaptureEnabled
-	Enabled     bool   // SetCaptureEnabled, SetCaptureDump, SetLoopback
+	ChannelID   string  // SetCaptureEnabled
+	Enabled     bool    // SetCaptureEnabled, SetCaptureDump, SetLoopback
+	Bars        uint32  // SetInterval
+	Quantum     float64 // SetInterval
 }
 
 // SessionHandle represents a running session.
@@ -169,6 +171,10 @@ func sessionLoop(
 
 	var lastIntervalIndex *int64
 	intervalCfg := interval.Config{Bars: bars, Quantum: quantum}
+	// foundedRoom tracks whether this peer anchored an empty room (ADR-0004):
+	// joiners — not founders — get the launch-quantization prompt.
+	foundedRoom := false
+	intervalPromptSent := false
 	lastBroadcastBPM := bpm
 	localStreamNames := make(map[uint16]string)
 
@@ -350,6 +356,16 @@ func sessionLoop(
 				logInfo("BPM changed to %.1f", cmd.BPM)
 				lastBroadcastBPM = cmd.BPM
 				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: cmd.BPM}
+			case "SetInterval":
+				// ADR-0004: anyone may change the room interval; the relay
+				// reanchors at the next boundary, so the current interval
+				// finishes under the old config.
+				if cmd.Bars > 0 && cmd.Quantum > 0 {
+					intervalCfg = interval.Config{Bars: cmd.Bars, Quantum: cmd.Quantum}
+					logInfo("Interval changed to %d bars x %.0f beats (%d BPI) — applies at the next interval boundary",
+						cmd.Bars, cmd.Quantum, uint32(float64(cmd.Bars)*cmd.Quantum))
+					mesh.Broadcast(NewIntervalConfig(cmd.Bars, cmd.Quantum))
+				}
 			case "SendChat":
 				msg := NewChatMessage(displayName, cmd.Text)
 				mesh.Broadcast(msg)
@@ -455,7 +471,10 @@ func sessionLoop(
 
 				hello := NewHello(peerID, &displayName, &identity)
 				mesh.Broadcast(hello)
-				mesh.Broadcast(NewIntervalConfig(bars, quantum))
+				// ADR-0004: re-broadcast the ADOPTED room config, not our
+				// join-time preference — the relay's last-writer-wins gossip
+				// would otherwise flap the room clock mid-jam.
+				mesh.Broadcast(NewIntervalConfig(intervalCfg.Bars, intervalCfg.Quantum))
 				mesh.Broadcast(NewAudioCapabilities([]uint32{48000}, []uint16{1, 2}, true, true))
 				sentStreamNames = nil // new peer: re-broadcast even if unchanged
 				syncStreamNames()
@@ -482,8 +501,9 @@ func sessionLoop(
 					// relay can anchor the room clock now. Without an anchor the
 					// engine has no room labels and releases nothing — a solo peer
 					// monitoring their own loopback would hear silence.
-					mesh.Broadcast(NewTempoChange(bpm, quantum, time.Now().UnixMicro()))
-					mesh.Broadcast(NewIntervalConfig(bars, quantum))
+					foundedRoom = true
+					mesh.Broadcast(NewTempoChange(bpm, intervalCfg.Quantum, time.Now().UnixMicro()))
+					mesh.Broadcast(NewIntervalConfig(intervalCfg.Bars, intervalCfg.Quantum))
 				}
 			}
 
@@ -616,6 +636,12 @@ func sessionLoop(
 				// labeler back via audioEngine.RoomIndex for boundary logging and
 				// in-app-sender tagging (one source of truth).
 				audioEngine.SetRoomAnchor(msg.Index, msg.BPM, msg.Bars, msg.Quantum)
+				// ADR-0004: the room interval is communicated, never enforced —
+				// prompt joiners (once) to match their DAW's launch quantization.
+				if !foundedRoom && !intervalPromptSent && msg.Bars > 0 {
+					intervalPromptSent = true
+					emitter.Emit("interval:prompt", IntervalPromptEvent{Bars: msg.Bars, Quantum: msg.Quantum, BPM: msg.BPM})
+				}
 
 			case "TempoChange":
 				var name string
@@ -776,7 +802,10 @@ func sessionLoop(
 				if math.Abs(ev.BPM-lastBroadcastBPM) > 0.01 {
 					logInfo("Local tempo changed to %.1f BPM", ev.BPM)
 					lastBroadcastBPM = ev.BPM
-					mesh.Broadcast(NewTempoChange(ev.BPM, quantum, ev.TimestampUs))
+					// ADR-0004: carry the ADOPTED room quantum, not our join-time
+					// preference — the relay treats TempoChange.quantum as
+					// authoritative, so a mismatched joiner would reanchor (flap) it.
+					mesh.Broadcast(NewTempoChange(ev.BPM, intervalCfg.Quantum, ev.TimestampUs))
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
 				handleBoundary(ev.Beat)
@@ -928,7 +957,8 @@ func sessionLoop(
 				BPM: state.BPM, Beat: state.Beat, Phase: state.Phase,
 				LinkPeers: state.NumPeers, Peers: peerInfos, Slots: slotInfos,
 				LocalSends: localSends, IntervalBars: intervalCfg.Bars,
-				AudioSent: audioIntervalsSent, AudioRecv: audioIntervalsReceived,
+				IntervalQuantum: intervalCfg.Quantum,
+				AudioSent:       audioIntervalsSent, AudioRecv: audioIntervalsReceived,
 				AudioBytesSent: audioBytesSent, AudioBytesRecv: audioBytesRecv,
 				AudioDCOpen: dcOpen, PluginConnected: true,
 				Recording: recorder != nil,

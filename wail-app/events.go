@@ -59,6 +59,14 @@ type SlotInfo struct {
 	StreamName   *string  `json:"stream_name,omitempty"`
 }
 
+// IntervalPromptEvent asks a joining user to match their DAW's launch
+// quantization to the room's interval (ADR-0004: communicated, never enforced).
+type IntervalPromptEvent struct {
+	Bars    uint32  `json:"bars"`
+	Quantum float64 `json:"quantum"`
+	BPM     float64 `json:"bpm"`
+}
+
 type StatusUpdate struct {
 	BPM                float64         `json:"bpm"`
 	Beat               float64         `json:"beat"`
@@ -68,6 +76,7 @@ type StatusUpdate struct {
 	Slots              []SlotInfo      `json:"slots"`
 	LocalSends         []LocalSendInfo `json:"local_sends"`
 	IntervalBars       uint32          `json:"interval_bars"`
+	IntervalQuantum    float64         `json:"interval_quantum"`
 	AudioSent          uint64          `json:"audio_sent"`
 	AudioRecv          uint64          `json:"audio_recv"`
 	AudioBytesSent     uint64          `json:"audio_bytes_sent"`

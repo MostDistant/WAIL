@@ -41,7 +41,20 @@ tar -xzf wail-linux-x64-*.tar.gz
 
 5. **Join a room** in the WAIL app. On first launch, you'll be prompted to enter a display name (you can change it later via the settings gear icon). Enter a room name and optionally set a password to create a private room, or leave it blank for a public room. You can also browse existing public rooms from the "Public Rooms" tab.
 
-6. **Play.** Audio is recorded for the duration of each interval (default: 4 bars), then transmitted to all connected peers. Playback runs one interval behind — this latency-by-design is how NINJAM-style sync works.
+6. **Play.** Audio is recorded for the duration of each interval (default: 16 beats — 4 bars), then transmitted to all connected peers. Playback runs one interval behind — this latency-by-design is how NINJAM-style sync works.
+
+## Beats per interval (BPI)
+
+Two numbers control the timing of every jam, NINJAM-style:
+
+- **BPM** (beats per minute) — the tempo, shared via Ableton Link
+- **BPI** (beats per interval) — how many beats fit in one interval
+
+Together they set the interval length: (BPI ÷ BPM) × 60 = seconds. At 120 BPM and 16 BPI, each interval lasts 8 seconds.
+
+The first peer in a room sets its BPI; everyone who joins adopts it. Anyone can change it mid-jam from the session screen — the change applies at the next interval boundary. BPI must divide evenly into whole bars at the room's beats per bar (default 4), e.g. 4, 8, 16, or 32.
+
+**Match your DAW's launch quantization to the room interval.** WAIL can't read or set your DAW's launch quantization (Ableton Link doesn't carry it), so it tells you instead: when you join a room, WAIL shows the room's interval and asks you to set your DAW to match (e.g. Live's Global Quantization → 4 Bars). This keeps everyone's clip launches aligned with the interval grid.
 
 ## Headless CLI Mode
 
