@@ -13,6 +13,8 @@
   --state-warn-dim: rgba(251, 191, 36, 0.15);
   --state-error: #f87171;
   --state-error-dim: rgba(248, 113, 113, 0.12);
+  --clock-fill: var(--accent);
+  --clock-empty: var(--bg-hover);
   --border: rgba(255, 255, 255, 0.06);
   --radius: 8px;
   --radius-lg: 12px;
@@ -505,6 +507,17 @@ summary:hover {
   font-weight: 500;
   color: var(--accent);
   font-family: var(--font-mono);
+}
+
+/* Interval clock: a countdown pie. Full at each interval boundary, empties
+   clockwise from noon over one interval (BPI). JS sets `background` per frame. */
+.link-clock {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: inset 0 0 0 1px var(--border);
+  background: var(--clock-empty);
 }
 
 /* --- Session sections --- */

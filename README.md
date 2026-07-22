@@ -56,6 +56,8 @@ The first peer in a room sets its BPI; everyone who joins adopts it. Anyone can 
 
 **Match your DAW's launch quantization to the room interval.** WAIL can't read or set your DAW's launch quantization (Ableton Link doesn't carry it), so it tells you instead: when you join a room, WAIL shows the room's interval and asks you to set your DAW to match (e.g. Live's Global Quantization → 4 Bars). This keeps everyone's clip launches aligned with the interval grid.
 
+The session header shows a small **interval clock** — a pie that starts full at each interval boundary and sweeps clockwise as the interval counts down, so you can see at a glance when the next one flips.
+
 ## Headless CLI Mode
 
 WAIL can run without the GUI for scripted or automated use. The `-headless` flag starts the app in CLI mode, and `-wav` streams a WAV file to peers in the room, looping continuously until stopped.
