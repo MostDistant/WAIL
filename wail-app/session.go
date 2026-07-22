@@ -123,7 +123,9 @@ func sessionLoop(
 	logInfo("Starting peer %s as %s in room %s (BPM %.0f, %d bars, quantum %.0f)", peerID, displayName, room, bpm, bars, quantum)
 
 	// Initialize Ableton Link
+	intervalCfg := interval.Config{Bars: bars, Quantum: quantum}
 	link := NewLinkBridge(bpm, quantum)
+	link.SetIntervalQuantum(intervalCfg.BeatsPerInterval())
 	link.Enable()
 	linkCmdCh, linkEventCh := link.SpawnPoller(ctx)
 	logInfo("Ableton Link enabled")
@@ -170,7 +172,6 @@ func sessionLoop(
 	}
 
 	var lastIntervalIndex *int64
-	intervalCfg := interval.Config{Bars: bars, Quantum: quantum}
 	// foundedRoom tracks whether this peer anchored an empty room (ADR-0004):
 	// joiners — not founders — get the launch-quantization prompt.
 	foundedRoom := false
@@ -362,6 +363,7 @@ func sessionLoop(
 				// finishes under the old config.
 				if cmd.Bars > 0 && cmd.Quantum > 0 {
 					intervalCfg = interval.Config{Bars: cmd.Bars, Quantum: cmd.Quantum}
+					link.SetIntervalQuantum(intervalCfg.BeatsPerInterval())
 					logInfo("Interval changed to %d bars x %.0f beats (%d BPI) — applies at the next interval boundary",
 						cmd.Bars, cmd.Quantum, uint32(float64(cmd.Bars)*cmd.Quantum))
 					mesh.Broadcast(NewIntervalConfig(cmd.Bars, cmd.Quantum))
@@ -636,6 +638,12 @@ func sessionLoop(
 				// labeler back via audioEngine.RoomIndex for boundary logging and
 				// in-app-sender tagging (one source of truth).
 				audioEngine.SetRoomAnchor(msg.Index, msg.BPM, msg.Bars, msg.Quantum)
+				// The anchor carries the room's authoritative config: adopt it for
+				// session-side boundary math and the bridge's interval-beat lens.
+				if msg.Bars > 0 && msg.Quantum > 0 {
+					intervalCfg = interval.Config{Bars: msg.Bars, Quantum: msg.Quantum}
+				}
+				link.SetIntervalQuantum(intervalCfg.BeatsPerInterval())
 				// ADR-0004: the room interval is communicated, never enforced —
 				// prompt joiners (once) to match their DAW's launch quantization.
 				if !foundedRoom && !intervalPromptSent && msg.Bars > 0 {
@@ -670,6 +678,7 @@ func sessionLoop(
 			case "IntervalConfig":
 				logInfo("Remote interval config: %d bars, quantum %.0f", msg.Bars, msg.Quantum)
 				intervalCfg = interval.Config{Bars: msg.Bars, Quantum: msg.Quantum}
+				link.SetIntervalQuantum(intervalCfg.BeatsPerInterval())
 
 			case "AudioStatus":
 				peers.WithPeer(from, func(p *PeerState) {

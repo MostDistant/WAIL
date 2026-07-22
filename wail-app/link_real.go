@@ -19,7 +19,12 @@ type LinkBridge struct {
 	link         *abllink.Link
 	sessionState *abllink.SessionState
 	quantum      float64
-	detector     *TempoChangeDetector
+	// intervalQuantum is the room BPI (bars × quantum). State().Beat is phase-
+	// encoded at it: Link pins beat phase only mod the quantum asked for, and
+	// interval math needs beat mod BPI pinned — the bar lens left which bar of
+	// the interval per-peer arbitrary.
+	intervalQuantum float64
+	detector        *TempoChangeDetector
 }
 
 // NewLinkBridge creates a new Link bridge with the given initial BPM and quantum.
@@ -27,10 +32,11 @@ func NewLinkBridge(initialBPM, quantum float64) *LinkBridge {
 	link := abllink.New(initialBPM)
 	ss := abllink.NewSessionState()
 	return &LinkBridge{
-		link:         link,
-		sessionState: ss,
-		quantum:      quantum,
-		detector:     NewTempoChangeDetector(initialBPM),
+		link:            link,
+		sessionState:    ss,
+		quantum:         quantum,
+		intervalQuantum: quantum,
+		detector:        NewTempoChangeDetector(initialBPM),
 	}
 }
 
@@ -78,7 +84,9 @@ func (lb *LinkBridge) ForceBeat(beat float64, rttUs *int64) {
 	log.Printf("[link] Forced beat to %.2f (compensated=%.2f, rtt=%v)", beat, compensated, rttUs)
 }
 
-// State returns the current Link state.
+// State returns the current Link state. Beat is phase-encoded at the interval
+// quantum (BPI) so interval bucketing of it lands on the session-shared
+// interval grid; Phase stays the within-bar lens.
 func (lb *LinkBridge) State() LinkState {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
@@ -86,7 +94,7 @@ func (lb *LinkBridge) State() LinkState {
 	lb.link.CaptureAppSessionState(lb.sessionState)
 	return LinkState{
 		BPM:         lb.sessionState.Tempo(),
-		Beat:        lb.sessionState.BeatAtTime(t, lb.quantum),
+		Beat:        lb.sessionState.BeatAtTime(t, lb.intervalQuantum),
 		Phase:       lb.sessionState.PhaseAtTime(t, lb.quantum),
 		Quantum:     lb.quantum,
 		TimestampUs: t,
@@ -118,6 +126,16 @@ func (lb *LinkBridge) SetPeerName(name string) {
 // Quantum returns the Link session quantum.
 func (lb *LinkBridge) Quantum() float64 {
 	return lb.quantum
+}
+
+// SetIntervalQuantum updates the room BPI used as State().Beat's phase lens.
+func (lb *LinkBridge) SetIntervalQuantum(q float64) {
+	if q <= 0 {
+		return
+	}
+	lb.mu.Lock()
+	lb.intervalQuantum = q
+	lb.mu.Unlock()
 }
 
 // SpawnPoller starts a polling goroutine that monitors the Link session.
