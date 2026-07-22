@@ -54,7 +54,7 @@ Together they set the interval length: (BPI ÷ BPM) × 60 = seconds. At 120 BPM 
 
 The first peer in a room sets its BPI; everyone who joins adopts it. Anyone can change it mid-jam from the session screen — the change applies at the next interval boundary. BPI must divide evenly into whole bars at the room's beats per bar (default 4), e.g. 4, 8, 16, or 32.
 
-**Match your DAW's launch quantization to the room interval.** WAIL can't read or set your DAW's launch quantization (Ableton Link doesn't carry it), so it tells you instead: when you join a room, WAIL shows the room's interval and asks you to set your DAW to match (e.g. Live's Global Quantization → 4 Bars). This keeps everyone's clip launches aligned with the interval grid.
+**Match your DAW's launch quantization to the room interval.** WAIL can't read or set your DAW's launch quantization (Ableton Link doesn't carry it), so it tells you instead: when you join a room, WAIL shows the room's interval and asks you to set your DAW to match (e.g. Live's Global Quantization → 4 Bars). This keeps everyone's clip launches aligned with the interval grid. Join the room first, then start your DAW's transport — that gives you a clean first interval (WAIL still handles a mid-interval start, so it's a nicety, not a hard requirement).
 
 ## Headless CLI Mode
 

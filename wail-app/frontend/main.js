@@ -999,7 +999,7 @@ async function setupListeners() {
     const bpi = Math.round(p.bars * p.quantum);
     const barsWord = `${p.bars} bar${p.bars !== 1 ? 's' : ''}`;
     document.getElementById('interval-prompt-text').textContent =
-      `This room runs ${bpi} beats (${barsWord}) per interval — set your DAW's launch quantization to ${barsWord} to match.`;
+      `This room runs ${bpi} beats (${barsWord}) per interval — set your DAW's launch quantization to ${barsWord} to match, then start your transport.`;
     document.getElementById('interval-prompt').style.display = '';
   }));
 
