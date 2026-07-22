@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.2.4 (2026-07-22)
+
+### Fixes
+
+- prefix WAIL's Link Audio peer name with "WAIL-" (#370)
+- stop logging the benign "intervals released before their tail arrived" line (#369)
+- return the default emit cushion to 80ms — 160 regressed in the field (#368)
+
 ## 3.2.3 (2026-07-21)
 
 ### Fixes
