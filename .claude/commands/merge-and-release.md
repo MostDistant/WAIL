@@ -57,10 +57,10 @@ If the merged commit was `chore:` / `docs:`, "Prepare Release" concludes `skippe
 ### 5. Merge the release PR
 
 - Confirm it touches only `CHANGELOG.md` + `VERSION`: `gh pr diff <RELEASE_PR> --name-only`. Anything else → stop and investigate.
-- Matching `/release`, let CI settle, then merge with a merge commit and delete the branch (knope recreates `release` on the next prepare-release):
+- Let CI settle, then squash-merge and delete the branch (knope recreates `release` on the next prepare-release). **This repo disallows merge commits — use `--squash`, not `--merge`** (a `--merge` attempt fails with "Merge commits are not allowed on this repository"). `release-on-merge.yml` triggers on the merge regardless of method.
 
 ```sh
-sleep 120 && gh pr merge <RELEASE_PR> --merge --delete-branch
+sleep 120 && gh pr merge <RELEASE_PR> --squash --delete-branch
 ```
 
 ### 6. Wait for the release to complete
