@@ -287,7 +287,7 @@ function saveRememberEnabled(enabled) {
 
 // --- Remember settings ---
 const STORAGE_KEY = 'wail-settings';
-const rememberFields = ['room', 'password', 'bars', 'quantum', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
+const rememberFields = ['room', 'password', 'bpi', 'quantum', 'recording-enabled', 'recording-dir', 'recording-stems', 'recording-retention'];
 
 function loadSettings() {
   try {
@@ -432,13 +432,18 @@ function renderPublicRooms(rooms) {
 }
 
 async function joinPublicRoom(room) {
+  const m = bpiMath();
+  if (!m || !m.whole) {
+    showError(joinError, 'Beats per interval must divide evenly into whole bars');
+    return;
+  }
   const params = {
     room: room,
     password: null,
     displayName: getDisplayName(),
     bpm: 120.0,
-    bars: parseInt(document.getElementById('bars').value),
-    quantum: parseFloat(document.getElementById('quantum').value),
+    bars: m.bars,
+    quantum: m.bpb,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
     recordingStems: document.getElementById('recording-stems').checked,
@@ -456,6 +461,37 @@ async function joinPublicRoom(room) {
 }
 
 document.getElementById('refresh-rooms-btn').addEventListener('click', fetchPublicRooms);
+
+// --- Beats per interval (ADR-0004) ---
+// BPI is the user-facing interval length; the wire model stays bars x beats
+// per bar, so BPI must divide evenly into whole bars.
+const bpiInput = document.getElementById('bpi');
+const quantumInput = document.getElementById('quantum');
+
+function bpiMath() {
+  const bpi = parseFloat(bpiInput.value);
+  const bpb = parseFloat(quantumInput.value);
+  if (!(bpi > 0) || !(bpb > 0)) return null;
+  const bars = bpi / bpb;
+  return { bpi, bpb, bars, whole: Number.isInteger(bars) };
+}
+
+function updateBpiHelper() {
+  const el = document.getElementById('bpi-helper');
+  const m = bpiMath();
+  if (!m) { el.textContent = ''; el.classList.remove('error-text'); return; }
+  if (m.whole) {
+    el.textContent = `(e.g. ${m.bars} bar${m.bars !== 1 ? 's' : ''} in ${m.bpb}/4)`;
+    el.classList.remove('error-text');
+  } else {
+    el.textContent = `${m.bars.toFixed(2)} bars in ${m.bpb}/4 — must be a whole number of bars`;
+    el.classList.add('error-text');
+  }
+}
+
+bpiInput.addEventListener('input', updateBpiHelper);
+quantumInput.addEventListener('input', updateBpiHelper);
+updateBpiHelper();
 
 // --- Recording options toggle ---
 document.getElementById('recording-enabled').addEventListener('change', (e) => {
@@ -492,6 +528,13 @@ function openSettings() {
 
 settingsBtn.addEventListener('click', openSettings);
 document.getElementById('session-settings-btn').addEventListener('click', openSettings);
+
+document.getElementById('interval-prompt-ok').addEventListener('click', () => {
+  document.getElementById('interval-prompt').style.display = 'none';
+});
+document.getElementById('interval-prompt-close').addEventListener('click', () => {
+  document.getElementById('interval-prompt').style.display = 'none';
+});
 
 settingsCloseBtn.addEventListener('click', () => {
   settingsPanel.style.display = 'none';
@@ -595,7 +638,8 @@ function showSession(room) {
   document.getElementById('session-plugin').textContent = 'disconnected';
   document.getElementById('session-plugin').className = 'status-value';
   document.getElementById('session-link-peers').textContent = '0';
-  document.getElementById('session-interval').textContent = '-';
+  document.getElementById('session-bpi').value = '';
+  document.getElementById('session-interval-bars').textContent = '-';
   document.getElementById('recording-stat').style.display =
     document.getElementById('recording-enabled').checked ? '' : 'none';
 }
@@ -617,13 +661,20 @@ joinForm.addEventListener('submit', async (e) => {
   joinBtn.disabled = true;
   joinBtn.textContent = 'Connecting...';
 
+  const m = bpiMath();
+  if (!m || !m.whole) {
+    showError(joinError, 'Beats per interval must divide evenly into whole bars');
+    joinBtn.disabled = false;
+    joinBtn.textContent = 'Join Room';
+    return;
+  }
   const params = {
     room: document.getElementById('room').value,
     password: document.getElementById('password').value || null,
     displayName: getDisplayName(),
     bpm: 120.0,
-    bars: parseInt(document.getElementById('bars').value),
-    quantum: parseFloat(document.getElementById('quantum').value),
+    bars: m.bars,
+    quantum: m.bpb,
     recordingEnabled: document.getElementById('recording-enabled').checked,
     recordingDirectory: document.getElementById('recording-dir').value || null,
     recordingStems: document.getElementById('recording-stems').checked,
@@ -672,6 +723,37 @@ sessionBpmInput.addEventListener('keydown', (e) => {
 
 sessionBpmInput.addEventListener('change', applyBpm);
 
+// --- Set interval BPI (ADR-0004: anyone may change it; applies at the next
+// interval boundary, relay reanchors the room clock) ---
+const sessionBpiInput = document.getElementById('session-bpi');
+let roomQuantum = 4;
+let lastIntervalBars = 4;
+
+async function applyBpi() {
+  const bpi = parseInt(sessionBpiInput.value);
+  const bars = bpi / roomQuantum;
+  if (!(bpi > 0) || !Number.isInteger(bars)) {
+    showError(sessionError, `Beats per interval must be a whole number of bars at ${roomQuantum} beats per bar`);
+    sessionBpiInput.value = Math.round(lastIntervalBars * roomQuantum);
+    return;
+  }
+  if (bars === lastIntervalBars) return;
+  sessionError.style.display = 'none';
+  try {
+    await invoke('set_interval', { bars, quantum: roomQuantum });
+  } catch (err) {
+    showError(sessionError, err);
+  }
+}
+
+sessionBpiInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sessionBpiInput.blur();
+  }
+});
+sessionBpiInput.addEventListener('change', applyBpi);
+
 // --- Stats mode toggle click handlers ---
 document.getElementById('stats-mode-btn').addEventListener('click', toggleStatsMode);
 document.getElementById('stats-mode-btn-net').addEventListener('click', toggleStatsMode);
@@ -718,7 +800,15 @@ function renderStatus(s) {
   document.getElementById('session-audio-bytes').textContent =
     `${formatBytes(bytesSent)} / ${formatBytes(bytesRecv)}`;
 
-  document.getElementById('session-interval').textContent = `${s.interval_bars} bar${s.interval_bars !== 1 ? 's' : ''}`;
+  // Interval display: beats-first, bars in parens (ADR-0004).
+  roomQuantum = s.interval_quantum || 4;
+  lastIntervalBars = s.interval_bars;
+  const roomBpi = Math.round(s.interval_bars * roomQuantum);
+  if (document.activeElement !== sessionBpiInput) {
+    sessionBpiInput.value = roomBpi;
+  }
+  document.getElementById('session-interval-bars').textContent =
+    `(${s.interval_bars} bar${s.interval_bars !== 1 ? 's' : ''})`;
 
   // Link Audio engine status: show how many local channels are bridged.
   const captureChannels = s.capture_channels || [];
@@ -874,6 +964,15 @@ async function setupListeners() {
 
   unlisten.push(await listen('session:error', (event) => {
     showError(sessionError, event.payload.message);
+  }));
+
+  unlisten.push(await listen('interval:prompt', (event) => {
+    const p = event.payload;
+    const bpi = Math.round(p.bars * p.quantum);
+    const barsWord = `${p.bars} bar${p.bars !== 1 ? 's' : ''}`;
+    document.getElementById('interval-prompt-text').textContent =
+      `This room runs ${bpi} beats (${barsWord}) per interval — set your DAW's launch quantization to ${barsWord} to match.`;
+    document.getElementById('interval-prompt').style.display = '';
   }));
 
   unlisten.push(await listen('session:ended', () => {

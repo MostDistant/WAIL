@@ -189,6 +189,8 @@ Example: 4 bars × 4.0 quantum = 16 beats per interval. Beat 15.9 → interval 0
 
 **Relay-authoritative room index (ADR-0003):** the relay server owns the room interval index and broadcasts an `interval_anchor` (index + tempo/config + server time). Each client maps its *local* index to the shared *room* index via a constant offset established from the anchor (`internal/interval.RoomLabeler`). Every WAIL agrees on the room index by construction; WAIF frames are tagged with it, and the receiver's hold-until-boundary scheduler releases interval `N` at the local boundary labeled `N+D`.
 
+**Room interval length (ADR-0004):** the interval length is shown to users as BPI (beats per interval = bars × beats per bar), but the wire model stays bars × quantum. The first peer in a room anchors its config; joiners adopt it, and anyone can change it mid-jam (`IntervalConfig` broadcast → relay reanchors at the next boundary). Peers always re-broadcast the *adopted* config, never their join-time preference — the relay's last-writer-wins gossip would otherwise flap the room clock. A DAW's launch quantization can't be read or set over Link, so alignment guidance is communicated (join prompt + display), never enforced.
+
 **WAN peers' boundaries are NOT synchronized in wall-clock.** Peer A might cross into interval 1 while Peer B is still in interval 0. This is fine for NINJAM semantics — you always play the _previous_ interval, so drift up to 1 full interval is tolerable. As long as the wire data arrives before the receiver's `N+D` boundary, it plays on time; late frames live-append.
 
 ## Clock Domains

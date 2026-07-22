@@ -222,6 +222,21 @@ func (a *App) ChangeBPM(bpm float64) error {
 	return nil
 }
 
+// SetInterval changes the room's interval length (ADR-0004). The relay
+// reanchors the room clock, so the change applies at the next interval boundary.
+func (a *App) SetInterval(bars uint32, quantum float64) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session == nil {
+		return fmt.Errorf("not in a session")
+	}
+	if bars == 0 || quantum <= 0 {
+		return fmt.Errorf("bars and beats per bar must be positive")
+	}
+	a.session.CmdCh <- SessionCommand{Type: "SetInterval", Bars: bars, Quantum: quantum}
+	return nil
+}
+
 // SendChat sends a chat message.
 func (a *App) SendChat(text string) error {
 	a.mu.Lock()

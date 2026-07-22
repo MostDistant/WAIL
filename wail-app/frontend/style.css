@@ -365,6 +365,34 @@ summary:hover {
   white-space: nowrap;
 }
 
+.hint {
+  font-size: 12px;
+  color: var(--fg-dim);
+  margin: -6px 0 10px;
+}
+
+.hint.error-text {
+  color: var(--state-error);
+}
+
+.bpi-inline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hint-inline {
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.prompt-text {
+  font-size: 14px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+
 /* --- Error / Warning --- */
 .error {
   margin-top: 12px;
