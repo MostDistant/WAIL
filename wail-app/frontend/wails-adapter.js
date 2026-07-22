@@ -54,7 +54,7 @@
     const argOrder = {
         'join_room': ['room', 'password', 'displayName', 'bpm', 'bars', 'quantum',
                        'recordingEnabled', 'recordingDirectory', 'recordingStems',
-                       'recordingRetentionDays', 'streamCount'],
+                       'recordingRetentionDays', 'streamCount', 'linkAudioName'],
         'change_bpm': ['bpm'],
         'send_chat': ['text'],
         'set_test_tone': ['streamIndex'],

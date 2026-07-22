@@ -104,7 +104,7 @@ func main() {
 			pw = password
 		}
 		go func() {
-			result, err := appBackend.JoinRoom(*room, pw, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil)
+			result, err := appBackend.JoinRoom(*room, pw, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil, nil)
 			if err != nil {
 				log.Printf("Failed to auto-join room: %v", err)
 				return
@@ -139,7 +139,7 @@ func runHeadless(app *App, room, password string, bpm float64, name, wavFile str
 
 	log.Printf("Headless mode: joining room %q as %q at %.0f BPM", room, displayName, bpm)
 
-	result, err := app.JoinRoom(room, pw, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil)
+	result, err := app.JoinRoom(room, pw, displayName, &bpm, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		log.Fatalf("Failed to join room: %v", err)
 	}
