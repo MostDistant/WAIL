@@ -115,7 +115,7 @@
       <button type="button" class="tab active" id="session-tab-session">Session</button>
       <button type="button" class="tab" id="session-tab-chat">Chat</button>
       <button type="button" class="tab" id="session-tab-logs">Logs <span id="log-count" class="log-badge">0</span></button>
-      <button type="button" class="tab" id="session-tab-network">Network</button>
+      <button type="button" class="tab" id="session-tab-network">Peers <span id="peer-count" class="log-badge">0/0</span></button>
     </div>
 
     <!-- Session tab -->
@@ -194,26 +194,11 @@
       </div>
     </div>
 
-    <!-- Network tab -->
+    <!-- Peers tab: tree of remote peers with the channels each is sending -->
     <div id="session-tab-network-content" style="display:none">
-      <div class="network-header">
-        <button type="button" id="stats-mode-btn-net" class="stats-mode-toggle">all time</button>
+      <div id="peer-tree" class="peer-tree">
+        <span class="empty">No peers connected</span>
       </div>
-      <table class="network-table">
-        <thead>
-          <tr>
-            <th>Peer</th>
-            <th>Slot</th>
-            <th>Connection</th>
-            <th>RTT</th>
-            <th>Recv</th>
-            <th>Lost</th>
-          </tr>
-        </thead>
-        <tbody id="network-table-body">
-          <tr><td colspan="6" class="empty">No peers connected</td></tr>
-        </tbody>
-      </table>
 
       <!-- Local audio-path health counters (each increment ≈ one audible-risk event) -->
       <h3 class="section-label network-health-label">Local audio health</h3>

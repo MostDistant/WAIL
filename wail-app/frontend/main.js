@@ -240,9 +240,7 @@ let roomRefreshTimer = null;
 const STATS_WINDOW_SIZE = 60; // 60 ticks x 2s = 2 minutes
 let statsMode = 'all';        // 'all' or 'recent'
 let statusSnapshots = [];
-let networkSnapshots = [];
 let lastStatusPayload = null;
-let lastNetworkPeers = null;
 
 // --- Display Name Storage ---
 const DISPLAY_NAME_KEY = 'wail-display-name';
@@ -559,12 +557,9 @@ sessionTabNetworkBtn.addEventListener('click', () => switchSessionTab(sessionTab
 
 function resetStatsWindow() {
   statusSnapshots = [];
-  networkSnapshots = [];
   statsMode = 'all';
   lastStatusPayload = null;
-  lastNetworkPeers = null;
   document.getElementById('stats-mode-btn').textContent = 'all time';
-  document.getElementById('stats-mode-btn-net').textContent = 'all time';
 }
 
 function showJoin() {
@@ -674,7 +669,6 @@ sessionBpmInput.addEventListener('change', applyBpm);
 
 // --- Stats mode toggle click handlers ---
 document.getElementById('stats-mode-btn').addEventListener('click', toggleStatsMode);
-document.getElementById('stats-mode-btn-net').addEventListener('click', toggleStatsMode);
 
 // --- Chat ---
 chatSendBtn.addEventListener('click', sendChatMessage);
@@ -690,9 +684,7 @@ function toggleStatsMode() {
   statsMode = statsMode === 'all' ? 'recent' : 'all';
   const label = statsMode === 'all' ? 'all time' : 'last 2 min';
   document.getElementById('stats-mode-btn').textContent = label;
-  document.getElementById('stats-mode-btn-net').textContent = label;
   if (lastStatusPayload) renderStatus(lastStatusPayload);
-  if (lastNetworkPeers) renderNetwork(lastNetworkPeers);
 }
 
 function renderStatus(s) {
@@ -782,6 +774,8 @@ function renderStatus(s) {
       });
     }
   }
+
+  renderPeerTree(s);
 }
 
 // Engine health counters: [json key, friendly label]. Each increment is a
@@ -816,41 +810,78 @@ function renderHealth(health) {
   }).join('');
 }
 
-function renderNetwork(peers) {
-  const tbody = document.getElementById('network-table-body');
-  if (peers.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty">No peers connected</td></tr>';
+// Peers tab: a tree of remote peers with the Link Audio channels each is
+// sending nested beneath. Built from the status:update payload — peers carry
+// the roster (and the denominator), slots carry each peer's channels. A peer
+// counts as "sending" when we're presently receiving its audio (is_receiving).
+function renderPeerTree(s) {
+  const treeEl = document.getElementById('peer-tree');
+  const badge = document.getElementById('peer-count');
+  const peers = s.peers || [];
+  const slots = s.slots || [];
+
+  // Group channels under their peer. peer_id ties a slot to a roster entry;
+  // slots whose peer has dropped (id empty / not in the roster) are shown as
+  // their own reconnecting node so no channel silently disappears.
+  const channelsByPeer = new Map();
+  for (const sl of slots) {
+    const key = sl.peer_id || `client:${sl.client_id}`;
+    if (!channelsByPeer.has(key)) channelsByPeer.set(key, []);
+    channelsByPeer.get(key).push(sl);
+  }
+
+  const nodes = peers.map(p => ({
+    name: p.display_name || p.peer_id.slice(0, 8),
+    status: p.status || 'connecting',
+    rtt: p.rtt_ms,
+    sending: !!p.is_receiving,
+    channels: channelsByPeer.get(p.peer_id) || [],
+  }));
+  const roster = new Set(peers.map(p => p.peer_id));
+  for (const [key, chans] of channelsByPeer) {
+    if (roster.has(key)) continue;
+    nodes.push({
+      name: chans[0].display_name || chans[0].short_id || key,
+      status: 'reconnecting',
+      rtt: chans[0].rtt_ms,
+      sending: chans.some(c => c.is_receiving),
+      channels: chans,
+    });
+  }
+  nodes.sort((a, b) => a.name.localeCompare(b.name));
+
+  // Count reflects the roster: peers presently sending / total connected.
+  const sending = peers.filter(p => p.is_receiving).length;
+  badge.textContent = `${sending}/${peers.length}`;
+  badge.className = 'log-badge' + (sending > 0 ? ' has-activity' : '');
+
+  if (nodes.length === 0) {
+    treeEl.innerHTML = '<span class="empty">No peers connected</span>';
     return;
   }
-  const oldest = networkSnapshots.length > 1 ? networkSnapshots[0] : null;
-  tbody.innerHTML = peers.map(p => {
-    const name = p.display_name
-      ? escapeHtml(p.display_name)
-      : escapeHtml(p.peer_id.slice(0, 8));
-    const slot = p.slot != null ? `Slot ${p.slot}` : '-';
-    const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '-';
+  treeEl.innerHTML = nodes.map(renderPeerNode).join('');
+}
 
-    let fr = p.frames_received;
-    let lost = p.packets_lost;
-
-    if (statsMode === 'recent' && oldest) {
-      const old = oldest.get(p.peer_id);
-      if (old) {
-        fr = Math.max(0, p.frames_received - old.frames_received);
-        lost = Math.max(0, p.packets_lost - old.packets_lost);
-      }
-    }
-
-    const lostClass = lost > 0 ? 'health-bad' : '';
-    return `<tr>
-      <td>${name}</td>
-      <td>${slot}</td>
-      <td class="net-state net-${escapeHtml(p.connection_state)}">${escapeHtml(p.connection_state)}</td>
-      <td>${rtt}</td>
-      <td>${fr}</td>
-      <td class="${lostClass}">${lost}</td>
-    </tr>`;
-  }).join('');
+function renderPeerNode(n) {
+  const statusClass = n.sending ? 'status-receiving' : `status-${n.status}`;
+  const tag = n.sending ? 'sending' : (n.status === 'connected' ? 'idle' : n.status);
+  const rtt = n.rtt != null ? `${n.rtt.toFixed(0)}ms` : '';
+  const chans = n.channels.slice().sort((a, b) => a.channel_index - b.channel_index);
+  const channelsHtml = chans.length
+    ? chans.map(c => {
+        const label = c.stream_name ? escapeHtml(c.stream_name) : `Channel ${c.channel_index}`;
+        return `<div class="peer-channel"><span class="channel-name">${label}</span></div>`;
+      }).join('')
+    : '<div class="peer-channel peer-channel--none"><span class="channel-name">no channels</span></div>';
+  return `<div class="peer-node">
+    <div class="peer-node-head">
+      <span class="peer-dot ${statusClass}"></span>
+      <span class="peer-name">${escapeHtml(n.name)}</span>
+      <span class="peer-status ${statusClass}">${escapeHtml(tag)}</span>
+      <span class="peer-rtt">${rtt}</span>
+    </div>
+    <div class="peer-channels">${channelsHtml}</div>
+  </div>`;
 }
 
 // --- Event Listeners ---
@@ -890,20 +921,9 @@ async function setupListeners() {
     addChatMessage(p.sender_name, p.is_own, p.text);
   }));
 
+  // The peer tree is driven by status:update (it carries peers + slots); this
+  // event now only feeds the local audio-health counters beneath it.
   unlisten.push(await listen('peers:network', (event) => {
-    const peers = event.payload.peers;
-    lastNetworkPeers = peers;
-    const snap = new Map();
-    for (const p of peers) {
-      snap.set(p.peer_id, {
-        audio_recv: p.audio_recv,
-        frames_received: p.frames_received,
-        packets_lost: p.packets_lost,
-      });
-    }
-    networkSnapshots.push(snap);
-    if (networkSnapshots.length > STATS_WINDOW_SIZE) networkSnapshots.shift();
-    renderNetwork(peers);
     renderHealth(event.payload.health);
   }));
 }

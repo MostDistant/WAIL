@@ -894,6 +894,7 @@ func sessionLoop(
 				}
 				slotInfos = append(slotInfos, SlotInfo{
 					Slot: uint32(m.SlotIndex + 1), ShortID: m.ShortID(), ClientID: m.ClientID,
+					PeerID:       pid,
 					ChannelIndex: m.ChannelIndex, DisplayName: dn, Status: &status,
 					RTTMs: rttMs, IsSending: isSend, IsReceiving: isRecv, StreamName: streamName,
 				})
