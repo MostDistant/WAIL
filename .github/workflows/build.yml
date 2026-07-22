@@ -69,9 +69,24 @@ jobs:
       # when GOCACHE misses. Routed in via CC/CXX on the build step below.
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
+        continue-on-error: true
         with:
           key: ${{ github.job }}-${{ runner.os }}
           max-size: 500M
+
+      # cgo uses ccache only if it actually installed; otherwise CC/CXX stay
+      # unset and cgo falls back to the default gcc/g++ (slower, but still green).
+      # The action downloads a binary each run, so a network blip must not fail CI.
+      - name: Enable ccache for cgo if available
+        shell: bash
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            echo "CC=ccache gcc" >> "$GITHUB_ENV"
+            echo "CXX=ccache g++" >> "$GITHUB_ENV"
+            echo "cgo will use ccache"
+          else
+            echo "ccache unavailable — building without compiler cache"
+          fi
 
       - name: Cache vcpkg
         id: vcpkg-cache
@@ -125,15 +140,14 @@ jobs:
 
       - name: Build Go app
         env:
-          CC: ccache gcc
-          CXX: ccache g++
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-mingw-static\lib\pkgconfig
         run: go build -tags nolibopusfile -o NUL .
         working-directory: wail-app
 
       - name: ccache stats
         if: always()
-        run: ccache -s
+        shell: bash
+        run: command -v ccache >/dev/null 2>&1 && ccache -s || echo "ccache not installed"
 
       - name: Build & test signaling-server
         run: go build ./... && go test ./...
@@ -162,9 +176,24 @@ jobs:
       # when GOCACHE misses. Routed in via CC/CXX on the build/test steps below.
       - name: Set up ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
+        continue-on-error: true
         with:
           key: ${{ github.job }}-${{ runner.os }}
           max-size: 500M
+
+      # cgo uses ccache only if it actually installed; otherwise CC/CXX stay
+      # unset and cgo falls back to the default gcc/g++ (slower, but still green).
+      # The action downloads a binary each run, so a network blip must not fail CI.
+      - name: Enable ccache for cgo if available
+        shell: bash
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            echo "CC=ccache gcc" >> "$GITHUB_ENV"
+            echo "CXX=ccache g++" >> "$GITHUB_ENV"
+            echo "cgo will use ccache"
+          else
+            echo "ccache unavailable — building without compiler cache"
+          fi
 
       - name: Install system dependencies
         run: |
@@ -182,22 +211,17 @@ jobs:
             g++
 
       - name: Build Go app
-        env:
-          CC: ccache gcc
-          CXX: ccache g++
         run: go build -tags nolibopusfile -o /dev/null .
         working-directory: wail-app
 
       - name: Test Go app
-        env:
-          CC: ccache gcc
-          CXX: ccache g++
         run: go test -tags nolibopusfile ./...
         working-directory: wail-app
 
       - name: ccache stats
         if: always()
-        run: ccache -s
+        shell: bash
+        run: command -v ccache >/dev/null 2>&1 && ccache -s || echo "ccache not installed"
 
       - name: Build & test signaling-server
         run: go build ./... && go test ./...
