@@ -64,6 +64,10 @@ jobs:
     # the Go/CGo desktop-app build (the same headers compile cleanly on the
     # Linux runner's GCC 11). See #329.
     runs-on: windows-2022
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v6
         with:
@@ -77,14 +81,25 @@ jobs:
           # go.sum — otherwise setup-go looks only at the repo root and warns.
           cache-dependency-path: "**/go.sum"
 
+      # Reuse the heavy CGo C++ (Ableton Link + asio) compile across runs, even
+      # when GOCACHE misses. Routed in via CC/CXX on the build step below.
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+          max-size: 500M
+
       - name: Cache vcpkg
         id: vcpkg-cache
         uses: actions/cache@v5
         with:
           path: C:\vcpkg\installed
-          # Bump the suffix whenever the package list below changes, otherwise a
-          # stale cache is restored and the new packages are never installed.
-          key: vcpkg-opus-mingw-static-pkgconf-x64-windows-v4
+          # Exact key; bump the suffix when the package list changes. restore-keys
+          # falls back to the newest prior cache on a miss, and the install step
+          # below still re-runs on a non-exact hit (its `if` checks the exact key).
+          key: vcpkg-opus-mingw-static-pkgconf-x64-windows-v5
+          restore-keys: |
+            vcpkg-opus-mingw-static-pkgconf-x64-windows-
 
       - name: Install opus + pkgconf via vcpkg
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -135,6 +150,8 @@ jobs:
       - name: Build wail desktop app
         shell: bash
         env:
+          CC: ccache gcc
+          CXX: ccache g++
           # opus for the CGo link comes from the MinGW (x64-mingw-static) prefix
           # so its ABI matches the GCC that compiles the CGo objects. Windows
           # system libs (ws2_32, winmm, iphlpapi) are set via cgo LDFLAGS in the
@@ -143,6 +160,11 @@ jobs:
           PKG_CONFIG_PATH: C:\vcpkg\installed\x64-mingw-static\lib\pkgconfig
         working-directory: wail-app
         run: go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail.exe" .
+
+      - name: ccache stats
+        if: always()
+        shell: bash
+        run: ccache -s
 
       - name: Stage release artifacts
         shell: bash
@@ -173,6 +195,10 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-22.04
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v6
         with:
@@ -185,6 +211,14 @@ jobs:
           # Both Go modules live in subdirs, so point the built-in cache at every
           # go.sum — otherwise setup-go looks only at the repo root and warns.
           cache-dependency-path: "**/go.sum"
+
+      # Reuse the heavy CGo C++ (Ableton Link + asio) compile across runs, even
+      # when GOCACHE misses. Routed in via CC/CXX on the build step below.
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+          max-size: 500M
 
       - name: Install system dependencies
         run: |
@@ -212,8 +246,15 @@ jobs:
           echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build wail desktop app
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
         run: go build -tags nolibopusfile -ldflags "-X main.appVersion=${{ steps.version.outputs.value }}" -o "$GITHUB_WORKSPACE/dist/bin/wail" .
         working-directory: wail-app
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s
 
       - name: Stage release artifacts
         run: |
