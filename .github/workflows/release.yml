@@ -70,9 +70,12 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: wail-app/go.mod
+          # Both Go modules live in subdirs, so point the built-in cache at every
+          # go.sum — otherwise setup-go looks only at the repo root and warns.
+          cache-dependency-path: "**/go.sum"
 
       - name: Cache vcpkg
         id: vcpkg-cache
@@ -176,9 +179,12 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           submodules: recursive
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: wail-app/go.mod
+          # Both Go modules live in subdirs, so point the built-in cache at every
+          # go.sum — otherwise setup-go looks only at the repo root and warns.
+          cache-dependency-path: "**/go.sum"
 
       - name: Install system dependencies
         run: |
