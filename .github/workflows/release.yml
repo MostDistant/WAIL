@@ -272,7 +272,7 @@ jobs:
           echo "windows_zip=$(ls wail-windows-x64-*.zip 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "linux_tarball=$(ls wail-linux-x64-*.tar.gz 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           files: |
