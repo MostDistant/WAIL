@@ -377,6 +377,45 @@ summary:hover {
   color: var(--state-error);
 }
 
+/* --- Launch-quantization summary (rounded, prominent) --- */
+.quant-summary {
+  margin: 4px 0 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--accent-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: center;
+}
+
+.quant-summary:empty {
+  display: none;
+}
+
+.quant-summary-eq {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+}
+
+.quant-summary-result {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.quant-summary.error-text {
+  border-color: var(--state-error);
+  background: transparent;
+  color: var(--state-error);
+  font-size: 12px;
+  text-align: left;
+}
+
 .bpi-inline-row {
   display: flex;
   align-items: center;
