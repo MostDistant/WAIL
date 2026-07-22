@@ -89,6 +89,7 @@ WAIL has two components that work together:
 ## Settings
 
 - **Display name** — Shown to other peers in the session.
+- **Link Audio Name** — The peer name WAIL advertises on Link Audio, so its published channels are easy to spot in your DAW's peer list. Defaults to `WAIL`.
 - **Save debug log locally** — Writes structured logs to a rotating file in the app data directory. Useful for diagnosing connection issues.
 - **Peer log streaming** — When enabled, your app's INFO-level logs are broadcast to all other peers in the session via the signaling server, and their logs are shown in your session log panel with a peer name prefix. Useful for collaborative debugging. Both sending and receiving are controlled by this single toggle.
 - **Remember settings** — Persists room name, password, and display name in localStorage.

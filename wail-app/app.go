@@ -108,6 +108,7 @@ func (a *App) JoinRoom(
 	recordingStems *bool,
 	recordingRetentionDays *uint32,
 	streamCount *uint16,
+	linkAudioName *string,
 ) (*JoinResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -131,6 +132,13 @@ func (a *App) JoinRoom(
 	actualStreamCount := uint16(1)
 	if streamCount != nil {
 		actualStreamCount = *streamCount
+	}
+	// The Link Audio peer name is user-settable; empty/unset falls back to "WAIL".
+	actualLinkAudioName := "WAIL"
+	if linkAudioName != nil {
+		if trimmed := strings.TrimSpace(*linkAudioName); trimmed != "" {
+			actualLinkAudioName = trimmed
+		}
 	}
 
 	var recording *RecordingConfig
@@ -157,16 +165,17 @@ func (a *App) JoinRoom(
 	}
 
 	config := SessionConfig{
-		Server:      signalingURL,
-		Room:        room,
-		Password:    password,
-		DisplayName: displayName,
-		Identity:    a.identity,
-		BPM:         actualBPM,
-		Bars:        actualBars,
-		Quantum:     actualQuantum,
-		Recording:   recording,
-		StreamCount: actualStreamCount,
+		Server:        signalingURL,
+		Room:          room,
+		Password:      password,
+		DisplayName:   displayName,
+		LinkAudioName: actualLinkAudioName,
+		Identity:      a.identity,
+		BPM:           actualBPM,
+		Bars:          actualBars,
+		Quantum:       actualQuantum,
+		Recording:     recording,
+		StreamCount:   actualStreamCount,
 	}
 
 	handle, err := SpawnSession(a.emitter, config)

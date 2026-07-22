@@ -24,12 +24,15 @@ type SessionConfig struct {
 	Room        string
 	Password    *string
 	DisplayName string
-	Identity    string
-	BPM         float64
-	Bars        uint32
-	Quantum     float64
-	Recording   *RecordingConfig
-	StreamCount uint16
+	// LinkAudioName is the peer name WAIL advertises to Link Audio (and the
+	// own-channel filter key); defaults to "WAIL" upstream in JoinRoom.
+	LinkAudioName string
+	Identity      string
+	BPM           float64
+	Bars          uint32
+	Quantum       float64
+	Recording     *RecordingConfig
+	StreamCount   uint16
 }
 
 // SessionCommand represents commands from the UI to the session.
@@ -148,12 +151,11 @@ func sessionLoop(
 		engineFramesSent.Add(1)
 		mesh.BroadcastAudio(waif)
 	}
-	// Advertise as a Link Audio peer under a "WAIL-" prefix so WAIL reads
-	// clearly in a DAW's peer list and stays distinct from native publishers
-	// that default to the machine name. This is also the own-channel filter
-	// key (audio_engine_real.go), so the engine must use the prefixed name
-	// end to end; the room display name is unaffected.
-	audioEngine := newAudioEngine(link, "WAIL-"+displayName, engineSend, offsetD)
+	// Advertise the user's Link Audio name (defaults to "WAIL") so WAIL reads
+	// clearly in a DAW's peer list. This is also the own-channel filter key
+	// (audio_engine_real.go), so the engine uses it end to end; it is separate
+	// from the room display name.
+	audioEngine := newAudioEngine(link, config.LinkAudioName, engineSend, offsetD)
 	if err := audioEngine.Start(); err != nil {
 		logWarn("Link Audio engine failed to start: %v", err)
 	}
@@ -923,6 +925,7 @@ func sessionLoop(
 				}
 				slotInfos = append(slotInfos, SlotInfo{
 					Slot: uint32(m.SlotIndex + 1), ShortID: m.ShortID(), ClientID: m.ClientID,
+					PeerID:       pid,
 					ChannelIndex: m.ChannelIndex, DisplayName: dn, Status: &status,
 					RTTMs: rttMs, IsSending: isSend, IsReceiving: isRecv, StreamName: streamName,
 				})
