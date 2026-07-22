@@ -49,6 +49,10 @@ jobs:
     # whose newer toolchain breaks the CGo builds. See #329.
     runs-on: windows-2022
     if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v6
         with:
@@ -61,14 +65,40 @@ jobs:
           # go.sum — otherwise setup-go looks only at the repo root and warns.
           cache-dependency-path: "**/go.sum"
 
+      # Reuse the heavy CGo C++ (Ableton Link + asio) compile across runs, even
+      # when GOCACHE misses. Routed in via CC/CXX on the build step below.
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        continue-on-error: true
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+          max-size: 500M
+
+      # cgo uses ccache only if it actually installed; otherwise CC/CXX stay
+      # unset and cgo falls back to the default gcc/g++ (slower, but still green).
+      # The action downloads a binary each run, so a network blip must not fail CI.
+      - name: Enable ccache for cgo if available
+        shell: bash
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            echo "CC=ccache gcc" >> "$GITHUB_ENV"
+            echo "CXX=ccache g++" >> "$GITHUB_ENV"
+            echo "cgo will use ccache"
+          else
+            echo "ccache unavailable — building without compiler cache"
+          fi
+
       - name: Cache vcpkg
         id: vcpkg-cache
         uses: actions/cache@v5
         with:
           path: C:\vcpkg\installed
-          # Bump the suffix whenever the package list below changes, otherwise a
-          # stale cache is restored and the new packages are never installed.
-          key: vcpkg-opus-mingw-static-pkgconf-x64-windows-v3
+          # Exact key; bump the suffix when the package list changes. restore-keys
+          # falls back to the newest prior cache on a miss, and the install step
+          # below still re-runs on a non-exact hit (its `if` checks the exact key).
+          key: vcpkg-opus-mingw-static-pkgconf-x64-windows-v5
+          restore-keys: |
+            vcpkg-opus-mingw-static-pkgconf-x64-windows-
 
       - name: Install opus + pkgconf via vcpkg
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -114,6 +144,11 @@ jobs:
         run: go build -tags nolibopusfile -o NUL .
         working-directory: wail-app
 
+      - name: ccache stats
+        if: always()
+        shell: bash
+        run: command -v ccache >/dev/null 2>&1 && ccache -s || echo "ccache not installed"
+
       - name: Build & test signaling-server
         run: go build ./... && go test ./...
         working-directory: signaling-server
@@ -121,6 +156,10 @@ jobs:
   build-linux:
     runs-on: ubuntu-22.04
     if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v6
         with:
@@ -132,6 +171,29 @@ jobs:
           # Both Go modules live in subdirs, so point the built-in cache at every
           # go.sum — otherwise setup-go looks only at the repo root and warns.
           cache-dependency-path: "**/go.sum"
+
+      # Reuse the heavy CGo C++ (Ableton Link + asio) compile across runs, even
+      # when GOCACHE misses. Routed in via CC/CXX on the build/test steps below.
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2.23
+        continue-on-error: true
+        with:
+          key: ${{ github.job }}-${{ runner.os }}
+          max-size: 500M
+
+      # cgo uses ccache only if it actually installed; otherwise CC/CXX stay
+      # unset and cgo falls back to the default gcc/g++ (slower, but still green).
+      # The action downloads a binary each run, so a network blip must not fail CI.
+      - name: Enable ccache for cgo if available
+        shell: bash
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            echo "CC=ccache gcc" >> "$GITHUB_ENV"
+            echo "CXX=ccache g++" >> "$GITHUB_ENV"
+            echo "cgo will use ccache"
+          else
+            echo "ccache unavailable — building without compiler cache"
+          fi
 
       - name: Install system dependencies
         run: |
@@ -155,6 +217,11 @@ jobs:
       - name: Test Go app
         run: go test -tags nolibopusfile ./...
         working-directory: wail-app
+
+      - name: ccache stats
+        if: always()
+        shell: bash
+        run: command -v ccache >/dev/null 2>&1 && ccache -s || echo "ccache not installed"
 
       - name: Build & test signaling-server
         run: go build ./... && go test ./...
