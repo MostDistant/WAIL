@@ -500,7 +500,7 @@ func sessionLoop(
 					// engine has no room labels and releases nothing — a solo peer
 					// monitoring their own loopback would hear silence.
 					foundedRoom = true
-					mesh.Broadcast(NewTempoChange(bpm, quantum, time.Now().UnixMicro()))
+					mesh.Broadcast(NewTempoChange(bpm, intervalCfg.Quantum, time.Now().UnixMicro()))
 					mesh.Broadcast(NewIntervalConfig(intervalCfg.Bars, intervalCfg.Quantum))
 				}
 			}
@@ -800,7 +800,10 @@ func sessionLoop(
 				if math.Abs(ev.BPM-lastBroadcastBPM) > 0.01 {
 					logInfo("Local tempo changed to %.1f BPM", ev.BPM)
 					lastBroadcastBPM = ev.BPM
-					mesh.Broadcast(NewTempoChange(ev.BPM, quantum, ev.TimestampUs))
+					// ADR-0004: carry the ADOPTED room quantum, not our join-time
+					// preference — the relay treats TempoChange.quantum as
+					// authoritative, so a mismatched joiner would reanchor (flap) it.
+					mesh.Broadcast(NewTempoChange(ev.BPM, intervalCfg.Quantum, ev.TimestampUs))
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
 				handleBoundary(ev.Beat)
