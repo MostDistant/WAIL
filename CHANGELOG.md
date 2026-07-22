@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.4.0 (2026-07-22)
+
+### Features
+
+- room interval as BPI — join prompt, mid-jam changes, gossip fix (#375)
+
 ## 3.3.0 (2026-07-22)
 
 ### Features
