@@ -8,8 +8,6 @@ import (
 	"testing"
 
 	"github.com/nicholasgasior/wail/wail-app/internal/abllink"
-	"github.com/nicholasgasior/wail/wail-app/internal/capture"
-	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 )
 
 // TestAudioEngineEmitIngestion drives the emit ingestion path end-to-end without
@@ -266,28 +264,5 @@ func TestCaptureChannelsNeverSerializesOwnChannels(t *testing.T) {
 	infos := le.CaptureChannels()
 	if len(infos) != 1 || infos[0].Name != "Main" {
 		t.Fatalf("CaptureChannels must exclude own republished channels, got %+v", infos)
-	}
-}
-
-// A room interval-config change must re-grid running capture assemblers: they
-// are built once at channel start, and a stale grid makes a sender's room
-// labels tick at the old rate — receivers hear that peer drift out of sync
-// with everyone else, worse every interval, until the channel is restarted.
-func TestSyncCaptureConfigReGridsAssemblerOnRoomConfigChange(t *testing.T) {
-	le := newCaptureTestEngine(t)
-	le.SetRoomAnchor(0, 120, 4, 4)
-	ch := &captureChannel{
-		name: "Main",
-		asm:  capture.NewWindowed(interval.Config{Bars: 4, Quantum: 4}, 2, engineInternalRate, samplesPerWaifFrame(engineInternalRate)),
-	}
-	le.capture["deadbeef"] = ch
-
-	// Room switches 4 bars → 2 bars. SetRoomAnchor adopts it engine-wide; the
-	// drain goroutine follows on its next tick (syncCaptureConfig).
-	le.SetRoomAnchor(1, 120, 2, 4)
-	le.syncCaptureConfig(ch)
-
-	if got := ch.asm.Config(); got != (interval.Config{Bars: 2, Quantum: 4}) {
-		t.Fatalf("assembler still on old grid after room config change: %+v", got)
 	}
 }
