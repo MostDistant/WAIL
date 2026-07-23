@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.9.0 (2026-07-23)
+
+### Features
+
+- optional CLAP bridge for DAWs without Link Audio (#396)
+
+### Fixes
+
+- timing bugs that desync peers (relay clock + capture grid) (#397)
+
 ## 3.8.0 (2026-07-23)
 
 ### Features
