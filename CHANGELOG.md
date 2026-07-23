@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.7.0 (2026-07-23)
+
+### Features
+
+- simplify session UI, move diagnostics to a Debug tab (#389)
+- live-tunable emit cushion + WAIL Metronome alignment channel (#391)
+
 ## 3.6.0 (2026-07-22)
 
 ### Features
