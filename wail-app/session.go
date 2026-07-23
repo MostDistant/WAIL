@@ -43,14 +43,14 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetMetronome", "SetCushionMs", "SetInterval", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetMetronome", "SetMetronomeBroadcast", "SetCushionMs", "SetInterval", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
 	StreamIndex *uint16
 	WavFile     string
 	ChannelID   string  // SetCaptureEnabled
-	Enabled     bool    // SetCaptureEnabled, SetCaptureDump, SetLoopback, SetMetronome
+	Enabled     bool    // SetCaptureEnabled, SetCaptureDump, SetLoopback, SetMetronome, SetMetronomeBroadcast
 	Bars        uint32  // SetInterval
 	Quantum     float64 // SetInterval
 	Value       int     // SetCushionMs
@@ -228,6 +228,11 @@ func sessionLoop(
 	var wavSenderCancelFn context.CancelFunc
 	var wavSenderStream *uint16
 
+	// Broadcast-metronome sender state: an in-app sender that streams the WAIL
+	// Metronome click to the room as audio (nil channel = off).
+	var metronomeSendBoundaryCh chan IntervalBoundaryInfo
+	var metronomeSendCancelFn context.CancelFunc
+
 	// Server-echo loopback (debug): the relay echoes our own audio frames back
 	// and we republish them as a "(loopback)" Link Audio channel. loopbackState
 	// is a detached PeerState for loss tracking only — self is not a peer.
@@ -326,6 +331,12 @@ func sessionLoop(
 		if wavSenderBoundaryCh != nil {
 			select {
 			case wavSenderBoundaryCh <- info:
+			default:
+			}
+		}
+		if metronomeSendBoundaryCh != nil {
+			select {
+			case metronomeSendBoundaryCh <- info:
 			default:
 			}
 		}
@@ -474,6 +485,30 @@ func sessionLoop(
 			case "SetMetronome":
 				audioEngine.SetMetronome(cmd.Enabled)
 				logInfo("[metronome] enabled=%v", cmd.Enabled)
+			case "SetMetronomeBroadcast":
+				// Stop any running broadcast sender (also the teardown path).
+				if metronomeSendCancelFn != nil {
+					metronomeSendCancelFn()
+					metronomeSendCancelFn = nil
+				}
+				metronomeSendBoundaryCh = nil
+				delete(localStreamNames, metronomeBroadcastStreamID)
+				delete(localSendStreams, metronomeBroadcastStreamID)
+				if cmd.Enabled {
+					metCtx, cancelFn := context.WithCancel(ctx)
+					metronomeSendCancelFn = cancelFn
+					boundaryCh := make(chan IntervalBoundaryInfo, 4)
+					metronomeSendBoundaryCh = boundaryCh
+					localSendStreams[metronomeBroadcastStreamID] = true
+					// Plain name: FormatName prepends the peer, so receivers show
+					// "{peer} · WAIL Metronome" rather than a doubled-up label.
+					localStreamNames[metronomeBroadcastStreamID] = "WAIL Metronome"
+					go MetronomeSenderTask(metCtx, metronomeBroadcastStreamID, sendWaif, boundaryCh)
+					logInfo("[metronome] broadcast to room started")
+				} else {
+					logInfo("[metronome] broadcast to room stopped")
+				}
+				syncStreamNames()
 			case "SetCushionMs":
 				eff := audioEngine.SetCushionMs(cmd.Value)
 				logInfo("[audio] emit cushion set to %dms", eff)

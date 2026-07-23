@@ -227,6 +227,10 @@
           <input type="checkbox" id="metronome-toggle">
           <span>Publish WAIL Metronome channel</span>
         </label>
+        <label class="capture-dump" title="Also send the WAIL Metronome click to everyone in the room as an audio stream. Each peer auto-publishes a '{you} · WAIL Metronome' Link Audio channel and hears the identical click one interval late. Independent of the local channel above.">
+          <input type="checkbox" id="metronome-broadcast-toggle">
+          <span>Broadcast metronome to room</span>
+        </label>
         <div class="cushion-control" title="How far ahead of the playhead each Link Audio sink is kept fed. Default 0 (minimal — some receivers like the VOID plugin stall on any feed-ahead). Raise it if a buffering-tolerant receiver runs dry with sink underruns (see below).">
           <label for="cushion-slider">Emit cushion <span id="cushion-value">0 ms</span></label>
           <input type="range" id="cushion-slider" min="0" max="500" step="5" value="0">

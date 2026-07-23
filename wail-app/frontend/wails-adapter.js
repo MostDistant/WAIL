@@ -46,6 +46,7 @@
         'set_capture_dump': 'main.App.SetCaptureDump',
         'set_loopback': 'main.App.SetLoopback',
         'set_metronome': 'main.App.SetMetronome',
+        'set_metronome_broadcast': 'main.App.SetMetronomeBroadcast',
         'set_cushion_ms': 'main.App.SetCushionMs',
         'rename_stream': 'main.App.RenameStream',
         'get_app_version': 'main.App.GetAppVersion',
@@ -70,6 +71,7 @@
         'set_capture_dump': ['enabled'],
         'set_loopback': ['enabled'],
         'set_metronome': ['enabled'],
+        'set_metronome_broadcast': ['enabled'],
         'set_cushion_ms': ['ms'],
     };
 
