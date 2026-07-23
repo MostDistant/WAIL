@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.9.5 (2026-07-23)
+
+### Fixes
+
+- implement clap.state in the bridge plugins so hosts can save projects (#407)
+
 ## 3.9.4 (2026-07-23)
 
 ### Fixes
