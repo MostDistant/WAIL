@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.10.0 (2026-07-23)
+
+### Features
+
+- label CLAP Send bridge streams with the DAW track name (#416)
+
+### Fixes
+
+- re-apply timing fixes that desync peers (relay clock + capture grid) (#397) (#415)
+
 ## 3.9.8 (2026-07-23)
 
 ### Fixes
