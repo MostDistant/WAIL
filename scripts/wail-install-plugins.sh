@@ -49,7 +49,10 @@ install_bundle() {
     fi
     local dest="${CLAP_DEST}/${name}"
     rm -rf "$dest"
-    cp -R "$src" "$dest"
+    # -L: dereference symlinks. Under Homebrew, ${PREFIX}/lib/<name>.clap is a
+    # *relative* symlink into the Cellar — a plain `cp -R` copies the link
+    # verbatim, leaving a broken symlink in the CLAP folder.
+    cp -RL "$src" "$dest"
     echo "Installed: $dest"
 }
 
