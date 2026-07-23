@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.9.7 (2026-07-23)
+
+### Fixes
+
+- test: DAW-less integration tests + full-chain E2E for the CLAP bridge plugins (#411)
+
 ## 3.9.6 (2026-07-23)
 
 ### Fixes
