@@ -46,12 +46,14 @@ const (
 	discoveryInterval  = 1 * time.Second
 	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
 	// emitCushionMs is how far ahead of the playhead each sink is kept fed —
-	// stall tolerance for the emit loop. It adds directly to a subscriber's
-	// reported buffering, and the ceiling is the subscriber's configured Link
-	// Audio Latency. 160 regressed in real 3.2.3 sessions (buffer meter swung
-	// 0→max with audible glitches) while 80 held steady in the field, so 80 it
-	// is; WAIL_EMIT_CUSHION_MS overrides (see tradeoffs.md).
-	emitCushionMs = 80
+	// stall tolerance for the emit loop. It stamps audio into the future, which
+	// some Link Audio receivers stall on (the VOID DAW-bridge plugin chokes on
+	// any feed-ahead), so the default is 0 — floored to one ~5ms write chunk, the
+	// minimum that still emits (a literal 0 frames would play silence). Raise it
+	// from the Debug tab if a receiver that tolerates buffering (Ableton Live's
+	// native Link Audio held steady at ~80) runs dry with sink underruns.
+	// WAIL_EMIT_CUSHION_MS overrides (see tradeoffs.md).
+	emitCushionMs = 0
 	// plcMaxFramesPerGap caps Opus packet-loss concealment per seq gap (120ms):
 	// libopus fades PLC to silence past ~100ms; a deeper gap's tail stays silent.
 	plcMaxFramesPerGap = 6
@@ -110,10 +112,11 @@ type linkAudioEngine struct {
 	metronomeOn atomic.Bool
 }
 
-// Cushion clamp bounds (see emitCushionMs): below one tick's jitter the feeder
-// can't keep up; far above, receivers may drop far-future stamps.
+// Cushion clamp bounds (see emitCushionMs): 0 means minimal feed-ahead (the
+// feeder floors it to one write chunk, ~5ms — the smallest value that still
+// emits); far above, receivers may drop far-future stamps.
 const (
-	cushionMinMs = 10
+	cushionMinMs = 0
 	cushionMaxMs = 500
 )
 

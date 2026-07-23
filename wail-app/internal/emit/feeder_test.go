@@ -60,6 +60,19 @@ func TestFeederSetCushionGrows(t *testing.T) {
 	}
 }
 
+// The default cushion is 0; a 0-frame cushion must still emit (floored to one
+// chunk) rather than play silence.
+func TestFeederZeroCushionStillEmits(t *testing.T) {
+	var out []emitted
+	r := NewPacedReader(func() []int16 { return stampedSource(fTotal, 0) }, 1, fRate, fTempo, 0, fTotal)
+	f := NewFeeder(0, fChunk)
+	f.SetCurrent(0, r, nil)
+	f.Advance(0, collector(&out))
+	if got := emittedFrames(out); got != fChunk {
+		t.Fatalf("cushion 0: filled %d frames, want floored %d (silence otherwise)", got, fChunk)
+	}
+}
+
 func TestFeederSetCushionFloorsToChunk(t *testing.T) {
 	var out []emitted
 	f, _ := newTestFeeder(0, stampedSource(fTotal, 0))

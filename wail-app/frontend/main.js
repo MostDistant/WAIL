@@ -1128,9 +1128,10 @@ async function setupListeners() {
   unlisten.push(await listen('peers:network', (event) => {
     renderHealth(event.payload.health);
     // Initialise the cushion slider from the engine's effective value once (it
-    // reflects any WAIL_EMIT_CUSHION_MS override); the user's drag takes over after.
+    // reflects any WAIL_EMIT_CUSHION_MS override); the user's drag takes over
+    // after. Accept 0 (the default) — it's falsy, so guard on the type.
     const ms = event.payload.health && event.payload.health.emit_cushion_ms;
-    if (cushionSlider && !cushionUserSet && ms) {
+    if (cushionSlider && !cushionUserSet && typeof ms === 'number') {
       cushionSlider.value = ms;
       if (cushionValue) cushionValue.textContent = ms + ' ms';
     }
