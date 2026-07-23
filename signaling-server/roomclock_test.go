@@ -46,6 +46,66 @@ func TestRoomClockClampsBadInput(t *testing.T) {
 	}
 }
 
+func TestRoomClockReanchorTempoUpDoesNotRetreat(t *testing.T) {
+	// 120 BPM, 16-beat intervals (8s). Mid interval 2, jump to 480 BPM (2s
+	// intervals): the 4s remaining in interval 2 exceeds the new interval
+	// length, so new-tempo math alone would report the index *behind* the
+	// current one during the transition — the room index ticks backward and
+	// every client labeler aligned then is off by one for the session.
+	rc := newRoomClock(roomAnchor{Index: 0, AtMicros: 0, TempoBPM: 120, Config: intervalConfig{Bars: 4, Quantum: 4}})
+	before := rc.indexAt(20_000_000)
+	if before != 2 {
+		t.Fatalf("pre-reanchor index = %d, want 2", before)
+	}
+	rc.reanchor(20_000_000, 480, intervalConfig{Bars: 4, Quantum: 4})
+	for us := int64(20_000_000); us < 24_000_000; us += 250_000 {
+		if got := rc.indexAt(us); got != before {
+			t.Fatalf("indexAt(%dus) = %d during transition, want pinned %d (room index must not retreat)", us, got, before)
+		}
+	}
+	if got := rc.indexAt(24_000_000); got != 3 {
+		t.Fatalf("indexAt(24s) = %d, want 3", got)
+	}
+
+	// A second re-anchor inside the same transition must be idempotent, not
+	// walk the clock further backward.
+	rc.reanchor(21_000_000, 480, intervalConfig{Bars: 4, Quantum: 4})
+	if got := rc.anchor().AtMicros; got != 24_000_000 {
+		t.Fatalf("idempotent re-anchor moved the boundary to %dus, want 24s", got)
+	}
+	if got := rc.indexAt(22_000_000); got != 2 {
+		t.Fatalf("after idempotent re-anchor indexAt(22s) = %d, want 2", got)
+	}
+}
+
+func TestObserveSyncSuppressesUnchangedAnchor(t *testing.T) {
+	r := newRoom()
+
+	if _, ok := r.observeSync([]byte(`{"type":"TempoChange","bpm":120,"quantum":4}`)); !ok {
+		t.Fatal("first TempoChange should anchor the clock")
+	}
+	// Identical values again: no re-anchor, no broadcast. A redundant anchor
+	// only re-rolls every client's labeler alignment — and each re-roll can
+	// shift a peer's room labels by a whole interval (off-by-one hazard).
+	if _, ok := r.observeSync([]byte(`{"type":"TempoChange","bpm":120,"quantum":4}`)); ok {
+		t.Fatal("unchanged TempoChange must not re-anchor")
+	}
+	if _, ok := r.observeSync([]byte(`{"type":"IntervalConfig","bars":4,"quantum":4}`)); ok {
+		t.Fatal("unchanged IntervalConfig must not re-anchor")
+	}
+	// Real changes still anchor...
+	if _, ok := r.observeSync([]byte(`{"type":"TempoChange","bpm":128,"quantum":4}`)); !ok {
+		t.Fatal("a tempo change must re-anchor")
+	}
+	if _, ok := r.observeSync([]byte(`{"type":"IntervalConfig","bars":8,"quantum":4}`)); !ok {
+		t.Fatal("an interval change must re-anchor")
+	}
+	// ...and then go quiet on repeats.
+	if _, ok := r.observeSync([]byte(`{"type":"IntervalConfig","bars":8,"quantum":4}`)); ok {
+		t.Fatal("repeated IntervalConfig must not re-anchor")
+	}
+}
+
 func TestObserveSyncMaintainsClock(t *testing.T) {
 	r := newRoom()
 

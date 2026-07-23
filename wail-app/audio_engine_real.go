@@ -677,7 +677,8 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 			ch.statLate.Store(ch.asm.DroppedLate())
 			ch.statBackfill.Store(ch.asm.DroppedBackfill())
 			e.link.CaptureAppSessionState(ss)
-			bpi := e.intervalQuantumSnapshot() // stable within a tick; snapshot once, not per buffer
+			e.syncCaptureConfig(ch)
+			bpi := e.cfgSnapshot().BeatsPerInterval() // stable within a tick; snapshot once, not per buffer
 			for {
 				buf, beat, mapped, popped := src.PopMapped(ss, bpi)
 				if !popped {
@@ -1137,14 +1138,32 @@ func (e *linkAudioEngine) metronomeTick(ss *abllink.SessionState, cfg interval.C
 	})
 }
 
-// intervalQuantumSnapshot returns the quantum for the audio path's Link timing
-// calls: the whole interval (BPI), not the bar. Link pins beat phase only mod
-// the quantum it is asked for, so asking at the bar left which-bar-of-the-
-// interval per-peer arbitrary — audio landed bar-aligned but bars apart.
-func (e *linkAudioEngine) intervalQuantumSnapshot() float64 {
+// syncCaptureConfig re-grids ch's assembler when the room interval config has
+// changed under it (SetRoomAnchor adopts the relay's bars/quantum engine-wide).
+// The assembler is created once at channel start with the config of that
+// moment; left stale, its labels tick at the old grid's rate against a room
+// clock on the new one and the stream drifts out of sync every interval.
+// Runs on ch's drain goroutine (owner of ch.asm).
+func (e *linkAudioEngine) syncCaptureConfig(ch *captureChannel) {
+	if ch.asm == nil {
+		return
+	}
+	if old, new := ch.asm.Config(), e.cfgSnapshot(); old != new {
+		log.Printf("[audio] capture %q: room interval changed %d bars x %.0f → %d x %.0f — re-gridding assembler (old partial interval dropped)",
+			ch.name, old.Bars, old.Quantum, new.Bars, new.Quantum)
+		ch.asm.SetConfig(new)
+	}
+}
+
+// cfgSnapshot returns the room interval config for the audio path's Link
+// timing calls. The whole interval (BPI), not the bar, is the beat lens: Link
+// pins beat phase only mod the quantum it is asked for, so asking at the bar
+// left which-bar-of-the-interval per-peer arbitrary — audio landed bar-aligned
+// but bars apart.
+func (e *linkAudioEngine) cfgSnapshot() interval.Config {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.cfg.BeatsPerInterval()
+	return e.cfg
 }
 
 // --- small helpers ---
