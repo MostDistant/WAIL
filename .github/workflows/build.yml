@@ -41,8 +41,9 @@ jobs:
 
       - name: Build CLAP plugins
         run: |
-          cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
+          cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release -DWAIL_PLUGIN_TESTS=ON
           cmake --build build/plugins
+          ctest --test-dir build/plugins --output-on-failure
 
       - name: Build & test signaling-server
         run: go build ./... && go test ./...
@@ -151,8 +152,9 @@ jobs:
 
       - name: Build CLAP plugins
         run: |
-          cmake -S plugins -B build/plugins
+          cmake -S plugins -B build/plugins -DWAIL_PLUGIN_TESTS=ON
           cmake --build build/plugins --config Release
+          ctest --test-dir build/plugins -C Release --output-on-failure
 
       - name: ccache stats
         if: always()
@@ -230,8 +232,9 @@ jobs:
 
       - name: Build CLAP plugins
         run: |
-          cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
+          cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release -DWAIL_PLUGIN_TESTS=ON
           cmake --build build/plugins
+          ctest --test-dir build/plugins --output-on-failure
 
       - name: ccache stats
         if: always()
