@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.9.3 (2026-07-23)
+
+### Fixes
+
+- install real plugin bundles instead of broken Cellar symlinks (#403)
+
 ## 3.9.2 (2026-07-23)
 
 ### Fixes
