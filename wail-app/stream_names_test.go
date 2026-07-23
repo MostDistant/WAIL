@@ -56,7 +56,7 @@ func TestEffectiveStreamNamesDefaultsAndOverrides(t *testing.T) {
 		{StreamID: 0, Name: "Synth Bus", Enabled: true},
 		{StreamID: 1, Name: "Drums", Enabled: true},
 		{StreamID: 2, Name: "Disabled Channel", Enabled: false}, // not sending: no name
-		{StreamID: 3, Name: "", Enabled: true},                  // nameless: no default
+		{StreamID: 3, Name: "", Enabled: true},                  // nameless: falls back to "stream N"
 	}
 	overrides := map[uint16]string{
 		1: "My Custom Drums", // user rename wins over the channel name
@@ -66,6 +66,7 @@ func TestEffectiveStreamNamesDefaultsAndOverrides(t *testing.T) {
 	want := map[uint16]string{
 		0: "Synth Bus",
 		1: "My Custom Drums",
+		3: "stream 3",
 		7: "Test Tone",
 	}
 	if !maps.Equal(got, want) {

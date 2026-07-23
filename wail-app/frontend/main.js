@@ -1019,7 +1019,7 @@ function renderPeerNode(n) {
   const chans = n.channels.slice().sort((a, b) => a.channel_index - b.channel_index);
   const channelsHtml = chans.length
     ? chans.map(c => {
-        const label = c.stream_name ? escapeHtml(c.stream_name) : `Channel ${c.channel_index}`;
+        const label = c.stream_name ? escapeHtml(c.stream_name) : `stream ${c.channel_index}`;
         return `<div class="peer-channel"><span class="channel-name">${label}</span></div>`;
       }).join('')
     : '<div class="peer-channel peer-channel--none"><span class="channel-name">no channels</span></div>';
