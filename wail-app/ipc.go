@@ -37,6 +37,7 @@ const (
 	IPCTagRemotePCM  byte = 0x11 // App → Recv: decoded PCM for one remote stream
 	IPCTagStreamName byte = 0x12 // App → Recv: display name for a stream's output port
 	IPCTagStreamGone byte = 0x13 // App → Recv: a stream ended; free its port
+	IPCTagTrackName  byte = 0x14 // Send → App: DAW track name for a plugin stream
 	IPCTagMetrics    byte = 0x06 // Plugin → App: cumulative drop counter
 )
 
@@ -265,6 +266,30 @@ func DecodeStreamGone(payload []byte) (string, uint16, bool) {
 		return "", 0, false
 	}
 	return peerID, binary.LittleEndian.Uint16(rest[0:2]), true
+}
+
+// EncodeTrackName encodes a Send → App track-name update: the name of the DAW
+// track the Send plugin is inserted on (from the host's clap.track-info), used
+// as the stream's default label. Sent once after connect and again on rename.
+func EncodeTrackName(streamIndex uint16, name string) []byte {
+	msg := make([]byte, 0, 1+2+2+len(name))
+	msg = append(msg, IPCTagTrackName)
+	msg = binary.LittleEndian.AppendUint16(msg, streamIndex)
+	msg = appendStr16(msg, name)
+	return msg
+}
+
+// DecodeTrackName decodes a TrackName message. Returns (streamIndex, name, ok).
+func DecodeTrackName(payload []byte) (uint16, string, bool) {
+	if len(payload) < 3 || payload[0] != IPCTagTrackName {
+		return 0, "", false
+	}
+	streamIndex := binary.LittleEndian.Uint16(payload[1:3])
+	name, _, ok := readStr16(payload[3:])
+	if !ok {
+		return 0, "", false
+	}
+	return streamIndex, name, true
 }
 
 // EncodeMetrics encodes a plugin-side cumulative drop counter (dropped PCM blocks).

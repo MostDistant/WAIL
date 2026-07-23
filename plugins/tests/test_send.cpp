@@ -4,8 +4,12 @@
 // flag, stream-index param — plus passthrough and no-server resilience.
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <string>
 #include <vector>
+
+#include <clap/ext/track-info.h>
 
 #include <clap-trap/clap-trap.h>
 
@@ -38,9 +42,9 @@ struct SendFixture {
    wailtest::SendHost h;
    const clap_plugin_t *plugin = nullptr;
 
-   bool setup(int ipcPort) {
+   bool setup(int ipcPort, const std::function<void(TestHost *)> &configureHost = nullptr) {
       std::string err;
-      if (!h.setup(WAIL_SEND_CLAP_PATH, ipcPort, kSampleRate, kBlock, &err)) {
+      if (!h.setup(WAIL_SEND_CLAP_PATH, ipcPort, kSampleRate, kBlock, &err, configureHost)) {
          if (!err.empty()) ::wailtest::fail(__LINE__, err);
          return false;
       }
@@ -58,6 +62,20 @@ struct SendFixture {
       h.processBlock(playing, ev);
    }
 };
+
+// --- track-info test host state ---
+// The clap_host_track_info_t::get callback has no user-data pointer, so the
+// test host's track name lives in this global (tests run sequentially).
+std::string g_trackName;
+
+bool CLAP_ABI testTrackInfoGet(const clap_host_t *, clap_track_info_t *info) {
+   memset(info, 0, sizeof(*info));
+   if (g_trackName.empty()) return true; // success, but no HAS_TRACK_NAME flag
+   info->flags = CLAP_TRACK_INFO_HAS_TRACK_NAME;
+   snprintf(info->name, sizeof(info->name), "%s", g_trackName.c_str());
+   return true;
+}
+const clap_host_track_info_t g_hostTrackInfo = {testTrackInfoGet};
 
 void checkPassthrough(const SendFixture &fx, uint32_t block) {
    for (uint32_t i = 0; i < kBlock; i++) {
@@ -91,6 +109,10 @@ TEST(send_handshake_and_pcm) {
    }
 
    CHECK_MSG(server.waitFrameCount(blocks, 5000), "timed out waiting for RawPCM frames");
+   // The stock TestHost serves no clap.track-info: the plugin must stay silent
+   // about track names (the app keeps its "Plugin Send N" placeholder).
+   CHECK_MSG(!server.hasTag(WAIL_TAG_TRACKNAME),
+             "host without track-info: unexpected TrackName frame");
    auto frames = server.frames();
    CHECK(frames.size() >= blocks);
    const uint32_t n = (uint32_t)(frames.size() < blocks ? frames.size() : blocks);
@@ -182,6 +204,37 @@ TEST(send_stream_index_param) {
       // frame `pre` carries the param event itself: the event is applied after
       // that block's ring push and the drain stamp races it — accept either.
    }
+}
+
+TEST(send_track_name_from_host) {
+   wailtest::IpcTestServer server;
+   int port = server.start();
+   CHECK(port > 0);
+   if (!port) return;
+
+   // Host serves clap.track-info/1 with a mutable track name.
+   g_trackName = "Bass DI";
+   SendFixture fx;
+   CHECK(fx.setup(port, [](TestHost *h) {
+      h->setExtensionCallback([](const char *id) -> const void * {
+         if (!strcmp(id, CLAP_EXT_TRACK_INFO) || !strcmp(id, CLAP_EXT_TRACK_INFO_COMPAT))
+            return (const void *)&g_hostTrackInfo;
+         return nullptr;
+      });
+   }));
+   if (!fx.plugin) return;
+
+   CHECK_MSG(server.waitConnected(5000), "plugin did not connect");
+   CHECK_MSG(server.waitTrackName("Bass DI", 5000), "no TrackName frame after connect");
+
+   // Rename the track and notify through the plugin's track-info extension: a
+   // fresh TrackName frame must follow without reconnecting.
+   g_trackName = "Bass DI (renamed)";
+   auto *pti = (const clap_plugin_track_info_t *)fx.plugin->get_extension(fx.plugin, CLAP_EXT_TRACK_INFO);
+   CHECK_MSG(pti && pti->changed, "plugin does not expose clap.track-info");
+   if (!pti || !pti->changed) return;
+   pti->changed(fx.plugin);
+   CHECK_MSG(server.waitTrackName("Bass DI (renamed)", 5000), "no TrackName frame after rename");
 }
 
 TEST(send_no_server_resilience) {

@@ -88,6 +88,7 @@ static inline void wail_mutex_destroy(wail_mutex *m) { pthread_mutex_destroy(m);
 #define WAIL_TAG_REMOTEPCM 0x11
 #define WAIL_TAG_STREAMNAME 0x12
 #define WAIL_TAG_STREAMGONE 0x13
+#define WAIL_TAG_TRACKNAME 0x14 // Send → App: DAW track name (clap.track-info)
 #define WAIL_TAG_METRICS 0x06
 
 // RawPCM flag bits.

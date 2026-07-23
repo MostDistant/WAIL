@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,9 +39,13 @@ struct ClapInstance {
    const clap_plugin_t *plugin = nullptr;
 
    // load points the plugin at ipcPort, then loads/activates/starts it.
+   // configureHost (optional) runs after the TestHost is created but before
+   // create_plugin/init, so a test can serve host extensions (e.g.
+   // clap.track-info) via setExtensionCallback.
    // Returns true on success; err receives a message on failure.
    bool load(const char *path, const char *pluginID, int ipcPort, double sampleRate,
-             uint32_t minFrames, uint32_t maxFrames, std::string *err) {
+             uint32_t minFrames, uint32_t maxFrames, std::string *err,
+             const std::function<void(clap_trap::TestHost *)> &configureHost = nullptr) {
       setIpcAddrEnv(ipcPort);
       loader = clap_trap::PluginLoader::load(path);
       if (!loader || !loader->factory()) {
@@ -49,6 +54,7 @@ struct ClapInstance {
       }
       const clap_plugin_factory_t *factory = loader->factory();
       host = std::make_unique<clap_trap::TestHost>();
+      if (configureHost) configureHost(host.get());
       plugin = factory->create_plugin(factory, host->clapHost(), pluginID);
       if (!plugin) {
          if (err) *err = std::string("create_plugin failed for ") + pluginID;
@@ -79,8 +85,9 @@ struct SendHost {
    ClapInstance inst;
    std::vector<float> inL, inR, outL, outR;
 
-   bool setup(const char *path, int ipcPort, double sampleRate, uint32_t block, std::string *err) {
-      if (!inst.load(path, "software.wail.send", ipcPort, sampleRate, block, block, err))
+   bool setup(const char *path, int ipcPort, double sampleRate, uint32_t block, std::string *err,
+              const std::function<void(clap_trap::TestHost *)> &configureHost = nullptr) {
+      if (!inst.load(path, "software.wail.send", ipcPort, sampleRate, block, block, err, configureHost))
          return false;
       inL.assign(block, 0.0f);
       inR.assign(block, 0.0f);

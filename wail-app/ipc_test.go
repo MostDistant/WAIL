@@ -101,6 +101,30 @@ func TestStreamNameAndGoneRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTrackNameRoundTrip(t *testing.T) {
+	msg := EncodeTrackName(3, "Bass DI")
+	idx, name, ok := DecodeTrackName(msg)
+	if !ok || idx != 3 || name != "Bass DI" {
+		t.Fatalf("TrackName round-trip: ok=%v idx=%d name=%q", ok, idx, name)
+	}
+	// Empty name (host without track-info must not send these, but decode anyway).
+	if idx, name, ok := DecodeTrackName(EncodeTrackName(0, "")); !ok || idx != 0 || name != "" {
+		t.Fatalf("TrackName empty-name round-trip: ok=%v idx=%d name=%q", ok, idx, name)
+	}
+	// Cross-tag decode must fail (a RawPCM is not a TrackName).
+	if _, _, ok := DecodeTrackName(EncodeRawPCM(0, 0, 2, 48000, 0, nil)); ok {
+		t.Fatal("DecodeTrackName accepted a RawPCM frame")
+	}
+	// Truncated frames must fail.
+	if _, _, ok := DecodeTrackName([]byte{IPCTagTrackName, 0x03}); ok {
+		t.Fatal("DecodeTrackName: ok=true on short frame")
+	}
+	trunc := EncodeTrackName(3, "Bass DI")
+	if _, _, ok := DecodeTrackName(trunc[:len(trunc)-2]); ok {
+		t.Fatal("DecodeTrackName: ok=true on truncated name")
+	}
+}
+
 func TestMetricsRoundTrip(t *testing.T) {
 	got, ok := DecodeMetrics(EncodeMetrics(987654321))
 	if !ok || got != 987654321 {
