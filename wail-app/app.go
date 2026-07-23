@@ -34,6 +34,12 @@ type App struct {
 	dataDir     string
 	fileLog     *RotatingFileWriter
 	wsLog       *WsLogWriter
+	// rememberEnabled mirrors the frontend "Remember settings" checkbox (pushed
+	// via SetRememberEnabled); it gates persisting captureEnabled to disk.
+	rememberEnabled bool
+	// captureEnabled is the remembered set of enabled capture channels, keyed
+	// by (peer, channel) name; restored into each session's audio engine.
+	captureEnabled []CaptureChannelKey
 }
 
 // NewApp creates a new App instance. Pass instance=0 for the default instance.
@@ -47,9 +53,11 @@ func NewApp(instance int) *App {
 	streamNames := LoadStreamNames(dataDir)
 
 	return &App{
-		streamNames: streamNames,
-		dataDir:     dataDir,
-		identity:    identity,
+		streamNames:     streamNames,
+		dataDir:         dataDir,
+		identity:        identity,
+		rememberEnabled: true, // frontend default; corrected on settings load
+		captureEnabled:  LoadCaptureEnabled(dataDir),
 	}
 }
 
@@ -165,17 +173,26 @@ func (a *App) JoinRoom(
 	}
 
 	config := SessionConfig{
-		Server:        signalingURL,
-		Room:          room,
-		Password:      password,
-		DisplayName:   displayName,
-		LinkAudioName: actualLinkAudioName,
-		Identity:      a.identity,
-		BPM:           actualBPM,
-		Bars:          actualBars,
-		Quantum:       actualQuantum,
-		Recording:     recording,
-		StreamCount:   actualStreamCount,
+		Server:         signalingURL,
+		Room:           room,
+		Password:       password,
+		DisplayName:    displayName,
+		LinkAudioName:  actualLinkAudioName,
+		Identity:       a.identity,
+		BPM:            actualBPM,
+		Bars:           actualBars,
+		Quantum:        actualQuantum,
+		Recording:      recording,
+		StreamCount:    actualStreamCount,
+		CaptureRestore: a.captureEnabled,
+		OnCaptureEnabledChanged: func(keys []CaptureChannelKey) {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			a.captureEnabled = keys
+			if a.rememberEnabled {
+				SaveCaptureEnabled(a.dataDir, keys)
+			}
+		},
 	}
 
 	handle, err := SpawnSession(a.emitter, config)
@@ -303,6 +320,21 @@ func (a *App) GetActiveSession() *JoinResult {
 		return nil
 	}
 	return &JoinResult{PeerID: a.session.PeerID, Room: a.session.Room, BPM: 120.0}
+}
+
+// SetRememberEnabled mirrors the frontend "Remember settings" checkbox. When
+// off, the persisted enabled-capture-channel set is deleted; when on, the
+// current in-memory set is written out.
+func (a *App) SetRememberEnabled(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.rememberEnabled = enabled
+	if enabled {
+		SaveCaptureEnabled(a.dataDir, a.captureEnabled)
+	} else {
+		DeleteCaptureEnabled(a.dataDir)
+	}
+	return nil
 }
 
 // SetTelemetry toggles file logging (telemetry).

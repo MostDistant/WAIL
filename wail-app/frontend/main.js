@@ -521,9 +521,10 @@ document.getElementById('browse-recording-dir').addEventListener('click', async 
   }
 });
 
-// Sync telemetry and log sharing state on load
+// Sync telemetry, log sharing, and remember-settings state on load
 invoke('set_telemetry', { enabled: getTelemetryEnabled() }).catch(() => {});
 invoke('set_log_sharing', { enabled: getLogSharingEnabled() }).catch(() => {});
+invoke('set_remember_enabled', { enabled: getRememberEnabled() }).catch(() => {});
 
 // Populate default recording dir on load
 invoke('get_default_recording_dir').then(dir => {
@@ -580,6 +581,7 @@ settingsForm.addEventListener('submit', (e) => {
   // Save remember setting
   const rememberEnabled = settingsRememberCheckbox.checked;
   saveRememberEnabled(rememberEnabled);
+  invoke('set_remember_enabled', { enabled: rememberEnabled }).catch(() => {});
   if (rememberEnabled) {
     saveSettings();
   } else {

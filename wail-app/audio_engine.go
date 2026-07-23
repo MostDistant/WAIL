@@ -32,6 +32,10 @@ type AudioEngine interface {
 	CaptureChannels() []CaptureChannelInfo
 	// SetCaptureEnabled toggles whether a discovered channel is bridged.
 	SetCaptureEnabled(channelID string, on bool)
+	// SetCaptureRestore replaces the remembered set of enabled capture
+	// channels (keyed by peer/channel name, loaded at session start);
+	// matching discovered channels auto-enable.
+	SetCaptureRestore(keys []CaptureChannelKey)
 	// SetCaptureDump toggles a debug dump: while on, each enabled capture channel
 	// writes two WAV files — the PCM fed to Opus and that audio decoded as a
 	// receiver would — for diagnosing where transmitted audio degrades.

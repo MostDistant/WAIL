@@ -33,6 +33,12 @@ type SessionConfig struct {
 	Quantum       float64
 	Recording     *RecordingConfig
 	StreamCount   uint16
+	// CaptureRestore is the remembered set of enabled capture channels (keyed
+	// by peer/channel name), restored into the audio engine at session start.
+	CaptureRestore []CaptureChannelKey
+	// OnCaptureEnabledChanged fires after a user capture-toggle with the full
+	// enabled set, so the app can persist it (gated on "Remember settings").
+	OnCaptureEnabledChanged func([]CaptureChannelKey)
 }
 
 // SessionCommand represents commands from the UI to the session.
@@ -158,6 +164,7 @@ func sessionLoop(
 	// (audio_engine_real.go), so the engine uses it end to end; it is separate
 	// from the room display name.
 	audioEngine := newAudioEngine(link, config.LinkAudioName, engineSend, offsetD)
+	audioEngine.SetCaptureRestore(config.CaptureRestore)
 	if err := audioEngine.Start(); err != nil {
 		logWarn("Link Audio engine failed to start: %v", err)
 	}
@@ -446,6 +453,15 @@ func sessionLoop(
 			case "SetCaptureEnabled":
 				audioEngine.SetCaptureEnabled(cmd.ChannelID, cmd.Enabled)
 				logInfo("[capture] channel %s enabled=%v", cmd.ChannelID, cmd.Enabled)
+				if config.OnCaptureEnabledChanged != nil {
+					var keys []CaptureChannelKey
+					for _, cc := range audioEngine.CaptureChannels() {
+						if cc.Enabled {
+							keys = append(keys, CaptureChannelKey{PeerName: cc.PeerName, ChannelName: cc.Name})
+						}
+					}
+					config.OnCaptureEnabledChanged(keys)
+				}
 				syncStreamNames()
 			case "SetCaptureDump":
 				audioEngine.SetCaptureDump(cmd.Enabled)
