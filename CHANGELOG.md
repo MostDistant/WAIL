@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.8.0 (2026-07-23)
+
+### Features
+
+- broadcast the WAIL Metronome to the room as an audio stream (#392)
+
 ## 3.7.0 (2026-07-23)
 
 ### Features
