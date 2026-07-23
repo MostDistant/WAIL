@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.9.8 (2026-07-23)
+
+### Fixes
+
+- docs: note that every main push ships a release (fallback changeset = patch bump) (#413)
+
 ## 3.9.7 (2026-07-23)
 
 ### Fixes
