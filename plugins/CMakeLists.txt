@@ -47,3 +47,16 @@ endfunction()
 
 add_wail_plugin(wail-send wail_send.c)
 add_wail_plugin(wail-recv wail_recv.c)
+
+# State-extension roundtrip test: loads each built bundle and drives clap.state
+# with a fake host (see test_state.c). wail-send also asserts its "Stream
+# Index" param survives a save/load cycle.
+if(NOT WIN32)
+  enable_testing()
+  add_executable(test_state test_state.c)
+  target_include_directories(test_state PRIVATE "${CLAP_INCLUDE}")
+  target_link_libraries(test_state PRIVATE ${CMAKE_DL_LIBS})
+  add_dependencies(test_state wail-send wail-recv)
+  add_test(NAME state_send COMMAND test_state $<TARGET_FILE:wail-send> software.wail.send stream-index)
+  add_test(NAME state_recv COMMAND test_state $<TARGET_FILE:wail-recv> software.wail.recv)
+endif()

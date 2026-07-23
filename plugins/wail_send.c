@@ -289,10 +289,43 @@ static void CLAP_ABI send_pp_flush(const clap_plugin_t *p, const clap_input_even
 static const clap_plugin_params_t send_params = {
     send_pp_count, send_pp_info, send_pp_value, send_pp_v2t, send_pp_t2v, send_pp_flush};
 
+// --- state extension: persist "Stream Index" across project saves ---
+// Without CLAP_EXT_STATE hosts like Bitwig refuse to save projects containing
+// this plugin ("Plug-in does not support saving its state").
+
+#define SEND_STATE_MAGIC 0x57414C53u   // 'WALS'
+#define SEND_STATE_VERSION 1u
+
+static bool CLAP_ABI send_state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream) {
+   wail_send *self = plugin->plugin_data;
+   uint8_t buf[12];
+   size_t  off = 0;
+   wail_put_u32(buf, &off, SEND_STATE_MAGIC);
+   wail_put_u32(buf, &off, SEND_STATE_VERSION);
+   wail_put_u32(buf, &off, (uint32_t)atomic_load_explicit(&self->stream_index, memory_order_relaxed));
+   return wail_stream_write_all(stream, buf, off) != 0;
+}
+
+static bool CLAP_ABI send_state_load(const clap_plugin_t *plugin, const clap_istream_t *stream) {
+   wail_send *self = plugin->plugin_data;
+   uint8_t buf[12];
+   if (!wail_stream_read_all(stream, buf, sizeof(buf))) return false;
+   if (wail_get_u32(buf) != SEND_STATE_MAGIC) return false;
+   if (wail_get_u32(buf + 4) != SEND_STATE_VERSION) return false;
+   uint32_t idx = wail_get_u32(buf + 8);
+   if (idx > 15) idx = 15; // clamp, don't fail: a newer build may widen the range
+   atomic_store_explicit(&self->stream_index, (int)idx, memory_order_relaxed);
+   const clap_host_params_t *hp = self->host->get_extension(self->host, CLAP_EXT_PARAMS);
+   if (hp && hp->rescan) hp->rescan(self->host, CLAP_PARAM_RESCAN_VALUES);
+   return true;
+}
+static const clap_plugin_state_t send_state = {send_state_save, send_state_load};
+
 static const void *CLAP_ABI send_get_extension(const clap_plugin_t *p, const char *id) {
    (void)p;
    if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &send_audio_ports;
    if (!strcmp(id, CLAP_EXT_PARAMS)) return &send_params;
+   if (!strcmp(id, CLAP_EXT_STATE)) return &send_state;
    return NULL;
 }
 

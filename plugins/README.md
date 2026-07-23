@@ -11,6 +11,9 @@ or `WAIL_IPC_ADDR`).
 - **`wail-recv`** — 16 stereo output ports, one per remote stream. Ports are named
   live (`{peer} · {stream}`) as audio arrives.
 
+Both implement `clap.state` (Stream Index persists in project files for send; recv
+saves a version marker), so hosts can save projects/presets containing them.
+
 ## Build
 
 Requires a C11 compiler, CMake ≥ 3.15, and the vendored CLAP headers:
@@ -19,6 +22,7 @@ Requires a C11 compiler, CMake ≥ 3.15, and the vendored CLAP headers:
 git submodule update --init vendor/clap
 cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
 cmake --build build/plugins
+ctest --test-dir build/plugins --output-on-failure   # clap.state roundtrip tests
 ```
 
 Outputs `wail-send.clap` and `wail-recv.clap` in the build dir:

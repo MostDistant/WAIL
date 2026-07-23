@@ -384,9 +384,37 @@ static bool CLAP_ABI recv_ap_get(const clap_plugin_t *plugin, uint32_t idx, bool
 }
 static const clap_plugin_audio_ports_t recv_audio_ports = {recv_ap_count, recv_ap_get};
 
+// --- state extension ---
+// Recv has no parameters today, but it must still implement CLAP_EXT_STATE:
+// hosts like Bitwig refuse to save projects containing a plugin that "does not
+// support saving its state". The blob is a version marker only.
+
+#define RECV_STATE_MAGIC 0x57414C52u   // 'WALR'
+#define RECV_STATE_VERSION 1u
+
+static bool CLAP_ABI recv_state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream) {
+   (void)plugin;
+   uint8_t buf[8];
+   size_t  off = 0;
+   wail_put_u32(buf, &off, RECV_STATE_MAGIC);
+   wail_put_u32(buf, &off, RECV_STATE_VERSION);
+   return wail_stream_write_all(stream, buf, off) != 0;
+}
+
+static bool CLAP_ABI recv_state_load(const clap_plugin_t *plugin, const clap_istream_t *stream) {
+   (void)plugin;
+   uint8_t buf[8];
+   if (!wail_stream_read_all(stream, buf, sizeof(buf))) return false;
+   if (wail_get_u32(buf) != RECV_STATE_MAGIC) return false;
+   if (wail_get_u32(buf + 4) != RECV_STATE_VERSION) return false;
+   return true;
+}
+static const clap_plugin_state_t recv_state = {recv_state_save, recv_state_load};
+
 static const void *CLAP_ABI recv_get_extension(const clap_plugin_t *p, const char *id) {
    (void)p;
    if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &recv_audio_ports;
+   if (!strcmp(id, CLAP_EXT_STATE)) return &recv_state;
    return NULL;
 }
 

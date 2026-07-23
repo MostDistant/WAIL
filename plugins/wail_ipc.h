@@ -127,6 +127,29 @@ static inline int64_t wail_get_i64(const uint8_t *b) {
    return (int64_t)v;
 }
 
+// --- CLAP stream helpers (clap.state) ---
+// The stream contract allows partial reads/writes, so loop until the whole
+// buffer moves. 0 (EOF) and negative (error) both fail the operation.
+
+static inline int wail_stream_write_all(const clap_ostream_t *stream, const uint8_t *buf, size_t len) {
+   size_t off = 0;
+   while (off < len) {
+      int64_t n = stream->write(stream, buf + off, (uint64_t)(len - off));
+      if (n <= 0) return 0;
+      off += (size_t)n;
+   }
+   return 1;
+}
+static inline int wail_stream_read_all(const clap_istream_t *stream, uint8_t *buf, size_t len) {
+   size_t off = 0;
+   while (off < len) {
+      int64_t n = stream->read(stream, buf + off, (uint64_t)(len - off));
+      if (n <= 0) return 0;
+      off += (size_t)n;
+   }
+   return 1;
+}
+
 // --- socket helpers ---
 
 // wail_sock_set_recv_timeout_ms makes a blocking recv() return periodically (with a
