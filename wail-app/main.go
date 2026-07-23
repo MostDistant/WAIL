@@ -80,6 +80,13 @@ func main() {
 		Assets: application.AssetOptions{
 			Handler: application.BundledAssetFileServer(assets),
 		},
+		Mac: application.MacOptions{
+			// WAIL has no windowless/tray mode: with the default (false),
+			// closing the window leaves the process running with no UI —
+			// session, Link peer, and websockets all still alive — and the
+			// only way out is Cmd-Q or killing the process.
+			ApplicationShouldTerminateAfterLastWindowClosed: true,
+		},
 	})
 
 	appBackend.SetEmitter(NewWailsEmitter(wailsApp))
