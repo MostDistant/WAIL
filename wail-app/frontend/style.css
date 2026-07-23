@@ -654,39 +654,7 @@ summary:hover {
   font-size: 11px;
 }
 
-/* --- Peer list --- */
-.peer-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 4px 0;
-}
-
-.peer-list .empty {
-  color: var(--fg-dim);
-  font-size: 12px;
-  padding: 4px 0;
-}
-
-.peer-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 6px 10px;
-  background: var(--bg-card);
-  border-radius: 6px;
-  transition: background var(--transition);
-}
-
-.peer-item:hover {
-  background: var(--bg-hover);
-}
-
-.peer-item--local {
-  border-left: 2px solid #88aaff;
-  opacity: 0.9;
-}
-
+/* --- Peer tree (unified: "you" node + remote peers) --- */
 .peer-name {
   font-weight: 600;
   font-size: 12px;
@@ -713,19 +681,6 @@ summary:hover {
   padding: 1px 4px;
   outline: none;
   font-family: inherit;
-}
-
-.peer-slot {
-  font-size: 10px;
-  color: var(--fg-muted);
-  font-family: var(--font-mono);
-  margin-right: 8px;
-}
-
-.peer-rtt {
-  color: var(--fg-dim);
-  font-size: 11px;
-  font-family: var(--font-mono);
 }
 
 .peer-status {
@@ -767,13 +722,6 @@ summary:hover {
   background: rgba(52, 211, 153, 0.2);
 }
 
-/* --- Audio bytes --- */
-.audio-bytes {
-  color: var(--fg-dim);
-  font-size: 11px;
-  font-family: var(--font-mono);
-}
-
 /* --- Disconnect --- */
 #disconnect-btn {
   background: transparent;
@@ -788,9 +736,9 @@ summary:hover {
   border-color: var(--state-error);
 }
 
-/* --- Session tab content --- */
+/* --- Session/Debug tab content --- */
 #session-tab-session-content,
-#session-tab-network-content {
+#session-tab-debug-content {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
@@ -818,6 +766,21 @@ summary:hover {
   background: var(--bg-card);
   border-radius: 6px;
   padding: 6px 10px;
+}
+
+.peer-node--you {
+  border-left: 2px solid var(--accent);
+}
+
+/* --- Debug tab --- */
+.debug-about {
+  color: var(--fg-dim);
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+#session-tab-debug-content .session-section {
+  margin-bottom: 14px;
 }
 
 .peer-node-head {
@@ -878,11 +841,7 @@ summary:hover {
   font-family: var(--font-mono);
 }
 
-/* Local audio health (Network tab): one row per engine diagnostic counter */
-.network-health-label {
-  margin-top: 16px;
-}
-
+/* Local audio health (Debug tab): one row per engine diagnostic counter */
 .network-health {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -890,18 +849,18 @@ summary:hover {
   font-size: 12px;
 }
 
-.network-health .health-row {
+.health-row {
   display: flex;
   justify-content: space-between;
   padding: 3px 6px;
   border-radius: 4px;
 }
 
-.network-health .health-row:hover {
+.health-row:hover {
   background: rgba(255, 255, 255, 0.04);
 }
 
-.network-health .health-row span:last-child {
+.health-row span:last-child {
   font-family: var(--font-mono);
 }
 
@@ -928,15 +887,8 @@ summary:hover {
   color: var(--state-error);
 }
 
-#session-tab-logs-content {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-}
-
 .log-list {
-  flex: 1;
+  max-height: 220px;
   overflow-y: auto;
   padding-top: 4px;
 }

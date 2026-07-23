@@ -109,6 +109,7 @@
         <img src="logo.png" alt="" class="header-logo header-logo-sm">
         <h2>WAIL</h2>
         <span id="session-room" class="room-badge"></span>
+        <span id="peer-count" class="log-badge" title="Room peers sending / connected">0/0</span>
         <span id="link-clock" class="link-clock" title="Interval progress" style="display:none"></span>
       </div>
       <button type="button" id="session-settings-btn" class="icon-btn" title="Settings">&#9881;</button>
@@ -117,19 +118,11 @@
     <div class="tab-bar">
       <button type="button" class="tab active" id="session-tab-session">Session</button>
       <button type="button" class="tab" id="session-tab-chat">Chat</button>
-      <button type="button" class="tab" id="session-tab-logs">Logs <span id="log-count" class="log-badge">0</span></button>
-      <button type="button" class="tab" id="session-tab-network">Peers <span id="peer-count" class="log-badge">0/0</span></button>
+      <button type="button" class="tab" id="session-tab-debug">Debug <span id="log-count" class="log-badge">0</span></button>
     </div>
 
     <!-- Session tab -->
     <div id="session-tab-session-content">
-      <!-- In-app senders only (test tone / WAV). Remote peers and their sent
-           channels live on the Peers tab. Shown only while you're sending. -->
-      <section class="session-section" id="sends-section" style="display:none">
-        <h3 class="section-label">Your Sends</h3>
-        <div id="peer-list" class="peer-list"></div>
-      </section>
-
       <div id="link-no-peers-warning" class="warning" style="display:none">
         Start Ableton Link in your DAW — audio is not being transmitted
       </div>
@@ -152,15 +145,6 @@
             <label>Link Peers</label>
             <span class="status-value" id="session-link-peers">0</span>
           </div>
-          <div class="status-cell">
-            <label>Link Audio</label>
-            <span class="status-value" id="session-plugin">on</span>
-          </div>
-          <div class="status-cell">
-            <label>Audio <button type="button" id="stats-mode-btn" class="stats-mode-toggle">all time</button></label>
-            <span class="status-value" id="session-audio">0 / 0</span>
-            <span id="session-audio-bytes" class="audio-bytes">0 B / 0 B</span>
-          </div>
           <div class="status-cell" id="recording-stat" style="display:none">
             <label>Recording</label>
             <div class="recording-row">
@@ -176,16 +160,15 @@
           <div id="capture-channels" class="capture-channels">
             <span class="empty">No local Link Audio channels discovered</span>
           </div>
-          <!-- Debug: dump each enabled channel's audio pre- and post-Opus to WAV -->
-          <label class="capture-dump" title="Writes pre-Opus and post-Opus WAV files under ~/.wail/dumps for debugging; path is shown in the log.">
-            <input type="checkbox" id="capture-dump-toggle">
-            <span>Dump capture to WAV (debug)</span>
-          </label>
-          <!-- Debug: relay echoes our own audio back; republished as a "(loopback)" Link Audio channel -->
-          <label class="capture-dump" title="The relay echoes your own audio back to you. It reappears one interval late as a '(loopback)' Link Audio channel — subscribe to it in your DAW to hear exactly what peers hear.">
-            <input type="checkbox" id="loopback-toggle">
-            <span>Loopback my audio via server (debug)</span>
-          </label>
+        </div>
+      </section>
+
+      <!-- Unified peers tree: your sends (enabled capture channels + in-app
+           senders) as the "you" node, remote peers with their channels below. -->
+      <section class="session-section">
+        <h3 class="section-label">Peers</h3>
+        <div id="peer-tree" class="peer-tree">
+          <span class="empty">No peers connected</span>
         </div>
       </section>
 
@@ -200,22 +183,55 @@
       </div>
     </div>
 
-    <!-- Peers tab: tree of remote peers with the channels each is sending -->
-    <div id="session-tab-network-content" style="display:none">
-      <div id="peer-tree" class="peer-tree">
-        <span class="empty">No peers connected</span>
-      </div>
+    <!-- Debug tab: diagnostics and debug controls, out of the common path -->
+    <div id="session-tab-debug-content" style="display:none">
+      <section class="session-section">
+        <h3 class="section-label">About</h3>
+        <div class="debug-about">WAIL <span class="version" id="debug-version"></span></div>
+      </section>
+
+      <section class="session-section">
+        <h3 class="section-label">Capture debug</h3>
+        <!-- Dump each enabled channel's audio pre- and post-Opus to WAV -->
+        <label class="capture-dump" title="Writes pre-Opus and post-Opus WAV files under ~/.wail/dumps for debugging; path is shown in the log.">
+          <input type="checkbox" id="capture-dump-toggle">
+          <span>Dump capture to WAV</span>
+        </label>
+        <!-- Relay echoes our own audio back; republished as a "(loopback)" Link Audio channel -->
+        <label class="capture-dump" title="The relay echoes your own audio back to you. It reappears one interval late as a '(loopback)' Link Audio channel — subscribe to it in your DAW to hear exactly what peers hear.">
+          <input type="checkbox" id="loopback-toggle">
+          <span>Loopback my audio via server</span>
+        </label>
+      </section>
+
+      <section class="session-section">
+        <h3 class="section-label">Audio stats <button type="button" id="stats-mode-btn" class="stats-mode-toggle">all time</button></h3>
+        <div class="debug-stats">
+          <div class="health-row"><span>Intervals sent / received</span><span id="session-audio">0 / 0</span></div>
+          <div class="health-row"><span>Audio bytes sent / received</span><span id="session-audio-bytes">0 B / 0 B</span></div>
+        </div>
+      </section>
+
+      <!-- Per-peer relay round-trip times -->
+      <section class="session-section">
+        <h3 class="section-label">Peers detail</h3>
+        <div id="peer-detail">
+          <span class="empty">No peers connected</span>
+        </div>
+      </section>
 
       <!-- Local audio-path health counters (each increment ≈ one audible-risk event) -->
-      <h3 class="section-label network-health-label">Local audio health</h3>
-      <div id="network-health" class="network-health">
-        <span class="empty">No diagnostics yet</span>
-      </div>
-    </div>
+      <section class="session-section">
+        <h3 class="section-label">Local audio health</h3>
+        <div id="network-health" class="network-health">
+          <span class="empty">No diagnostics yet</span>
+        </div>
+      </section>
 
-    <!-- Logs tab -->
-    <div id="session-tab-logs-content" style="display:none">
-      <div id="log-list" class="log-list"></div>
+      <section class="session-section">
+        <h3 class="section-label">Logs</h3>
+        <div id="log-list" class="log-list"></div>
+      </section>
     </div>
 
     <button type="button" id="disconnect-btn">Disconnect</button>
@@ -259,7 +275,7 @@
 
         <div class="remember-row">
           <input type="checkbox" id="settings-log-sharing">
-          <label for="settings-log-sharing" class="remember-label">Peer log streaming (share &amp; view live logs in session)</label>
+          <label for="settings-log-sharing" class="remember-label">Share my debug log with the room</label>
         </div>
 
         <div class="remember-row">

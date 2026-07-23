@@ -956,8 +956,13 @@ func sessionLoop(
 				})
 			}
 
-			// Build local sends
-			localSends := make([]LocalSendInfo, 0, len(localSendStreams))
+			// Build local sends: in-app senders (test tone / WAV) plus every
+			// enabled capture channel — the unified peers tree renders both in
+			// its "you" node. Capture sends carry their effective (override-aware)
+			// names so the tree matches what receivers see.
+			captureInfos := audioEngine.CaptureChannels()
+			effNames := effectiveStreamNames(captureInfos, localStreamNames)
+			localSends := make([]LocalSendInfo, 0, len(localSendStreams)+len(captureInfos))
 			for streamIdx := range localSendStreams {
 				var sn *string
 				if n, ok := localStreamNames[streamIdx]; ok {
@@ -967,6 +972,17 @@ func sessionLoop(
 					StreamIndex: streamIdx,
 					IsSending:   localSendActive[streamIdx],
 					StreamName:  sn,
+				})
+			}
+			for _, cc := range captureInfos {
+				if !cc.Enabled {
+					continue
+				}
+				n := effNames[cc.StreamID]
+				localSends = append(localSends, LocalSendInfo{
+					StreamIndex: cc.StreamID,
+					IsSending:   true, // enabled = bridged = sending
+					StreamName:  &n,
 				})
 			}
 			sort.Slice(localSends, func(i, j int) bool { return localSends[i].StreamIndex < localSends[j].StreamIndex })
