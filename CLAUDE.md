@@ -29,6 +29,7 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 ├── wire.go               WAIF binary wire format
 ├── test_tone.go          Test tone generator (Opus sine wave) — GUI/headless injection
 ├── wav_sender.go         Headless WAV file sender (--wav)
+├── metronome_sender.go   In-app sender that broadcasts the WAIL Metronome click to the room
 ├── packet_loss.go        WAN relay loss detection (WAIF frame sequence)
 ├── recorder.go           Local session recording (WAIF frames to disk)
 ├── events.go             Frontend event types

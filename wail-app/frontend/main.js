@@ -89,6 +89,15 @@ if (metronomeToggle) {
   });
 }
 
+// Broadcast-metronome toggle: stream the click to the room (independent of the
+// local channel above; defaults to off per session).
+const metronomeBroadcastToggle = document.getElementById('metronome-broadcast-toggle');
+if (metronomeBroadcastToggle) {
+  metronomeBroadcastToggle.addEventListener('change', () => {
+    invoke('set_metronome_broadcast', { enabled: metronomeBroadcastToggle.checked }).catch(() => {});
+  });
+}
+
 // Emit-cushion slider (live). cushionUserSet gates the one-time initialisation
 // from engine health so we don't clobber the user's drag with a stale snapshot.
 const cushionSlider = document.getElementById('cushion-slider');
@@ -664,6 +673,7 @@ function showSession(room) {
   if (captureDumpToggle) captureDumpToggle.checked = false; // new session → dump off
   if (loopbackToggle) loopbackToggle.checked = false; // new session → loopback off
   if (metronomeToggle) metronomeToggle.checked = false; // new session → metronome off
+  if (metronomeBroadcastToggle) metronomeBroadcastToggle.checked = false; // new session → broadcast off
   cushionUserSet = false; // re-sync the cushion slider from the new engine
   resetStatsWindow();
   clearLog();

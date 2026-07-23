@@ -403,6 +403,19 @@ func (a *App) SetMetronome(enabled bool) error {
 	return nil
 }
 
+// SetMetronomeBroadcast toggles broadcasting the WAIL Metronome click to the
+// room as an audio stream: peers auto-publish it as a "{peer} · WAIL Metronome"
+// Link Audio channel and hear it one interval late. Independent of SetMetronome
+// (the local-only channel) — both can run at once.
+func (a *App) SetMetronomeBroadcast(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetMetronomeBroadcast", Enabled: enabled}
+	}
+	return nil
+}
+
 // SetCushionMs live-adjusts the emit cushion (feed-ahead depth, ms) — how far
 // ahead of the playhead each Link Audio sink is kept fed. Clamped to 10..500.
 func (a *App) SetCushionMs(ms int) error {
