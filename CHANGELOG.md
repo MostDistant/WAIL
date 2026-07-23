@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.9.2 (2026-07-23)
+
+### Fixes
+
+- include vendor/clap in Homebrew source tarball (#401)
+
 ## 3.9.1 (2026-07-23)
 
 ### Fixes
