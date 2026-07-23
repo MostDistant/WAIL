@@ -23,6 +23,7 @@ import (
 	"github.com/nicholasgasior/wail/wail-app/internal/emit"
 	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 	"github.com/nicholasgasior/wail/wail-app/internal/lanloss"
+	"github.com/nicholasgasior/wail/wail-app/internal/metronome"
 	"github.com/nicholasgasior/wail/wail-app/internal/pace"
 	"github.com/nicholasgasior/wail/wail-app/internal/playout"
 )
@@ -45,12 +46,14 @@ const (
 	discoveryInterval  = 1 * time.Second
 	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
 	// emitCushionMs is how far ahead of the playhead each sink is kept fed —
-	// stall tolerance for the emit loop. It adds directly to a subscriber's
-	// reported buffering, and the ceiling is the subscriber's configured Link
-	// Audio Latency. 160 regressed in real 3.2.3 sessions (buffer meter swung
-	// 0→max with audible glitches) while 80 held steady in the field, so 80 it
-	// is; WAIL_EMIT_CUSHION_MS overrides (see tradeoffs.md).
-	emitCushionMs = 80
+	// stall tolerance for the emit loop. It stamps audio into the future, which
+	// some Link Audio receivers stall on (the VOID DAW-bridge plugin chokes on
+	// any feed-ahead), so the default is 0 — floored to one ~5ms write chunk, the
+	// minimum that still emits (a literal 0 frames would play silence). Raise it
+	// from the Debug tab if a receiver that tolerates buffering (Ableton Live's
+	// native Link Audio held steady at ~80) runs dry with sink underruns.
+	// WAIL_EMIT_CUSHION_MS overrides (see tradeoffs.md).
+	emitCushionMs = 0
 	// plcMaxFramesPerGap caps Opus packet-loss concealment per seq gap (120ms):
 	// libopus fades PLC to silence past ~100ms; a deeper gap's tail stays silent.
 	plcMaxFramesPerGap = 6
@@ -102,18 +105,35 @@ type linkAudioEngine struct {
 	restore map[CaptureChannelKey]bool
 
 	cushionFrames int // per-sink feed-ahead (emitCushionMs or WAIL_EMIT_CUSHION_MS)
+
+	// Locally-generated "WAIL Metronome" click channel (nil = off). metronomeOn
+	// mirrors (metronome != nil) so the emit loop skips it lock-free when off.
+	metronome   *metronomeStream
+	metronomeOn atomic.Bool
 }
 
-// engineCushionFrames resolves the emit cushion: emitCushionMs unless
-// WAIL_EMIT_CUSHION_MS overrides it (clamped to 10..500ms — below one tick's
-// jitter the feeder can't keep up; far above, receivers may drop far-future
-// stamps).
+// Cushion clamp bounds (see emitCushionMs): 0 means minimal feed-ahead (the
+// feeder floors it to one write chunk, ~5ms — the smallest value that still
+// emits); far above, receivers may drop far-future stamps.
+const (
+	cushionMinMs = 0
+	cushionMaxMs = 500
+)
+
+func clampCushionMs(ms int) int   { return min(max(ms, cushionMinMs), cushionMaxMs) }
+func cushionFramesFor(ms int) int { return engineInternalRate * ms / 1000 }
+func cushionMsFromFrames(f int) int {
+	return f * 1000 / engineInternalRate
+}
+
+// engineCushionFrames resolves the initial emit cushion: emitCushionMs unless
+// WAIL_EMIT_CUSHION_MS overrides it (clamped). SetCushionMs changes it live.
 func engineCushionFrames() int {
 	ms := emitCushionMs
 	src := "default"
 	if v := os.Getenv("WAIL_EMIT_CUSHION_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
-			ms = min(max(n, 10), 500)
+			ms = clampCushionMs(n)
 			src = "WAIL_EMIT_CUSHION_MS"
 		} else {
 			log.Printf("[audio] warn: bad WAIL_EMIT_CUSHION_MS %q: %v", v, err)
@@ -122,7 +142,25 @@ func engineCushionFrames() int {
 	// Always log the effective value — sessions must be diagnosable from the
 	// log alone, without inferring the default from an absent override line.
 	log.Printf("[audio] emit cushion: %dms (%s)", ms, src)
-	return engineInternalRate * ms / 1000
+	return cushionFramesFor(ms)
+}
+
+// SetCushionMs live-adjusts the emit feed-ahead depth for every current and
+// future stream (and the metronome). Clamped; returns the effective ms.
+func (e *linkAudioEngine) SetCushionMs(ms int) int {
+	ms = clampCushionMs(ms)
+	frames := cushionFramesFor(ms)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cushionFrames = frames
+	for _, st := range e.emit {
+		st.feeder.SetCushion(frames)
+	}
+	if e.metronome != nil {
+		e.metronome.feeder.SetCushion(frames)
+	}
+	log.Printf("[audio] emit cushion set to %dms (live)", ms)
+	return ms
 }
 
 type captureChannel struct {
@@ -196,6 +234,19 @@ type emitStream struct {
 	sinkWriteRejected   atomic.Uint64 // sink refused a chunk mid-stream (queue full / listener left)
 }
 
+// metronomeStream is a locally-generated click track published as a "WAIL
+// Metronome" Link Audio channel — no remote peer, no decode/reassembly. It
+// rides the same feeder/cushion/sink emit machinery as remote streams (so the
+// click audibly reflects emit-path health) and clicks on the local Link beat
+// grid, so it lines up with the DAW's own metronome. Guarded by e.mu.
+type metronomeStream struct {
+	sink         *abllink.Sink
+	feeder       *emit.Feeder
+	channels     int
+	installedIdx int64 // interval whose reader is currently installed
+	haveReader   bool
+}
+
 func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), offsetD int) AudioEngine {
 	return &linkAudioEngine{
 		lb:       lb,
@@ -248,6 +299,13 @@ func (e *linkAudioEngine) Stop() {
 		}
 	}
 	e.emit = make(map[affinity.Key]*emitStream)
+	if e.metronome != nil {
+		if e.metronome.sink != nil {
+			e.metronome.sink.Close()
+		}
+		e.metronome = nil
+		e.metronomeOn.Store(false)
+	}
 	e.mu.Unlock()
 
 	e.link.EnableLinkAudio(false)
@@ -796,6 +854,7 @@ func (e *linkAudioEngine) Health() EngineHealth {
 		h.OpusDecodeFailures += st.decodeFailures.Load()
 	}
 	h.WireDecodeFailures = e.wireDecodeFailures.Load()
+	h.EmitCushionMs = cushionMsFromFrames(e.cushionFrames)
 	return h
 }
 
@@ -834,6 +893,11 @@ func (e *linkAudioEngine) emitLoop() {
 				haveLast = true
 			}
 			e.topUpSinks(ss, bpi, localBeat)
+			// The metronome runs on the local Link grid, independent of the
+			// labeler that gates onBoundary — it works before a room anchor.
+			if e.metronomeOn.Load() {
+				e.metronomeTick(ss, cfg, tempo, bpi, localBeat, localIdx)
+			}
 		}
 	}
 }
@@ -935,6 +999,81 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, bpi float64, loca
 		st.sinkUnderrunEvents.Store(ev)
 		st.sinkUnderrunFrames.Store(fr)
 	}
+}
+
+// SetMetronome publishes or tears down the "WAIL Metronome" Link Audio channel.
+// The sink is registered as our own so capture discovery won't offer it back as
+// an input (a feedback loop). No-op if already in the requested state.
+func (e *linkAudioEngine) SetMetronome(enabled bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if enabled {
+		if e.metronome != nil {
+			return
+		}
+		const name = "WAIL Metronome"
+		e.own.Published(name)
+		e.metronome = &metronomeStream{
+			sink:     e.link.NewSink(name, engineInternalRate*2),
+			feeder:   emit.NewFeeder(e.cushionFrames, emitChunkFrames),
+			channels: 2,
+		}
+		e.metronomeOn.Store(true)
+		log.Printf("[audio] metronome on (channel %q)", name)
+		return
+	}
+	if e.metronome == nil {
+		return
+	}
+	e.metronomeOn.Store(false)
+	if e.metronome.sink != nil {
+		e.metronome.sink.Close()
+	}
+	e.metronome = nil
+	log.Printf("[audio] metronome off")
+}
+
+// metronomeTick installs the click reader for a new local interval (pre-rolling
+// the next so boundaries don't reset the cushion) and paces it into the sink.
+// It mirrors onBoundary + topUpSinks minus the reasm/sched bookkeeping (a
+// metronome decodes nothing) and tracks its own installed index, so re-enabling
+// mid-interval starts the click immediately. Each interval renders fresh, so
+// there is no continuation-padding handoff (start offset always 0).
+func (e *linkAudioEngine) metronomeTick(ss *abllink.SessionState, cfg interval.Config, tempo, bpi, localBeat float64, localIdx int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	m := e.metronome
+	if m == nil || m.sink == nil {
+		return
+	}
+	startBeat, endBeat := cfg.BeatWindow(localIdx)
+	totalFrames := intervalPlayoutFrames(cfg, engineInternalRate, tempo)
+	channels := m.channels
+	newReader := func(idx int64, base float64) *emit.PacedReader {
+		buf := metronome.RenderInterval(cfg, tempo, engineInternalRate, channels, idx)
+		return emit.NewPacedReader(func() []int16 { return buf }, channels, engineInternalRate, tempo, base, totalFrames)
+	}
+	makeNext := func() (*emit.PacedReader, int64, int) {
+		return newReader(localIdx+1, endBeat), localIdx + 1, 0
+	}
+	switch {
+	case !m.haveReader:
+		m.feeder.SetCurrent(localIdx, newReader(localIdx, startBeat), makeNext)
+		m.installedIdx, m.haveReader = localIdx, true
+	case localIdx > m.installedIdx:
+		if m.feeder.Promote(localIdx, makeNext) {
+			if cur := m.feeder.Current(); cur != nil && cur.TempoBPM() != tempo {
+				cur.Rebase(tempo, totalFrames)
+			}
+		} else {
+			m.feeder.SetCurrent(localIdx, newReader(localIdx, startBeat), makeNext)
+		}
+		m.installedIdx = localIdx
+	}
+	m.feeder.Advance(localBeat, func(samples []int16, beat float64) {
+		frames := len(samples) / channels
+		m.sink.WriteInterleaved(samples, ss, beat, bpi, frames, channels, engineInternalRate)
+	})
 }
 
 // intervalQuantumSnapshot returns the quantum for the audio path's Link timing

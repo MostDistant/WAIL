@@ -43,16 +43,17 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetInterval", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetMetronome", "SetCushionMs", "SetInterval", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
 	StreamIndex *uint16
 	WavFile     string
 	ChannelID   string  // SetCaptureEnabled
-	Enabled     bool    // SetCaptureEnabled, SetCaptureDump, SetLoopback
+	Enabled     bool    // SetCaptureEnabled, SetCaptureDump, SetLoopback, SetMetronome
 	Bars        uint32  // SetInterval
 	Quantum     float64 // SetInterval
+	Value       int     // SetCushionMs
 }
 
 // SessionHandle represents a running session.
@@ -470,6 +471,12 @@ func sessionLoop(
 				loopbackEnabled = cmd.Enabled
 				mesh.SendLoopback(cmd.Enabled)
 				logInfo("[loopback] server echo enabled=%v", cmd.Enabled)
+			case "SetMetronome":
+				audioEngine.SetMetronome(cmd.Enabled)
+				logInfo("[metronome] enabled=%v", cmd.Enabled)
+			case "SetCushionMs":
+				eff := audioEngine.SetCushionMs(cmd.Value)
+				logInfo("[audio] emit cushion set to %dms", eff)
 			case "Disconnect":
 				logInfo("Disconnecting...")
 				goto cleanup

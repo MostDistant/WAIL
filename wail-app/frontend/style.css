@@ -1119,6 +1119,28 @@ summary:hover {
   margin: 0;
 }
 
+/* Emit-cushion slider row (Debug → Playback). */
+.cushion-control {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.cushion-control label {
+  display: block;
+  margin: 0 0 4px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+}
+.cushion-control #cushion-value {
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+.cushion-control input[type="range"] {
+  width: 100%;
+  margin: 0;
+}
+
 /* --- Stats mode toggle --- */
 .stats-mode-toggle {
   display: inline;

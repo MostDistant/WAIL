@@ -220,6 +220,19 @@
         </div>
       </section>
 
+      <!-- Playback tuning: metronome alignment aid + live emit-cushion control -->
+      <section class="session-section">
+        <h3 class="section-label">Playback</h3>
+        <label class="capture-dump" title="Publishes a 'WAIL Metronome' Link Audio channel — a click on every beat, accented on bar downbeats, on WAIL's own beat grid. Subscribe to it in your DAW and run your DAW's metronome to check they line up.">
+          <input type="checkbox" id="metronome-toggle">
+          <span>Publish WAIL Metronome channel</span>
+        </label>
+        <div class="cushion-control" title="How far ahead of the playhead each Link Audio sink is kept fed. Default 0 (minimal — some receivers like the VOID plugin stall on any feed-ahead). Raise it if a buffering-tolerant receiver runs dry with sink underruns (see below).">
+          <label for="cushion-slider">Emit cushion <span id="cushion-value">0 ms</span></label>
+          <input type="range" id="cushion-slider" min="0" max="500" step="5" value="0">
+        </div>
+      </section>
+
       <!-- Local audio-path health counters (each increment ≈ one audible-risk event) -->
       <section class="session-section">
         <h3 class="section-label">Local audio health</h3>

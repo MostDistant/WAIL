@@ -81,6 +81,27 @@ if (loopbackToggle) {
   });
 }
 
+// WAIL Metronome toggle (live; engine defaults to off per session).
+const metronomeToggle = document.getElementById('metronome-toggle');
+if (metronomeToggle) {
+  metronomeToggle.addEventListener('change', () => {
+    invoke('set_metronome', { enabled: metronomeToggle.checked }).catch(() => {});
+  });
+}
+
+// Emit-cushion slider (live). cushionUserSet gates the one-time initialisation
+// from engine health so we don't clobber the user's drag with a stale snapshot.
+const cushionSlider = document.getElementById('cushion-slider');
+const cushionValue = document.getElementById('cushion-value');
+let cushionUserSet = false;
+if (cushionSlider) {
+  cushionSlider.addEventListener('input', () => {
+    cushionUserSet = true;
+    if (cushionValue) cushionValue.textContent = cushionSlider.value + ' ms';
+    invoke('set_cushion_ms', { ms: parseInt(cushionSlider.value, 10) }).catch(() => {});
+  });
+}
+
 
 // --- Room Name Generator ---
 // Dictionary 1: synthesis techniques, sound qualities, processing descriptors
@@ -642,6 +663,8 @@ function showSession(room) {
   sessionError.style.display = 'none';
   if (captureDumpToggle) captureDumpToggle.checked = false; // new session → dump off
   if (loopbackToggle) loopbackToggle.checked = false; // new session → loopback off
+  if (metronomeToggle) metronomeToggle.checked = false; // new session → metronome off
+  cushionUserSet = false; // re-sync the cushion slider from the new engine
   resetStatsWindow();
   clearLog();
   clearChatMessages();
@@ -1104,6 +1127,14 @@ async function setupListeners() {
   // event now only feeds the local audio-health counters beneath it.
   unlisten.push(await listen('peers:network', (event) => {
     renderHealth(event.payload.health);
+    // Initialise the cushion slider from the engine's effective value once (it
+    // reflects any WAIL_EMIT_CUSHION_MS override); the user's drag takes over
+    // after. Accept 0 (the default) — it's falsy, so guard on the type.
+    const ms = event.payload.health && event.payload.health.emit_cushion_ms;
+    if (cushionSlider && !cushionUserSet && typeof ms === 'number') {
+      cushionSlider.value = ms;
+      if (cushionValue) cushionValue.textContent = ms + ' ms';
+    }
   }));
 }
 

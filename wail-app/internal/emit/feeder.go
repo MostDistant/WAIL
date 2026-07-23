@@ -43,6 +43,18 @@ func NewFeeder(cushionFrames, chunkFrames int) *Feeder {
 	return &Feeder{cushionFrames: cushionFrames, chunkFrames: chunkFrames}
 }
 
+// SetCushion changes the feed-ahead depth live. Re-floors to chunkFrames (as
+// NewFeeder does). Safe mid-stream: the cursor only ever moves forward, so a
+// larger cushion just fills further on the next Advance and a smaller one makes
+// Advance a no-op until the playhead catches up — committed beats never re-emit.
+// Drive from the emit loop under the engine lock (not concurrent-safe).
+func (f *Feeder) SetCushion(cushionFrames int) {
+	if cushionFrames < f.chunkFrames {
+		cushionFrames = f.chunkFrames
+	}
+	f.cushionFrames = cushionFrames
+}
+
 // SetCurrent installs the playing interval's reader. makeNext lazily builds
 // the following interval's reader for boundary pre-roll (nil disables
 // pre-roll); it runs once, when the cushion first crosses the current

@@ -391,6 +391,29 @@ func (a *App) SetLoopback(enabled bool) error {
 	return nil
 }
 
+// SetMetronome toggles the "WAIL Metronome" Link Audio channel: a click on
+// every beat (accented on bar downbeats) on the local Link grid, published so
+// the user can subscribe in their DAW and align it against the DAW's metronome.
+func (a *App) SetMetronome(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetMetronome", Enabled: enabled}
+	}
+	return nil
+}
+
+// SetCushionMs live-adjusts the emit cushion (feed-ahead depth, ms) — how far
+// ahead of the playhead each Link Audio sink is kept fed. Clamped to 10..500.
+func (a *App) SetCushionMs(ms int) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetCushionMs", Value: ms}
+	}
+	return nil
+}
+
 // RenameStream updates a stream name.
 func (a *App) RenameStream(streamIndex uint16, name string) error {
 	a.mu.Lock()
