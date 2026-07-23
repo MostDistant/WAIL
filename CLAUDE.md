@@ -216,7 +216,7 @@ Releases are fully automated — no manual `knope` commands needed:
 
 1. **Push to `main`** → `auto-release.yml` runs `knope prepare-release`, which consumes conventional commits (and `.changeset/` files if present as a fallback), bumps versions, updates `CHANGELOG.md`, and opens/updates a PR from the `release` branch → `main`.
 2. **Merge the release PR** → `release-on-merge.yml` runs `knope release` (creates GitHub release + git tag) and dispatches artifact builds.
-3. **`release.yml`** builds platform artifacts (macOS, Windows, Linux — app binaries + zip archives + Homebrew source tarball) and uploads them to the GitHub release.
+3. **`release.yml`** builds platform artifacts (Windows/Linux app binaries + zip/tar archives, plus the Homebrew source tarball that serves as the macOS channel) and uploads them to the GitHub release. A failed platform build does not block the release: `create-release` packages and uploads whatever artifacts exist (the run still reports failure so a missing platform is visible).
 
 ### Rules for agents
 

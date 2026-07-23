@@ -324,6 +324,11 @@ jobs:
 
   create-release:
     needs: [build-windows, build-linux, build-homebrew-tarball]
+    # A failed platform build must not sink the whole release: run whenever at
+    # least one artifact source succeeded and upload what exists (e.g. a
+    # mac-only release is the Homebrew source tarball when Windows/Linux fail).
+    # The run still reports failure overall, so a missing platform is visible.
+    if: always() && (needs.build-windows.result == 'success' || needs.build-linux.result == 'success' || needs.build-homebrew-tarball.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -351,13 +356,22 @@ jobs:
         run: |
           VERSION="${{ steps.tag.outputs.version }}"
           # Windows: zip, with a top-level wail-<version>/ directory inside.
-          mv wail-release-windows "wail-${VERSION}"
-          zip -r "wail-windows-x64-${VERSION}.zip" "wail-${VERSION}"
-          mv "wail-${VERSION}" wail-release-windows
+          # Skipped when its build job failed — the release ships without it.
+          if [ -d wail-release-windows ]; then
+            mv wail-release-windows "wail-${VERSION}"
+            zip -r "wail-windows-x64-${VERSION}.zip" "wail-${VERSION}"
+            mv "wail-${VERSION}" wail-release-windows
+          else
+            echo "::warning::no Windows artifact — releasing without it"
+          fi
           # Linux: tarball, same top-level directory layout.
-          mv wail-release-linux "wail-${VERSION}"
-          tar -czf "wail-linux-x64-${VERSION}.tar.gz" "wail-${VERSION}"
-          mv "wail-${VERSION}" wail-release-linux
+          if [ -d wail-release-linux ]; then
+            mv wail-release-linux "wail-${VERSION}"
+            tar -czf "wail-linux-x64-${VERSION}.tar.gz" "wail-${VERSION}"
+            mv "wail-${VERSION}" wail-release-linux
+          else
+            echo "::warning::no Linux artifact — releasing without it"
+          fi
 
       - name: Find individual installers
         id: files
@@ -383,6 +397,7 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           [ -z "${GH_TOKEN}" ] && echo "HOMEBREW_TAP_TOKEN not set, skipping tap update." && exit 0
+          ls wail-homebrew-src/wail-*-src.tar.gz.sha256 >/dev/null 2>&1 || { echo "no source tarball artifact, skipping tap update."; exit 0; }
           VERSION="${{ steps.tag.outputs.version }}"
           SHA=$(cat wail-homebrew-src/wail-*-src.tar.gz.sha256 | head -1)
           URL="https://github.com/MostDistant/WAIL/releases/download/v${VERSION}/wail-${VERSION}-src.tar.gz"
