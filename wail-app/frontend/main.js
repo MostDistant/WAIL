@@ -27,9 +27,10 @@ const chatInput = document.getElementById('chat-input');
 const chatSendBtn = document.getElementById('chat-send-btn');
 const chatMessages = document.getElementById('chat-messages');
 
-// Version label
+// Version labels (join screen header + Debug tab About)
 window.__TAURI__.app.getVersion().then(v => {
   document.getElementById('version-label').textContent = 'v' + v;
+  document.getElementById('debug-version').textContent = 'v' + v;
 });
 
 // Capture send-mixer: render discovered local Link Audio channels as checkboxes.
@@ -521,9 +522,10 @@ document.getElementById('browse-recording-dir').addEventListener('click', async 
   }
 });
 
-// Sync telemetry and log sharing state on load
+// Sync telemetry, log sharing, and remember-settings state on load
 invoke('set_telemetry', { enabled: getTelemetryEnabled() }).catch(() => {});
 invoke('set_log_sharing', { enabled: getLogSharingEnabled() }).catch(() => {});
+invoke('set_remember_enabled', { enabled: getRememberEnabled() }).catch(() => {});
 
 // Populate default recording dir on load
 invoke('get_default_recording_dir').then(dir => {
@@ -580,6 +582,7 @@ settingsForm.addEventListener('submit', (e) => {
   // Save remember setting
   const rememberEnabled = settingsRememberCheckbox.checked;
   saveRememberEnabled(rememberEnabled);
+  invoke('set_remember_enabled', { enabled: rememberEnabled }).catch(() => {});
   if (rememberEnabled) {
     saveSettings();
   } else {
@@ -591,18 +594,15 @@ settingsForm.addEventListener('submit', (e) => {
 // --- Session screen tab switching ---
 const sessionTabSessionBtn = document.getElementById('session-tab-session');
 const sessionTabChatBtn = document.getElementById('session-tab-chat');
-const sessionTabLogsBtn = document.getElementById('session-tab-logs');
-const sessionTabNetworkBtn = document.getElementById('session-tab-network');
+const sessionTabDebugBtn = document.getElementById('session-tab-debug');
 const sessionTabSessionContent = document.getElementById('session-tab-session-content');
 const sessionTabChatContent = document.getElementById('session-tab-chat-content');
-const sessionTabLogsContent = document.getElementById('session-tab-logs-content');
-const sessionTabNetworkContent = document.getElementById('session-tab-network-content');
+const sessionTabDebugContent = document.getElementById('session-tab-debug-content');
 
 const SESSION_TABS = [
   { btn: sessionTabSessionBtn, content: sessionTabSessionContent },
   { btn: sessionTabChatBtn,    content: sessionTabChatContent },
-  { btn: sessionTabLogsBtn,    content: sessionTabLogsContent },
-  { btn: sessionTabNetworkBtn, content: sessionTabNetworkContent },
+  { btn: sessionTabDebugBtn,   content: sessionTabDebugContent },
 ];
 
 function switchSessionTab(activeBtn) {
@@ -614,8 +614,7 @@ function switchSessionTab(activeBtn) {
 
 sessionTabSessionBtn.addEventListener('click', () => switchSessionTab(sessionTabSessionBtn));
 sessionTabChatBtn.addEventListener('click', () => switchSessionTab(sessionTabChatBtn));
-sessionTabLogsBtn.addEventListener('click', () => switchSessionTab(sessionTabLogsBtn));
-sessionTabNetworkBtn.addEventListener('click', () => switchSessionTab(sessionTabNetworkBtn));
+sessionTabDebugBtn.addEventListener('click', () => switchSessionTab(sessionTabDebugBtn));
 
 function resetStatsWindow() {
   statusSnapshots = [];
@@ -647,16 +646,13 @@ function showSession(room) {
   clearLog();
   clearChatMessages();
   document.getElementById('session-room').textContent = room;
-  document.getElementById('sends-section').style.display = 'none';
-  document.getElementById('peer-list').innerHTML = '';
   document.getElementById('peer-tree').innerHTML = '<span class="empty">No peers connected</span>';
+  document.getElementById('peer-detail').innerHTML = '<span class="empty">No peers connected</span>';
   const peerCount = document.getElementById('peer-count');
   peerCount.textContent = '0/0';
   peerCount.className = 'log-badge';
   document.getElementById('session-audio').textContent = '0 / 0';
   document.getElementById('session-audio-bytes').textContent = '0 B / 0 B';
-  document.getElementById('session-plugin').textContent = 'disconnected';
-  document.getElementById('session-plugin').className = 'status-value';
   document.getElementById('session-link-peers').textContent = '0';
   hideClock(); // stays hidden until the first status:update seeds it
   document.getElementById('session-bpi').value = '';
@@ -829,13 +825,9 @@ function renderStatus(s) {
   document.getElementById('session-interval-bars').textContent =
     `(${s.interval_bars} bar${s.interval_bars !== 1 ? 's' : ''})`;
 
-  // Link Audio engine status: show how many local channels are bridged.
-  const captureChannels = s.capture_channels || [];
-  const bridged = captureChannels.filter(c => c.enabled).length;
-  document.getElementById('session-plugin').textContent =
-    bridged > 0 ? `on (${bridged} ch)` : 'on';
-  document.getElementById('session-plugin').className = 'status-value connected';
-  renderCaptureMixer(captureChannels);
+  // Capture send-mixer: discovered local Link Audio channels (own republished
+  // channels never reach this list — the engine excludes them).
+  renderCaptureMixer(s.capture_channels || []);
 
   // Update recording status
   if (s.recording) {
@@ -844,31 +836,8 @@ function renderStatus(s) {
     document.getElementById('recording-size').textContent = `${mb} MB`;
   }
 
-  // "Your Sends": in-app senders (test tone / WAV) only. Remote peers and the
-  // channels they send live on the Peers tab. The section stays hidden unless
-  // you're actually sending, and a status tick never clobbers an edit-in-progress.
-  const localSends = (s.local_sends || []);
-  document.getElementById('sends-section').style.display = localSends.length ? '' : 'none';
-  const slotList = document.getElementById('peer-list');
-  if (localSends.length && slotList.querySelector('.stream-name-input') == null) {
-    slotList.innerHTML = localSends.map(ls => {
-      const label = ls.stream_name
-        ? escapeHtml(ls.stream_name)
-        : (localSends.length > 1 ? `My Send (stream ${ls.stream_index})` : 'My Send');
-      const sendClass = ls.is_sending ? 'peer-status status-connected' : 'peer-status';
-      const sendLabel = ls.is_sending ? 'sending' : 'idle';
-      return `<div class="peer-item peer-item--local">
-        <span class="peer-slot">Send</span><span class="peer-name editable" data-stream-index="${ls.stream_index}">${label}</span>
-        <span class="${sendClass}">${sendLabel}</span>
-        <span class="peer-rtt"></span>
-      </div>`;
-    }).join('');
-    slotList.querySelectorAll('.peer-name.editable').forEach(span => {
-      span.addEventListener('click', startStreamNameEdit);
-    });
-  }
-
   renderPeerTree(s);
+  renderPeerDetail(s);
 }
 
 // --- Interval clock (Ableton Link) ---
@@ -960,15 +929,21 @@ function renderHealth(health) {
   }).join('');
 }
 
-// Peers tab: a tree of remote peers with the Link Audio channels each is
-// sending nested beneath. Built from the status:update payload — peers carry
-// the roster (and the denominator), slots carry each peer's channels. A peer
-// counts as "sending" when we're presently receiving its audio (is_receiving).
+// Unified peers tree (Session tab): a "you" node carrying your sends —
+// enabled capture channels and in-app senders (test tone / WAV), names
+// click-to-rename — above the remote peer nodes with their channels nested
+// beneath. Built from the status:update payload: local_sends carries your
+// sends with effective names, peers carry the roster, slots carry each
+// remote peer's channels. A peer counts as "sending" when we're presently
+// receiving its audio (is_receiving). A status tick never clobbers a
+// rename-in-progress.
 function renderPeerTree(s) {
   const treeEl = document.getElementById('peer-tree');
   const badge = document.getElementById('peer-count');
   const peers = s.peers || [];
   const slots = s.slots || [];
+
+  if (treeEl.querySelector('.stream-name-input')) return; // rename in progress
 
   // Group channels under their peer. peer_id ties a slot to a roster entry;
   // slots whose peer has dropped (id empty / not in the roster) are shown as
@@ -983,7 +958,6 @@ function renderPeerTree(s) {
   const nodes = peers.map(p => ({
     name: p.display_name || p.peer_id.slice(0, 8),
     status: p.status || 'connecting',
-    rtt: p.rtt_ms,
     sending: !!p.is_receiving,
     channels: channelsByPeer.get(p.peer_id) || [],
   }));
@@ -993,7 +967,6 @@ function renderPeerTree(s) {
     nodes.push({
       name: chans[0].display_name || chans[0].short_id || key,
       status: 'reconnecting',
-      rtt: chans[0].rtt_ms,
       sending: chans.some(c => c.is_receiving),
       channels: chans,
     });
@@ -1005,21 +978,51 @@ function renderPeerTree(s) {
   badge.textContent = `${sending}/${peers.length}`;
   badge.className = 'log-badge' + (sending > 0 ? ' has-activity' : '');
 
-  if (nodes.length === 0) {
+  const youHtml = renderYouNode(s.local_sends || []);
+  if (nodes.length === 0 && !youHtml) {
     treeEl.innerHTML = '<span class="empty">No peers connected</span>';
     return;
   }
-  treeEl.innerHTML = nodes.map(renderPeerNode).join('');
+  treeEl.innerHTML = youHtml + nodes.map(renderPeerNode).join('');
+  treeEl.querySelectorAll('.peer-name.editable').forEach(span => {
+    span.addEventListener('click', startStreamNameEdit);
+  });
+}
+
+// The "you" node: one row per active send (enabled capture channel or in-app
+// sender). Empty when you're sending nothing — the node then disappears and
+// only remote peers show.
+function renderYouNode(localSends) {
+  if (localSends.length === 0) return '';
+  const anySending = localSends.some(ls => ls.is_sending);
+  const rows = localSends
+    .slice()
+    .sort((a, b) => a.stream_index - b.stream_index)
+    .map(ls => {
+      const label = ls.stream_name
+        ? escapeHtml(ls.stream_name)
+        : (localSends.length > 1 ? `My Send (stream ${ls.stream_index})` : 'My Send');
+      return `<div class="peer-channel"><span class="channel-name peer-name editable" data-stream-index="${ls.stream_index}">${label}</span></div>`;
+    }).join('');
+  const statusClass = anySending ? 'status-receiving' : 'status-connected';
+  const tag = anySending ? 'sending' : 'idle';
+  return `<div class="peer-node peer-node--you">
+    <div class="peer-node-head">
+      <span class="peer-dot ${statusClass}"></span>
+      <span class="peer-name">You</span>
+      <span class="peer-status ${statusClass}">${tag}</span>
+    </div>
+    <div class="peer-channels">${rows}</div>
+  </div>`;
 }
 
 function renderPeerNode(n) {
   const statusClass = n.sending ? 'status-receiving' : `status-${n.status}`;
   const tag = n.sending ? 'sending' : (n.status === 'connected' ? 'idle' : n.status);
-  const rtt = n.rtt != null ? `${n.rtt.toFixed(0)}ms` : '';
   const chans = n.channels.slice().sort((a, b) => a.channel_index - b.channel_index);
   const channelsHtml = chans.length
     ? chans.map(c => {
-        const label = c.stream_name ? escapeHtml(c.stream_name) : `Channel ${c.channel_index}`;
+        const label = c.stream_name ? escapeHtml(c.stream_name) : `stream ${c.channel_index}`;
         return `<div class="peer-channel"><span class="channel-name">${label}</span></div>`;
       }).join('')
     : '<div class="peer-channel peer-channel--none"><span class="channel-name">no channels</span></div>';
@@ -1028,10 +1031,26 @@ function renderPeerNode(n) {
       <span class="peer-dot ${statusClass}"></span>
       <span class="peer-name">${escapeHtml(n.name)}</span>
       <span class="peer-status ${statusClass}">${escapeHtml(tag)}</span>
-      <span class="peer-rtt">${rtt}</span>
     </div>
     <div class="peer-channels">${channelsHtml}</div>
   </div>`;
+}
+
+// Debug tab: per-peer relay round-trip times (drives clock sync; not shown in
+// the common path — it changes nothing a musician would do mid-jam).
+function renderPeerDetail(s) {
+  const el = document.getElementById('peer-detail');
+  const peers = s.peers || [];
+  if (peers.length === 0) {
+    el.innerHTML = '<span class="empty">No peers connected</span>';
+    return;
+  }
+  el.innerHTML = peers.map(p => {
+    const name = p.display_name || p.peer_id.slice(0, 8);
+    const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '—';
+    const state = p.is_receiving ? 'sending' : (p.status || 'connecting');
+    return `<div class="health-row"><span>${escapeHtml(name)}</span><span>${rtt} · ${escapeHtml(state)}</span></div>`;
+  }).join('');
 }
 
 // --- Event Listeners ---

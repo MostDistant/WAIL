@@ -93,8 +93,8 @@ WAIL has two components that work together:
 - **Display name** — Shown to other peers in the session.
 - **Link Audio Name** — The peer name WAIL advertises on Link Audio, so its published channels are easy to spot in your DAW's peer list. Defaults to `WAIL`.
 - **Save debug log locally** — Writes structured logs to a rotating file in the app data directory. Useful for diagnosing connection issues.
-- **Peer log streaming** — When enabled, your app's INFO-level logs are broadcast to all other peers in the session via the signaling server, and their logs are shown in your session log panel with a peer name prefix. Useful for collaborative debugging. Both sending and receiving are controlled by this single toggle.
-- **Remember settings** — Persists room name, password, and display name in localStorage.
+- **Share my debug log with the room** — When enabled, your app's INFO-level logs are broadcast to all other peers in the session via the signaling server, and their logs are shown in your Debug tab's log panel with a peer name prefix. Useful for collaborative debugging. Both sending and receiving are controlled by this single toggle.
+- **Remember settings** — Persists room name, password, and display name in localStorage, plus your enabled capture channels (by app and channel name) so they re-enable automatically in future sessions.
 
 ## Troubleshooting
 
@@ -104,7 +104,7 @@ WAIL has two components that work together:
 
 **Changing tempo mid-jam** — Not recommended. WAIL uses NINJAM-style intervals, so audio is recorded and played back in full interval chunks. If you change the tempo, the current interval must finish before the new tempo takes effect. If you do need to change tempo, agree on it beforehand and have one person change it — Link will propagate it to all peers within a few seconds.
 
-**Debugging what you're sending** — Two live toggles under *Capture channels*: **Dump capture to WAV** writes each enabled channel's audio to pre-Opus and post-Opus WAV files under `~/.wail/dumps` (A/B them to localize where audio degrades). **Loopback my audio via server** asks the relay to echo your own audio back; it reappears one interval late as a `(loopback)` Link Audio channel — subscribe to it in your DAW to hear exactly what remote peers hear, including the full encode → relay → decode round trip.
+**Debugging what you're sending** — Two live toggles on the session's *Debug* tab: **Dump capture to WAV** writes each enabled channel's audio to pre-Opus and post-Opus WAV files under `~/.wail/dumps` (A/B them to localize where audio degrades). **Loopback my audio via server** asks the relay to echo your own audio back; it reappears one interval late as a `(loopback)` Link Audio channel — subscribe to it in your DAW to hear exactly what remote peers hear, including the full encode → relay → decode round trip. The Debug tab also carries audio stats, per-peer relay RTT, local audio-health counters, and the session log.
 
 ## Development
 

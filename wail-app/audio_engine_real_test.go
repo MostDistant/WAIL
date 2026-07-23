@@ -2,7 +2,13 @@
 
 package main
 
-import "testing"
+import (
+	"context"
+	"encoding/hex"
+	"testing"
+
+	"github.com/nicholasgasior/wail/wail-app/internal/abllink"
+)
 
 // TestAudioEngineEmitIngestion drives the emit ingestion path end-to-end without
 // the network or the engine goroutines: real WAIF frames (built by the real Opus
@@ -152,5 +158,111 @@ func TestEngineConcealsSeqGapWithPLC(t *testing.T) {
 	}
 	if _, concealed := st.reasm.Missing(5); concealed != 0 {
 		t.Fatalf("concealed = %d, want 0 after real replacement", concealed)
+	}
+}
+
+// --- capture restore: remembering which channels the user enabled ---
+
+// newCaptureTestEngine builds a real engine with a live (offline) Link but
+// without Start()'s discovery/emit loops; drain goroutines get a context so
+// auto-enabled channels are exercisable. Stop runs at cleanup.
+func newCaptureTestEngine(t *testing.T) *linkAudioEngine {
+	t.Helper()
+	eng := newAudioEngine(NewLinkBridge(120, 4), "WAIL", func([]byte) {}, 1)
+	le, ok := eng.(*linkAudioEngine)
+	if !ok {
+		t.Fatalf("expected *linkAudioEngine, got %T", eng)
+	}
+	le.ctx, le.cancel = context.WithCancel(context.Background())
+	t.Cleanup(eng.Stop)
+	return le
+}
+
+func testDiscoveredChannel(idByte byte, peer, name string) abllink.Channel {
+	var id abllink.ChannelID
+	id[0] = idByte
+	return abllink.Channel{ID: id, Name: name, PeerName: peer}
+}
+
+func captureEntry(t *testing.T, le *linkAudioEngine, c abllink.Channel) *captureChannel {
+	t.Helper()
+	id := hex.EncodeToString(c.ID[:])
+	ch, ok := le.capture[id]
+	if !ok {
+		t.Fatalf("channel %q not registered in capture map", c.Name)
+	}
+	return ch
+}
+
+func TestReconcileRegistersDiscoveredChannelDisabled(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	c := testDiscoveredChannel(1, "Live", "Main")
+
+	le.reconcileChannels([]abllink.Channel{c})
+
+	if ch := captureEntry(t, le, c); ch.enabled {
+		t.Fatal("discovered channel must start disabled (explicit opt-in)")
+	}
+}
+
+func TestReconcileAutoEnablesRememberedChannel(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	le.SetCaptureRestore([]CaptureChannelKey{{PeerName: "Live", ChannelName: "Main"}})
+
+	le.reconcileChannels([]abllink.Channel{testDiscoveredChannel(1, "Live", "Main")})
+
+	if ch := captureEntry(t, le, testDiscoveredChannel(1, "Live", "Main")); !ch.enabled {
+		t.Fatal("remembered channel should auto-enable on discovery")
+	}
+}
+
+func TestReconcileDoesNotRestoreNameCollisionFromOtherPeer(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	le.SetCaptureRestore([]CaptureChannelKey{{PeerName: "Live", ChannelName: "Main"}})
+
+	// Same channel name, different publishing app: not the remembered channel.
+	le.reconcileChannels([]abllink.Channel{testDiscoveredChannel(1, "Reaper", "Main")})
+
+	if ch := captureEntry(t, le, testDiscoveredChannel(1, "Reaper", "Main")); ch.enabled {
+		t.Fatal("restore key is (peer, channel): a different peer's same-named channel must not auto-enable")
+	}
+}
+
+func TestSetCaptureEnabledUpdatesRestoreSet(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	c := testDiscoveredChannel(1, "Live", "Main")
+	le.reconcileChannels([]abllink.Channel{c})
+	id := hex.EncodeToString(c.ID[:])
+
+	le.SetCaptureEnabled(id, true)
+	if !le.capture[id].enabled {
+		t.Fatal("SetCaptureEnabled(true) did not enable the channel")
+	}
+	if !le.restoreSet()[CaptureChannelKey{PeerName: "Live", ChannelName: "Main"}] {
+		t.Fatal("enabling a channel must add it to the restore set")
+	}
+
+	le.SetCaptureEnabled(id, false)
+	if le.capture[id].enabled {
+		t.Fatal("SetCaptureEnabled(false) did not disable the channel")
+	}
+	if le.restoreSet()[CaptureChannelKey{PeerName: "Live", ChannelName: "Main"}] {
+		t.Fatal("disabling a channel must remove it from the restore set")
+	}
+}
+
+func TestCaptureChannelsNeverSerializesOwnChannels(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	// Learn a sink name as ours, then place a matching channel in the capture
+	// map directly (as if the reconcile-time Own() filter leaked it through).
+	le.own.Published("WAIL · stream 0")
+	ownCh := testDiscoveredChannel(1, "WAIL", "WAIL · stream 0")
+	otherCh := testDiscoveredChannel(2, "Live", "Main")
+	le.capture[hex.EncodeToString(ownCh.ID[:])] = &captureChannel{id: ownCh.ID, name: ownCh.Name, peerName: ownCh.PeerName}
+	le.capture[hex.EncodeToString(otherCh.ID[:])] = &captureChannel{id: otherCh.ID, name: otherCh.Name, peerName: otherCh.PeerName}
+
+	infos := le.CaptureChannels()
+	if len(infos) != 1 || infos[0].Name != "Main" {
+		t.Fatalf("CaptureChannels must exclude own republished channels, got %+v", infos)
 	}
 }

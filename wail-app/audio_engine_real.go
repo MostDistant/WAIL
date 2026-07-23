@@ -96,6 +96,11 @@ type linkAudioEngine struct {
 	own          *affinity.OwnChannels // our published sinks, for discovery exclusion
 	nextStreamID uint16
 
+	// restore is the remembered set of user-enabled capture channels, keyed by
+	// human-stable (peer, channel) name. A discovered channel matching the set
+	// auto-enables; SetCaptureEnabled keeps it in sync with the user's toggles.
+	restore map[CaptureChannelKey]bool
+
 	cushionFrames int // per-sink feed-ahead (emitCushionMs or WAIL_EMIT_CUSHION_MS)
 }
 
@@ -203,6 +208,7 @@ func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), off
 		capture:  make(map[string]*captureChannel),
 		emit:     make(map[affinity.Key]*emitStream),
 		own:      affinity.NewOwnChannels(),
+		restore:  make(map[CaptureChannelKey]bool),
 
 		cushionFrames: engineCushionFrames(),
 	}
@@ -282,6 +288,12 @@ func (e *linkAudioEngine) CaptureChannels() []CaptureChannelInfo {
 	defer e.mu.Unlock()
 	out := make([]CaptureChannelInfo, 0, len(e.capture))
 	for id, ch := range e.capture {
+		// Defense in depth: own republished channels are excluded at discovery
+		// (reconcileChannels), but never let one reach the GUI even if that
+		// filter leaks — the send-mixer must only show non-WAIL channels.
+		if e.own.Own(id, ch.peerName == e.peerName, ch.name) {
+			continue
+		}
 		out = append(out, CaptureChannelInfo{
 			ChannelID: id, Name: ch.name, PeerName: ch.peerName, Enabled: ch.enabled,
 			StreamID: ch.streamID,
@@ -307,11 +319,45 @@ func (e *linkAudioEngine) SetCaptureEnabled(channelID string, on bool) {
 	if !ok {
 		return
 	}
+	key := CaptureChannelKey{PeerName: ch.peerName, ChannelName: ch.name}
+	if on {
+		e.restore[key] = true
+	} else {
+		delete(e.restore, key)
+	}
 	if on && !ch.enabled {
 		e.startCaptureLocked(ch)
 	} else if !on && ch.enabled {
 		e.stopCaptureLocked(ch)
 	}
+}
+
+// SetCaptureRestore replaces the remembered set of enabled capture channels
+// (loaded from disk at session start). Already-discovered channels matching
+// the set enable immediately; later discoveries are matched in reconcile.
+func (e *linkAudioEngine) SetCaptureRestore(keys []CaptureChannelKey) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.restore = make(map[CaptureChannelKey]bool, len(keys))
+	for _, k := range keys {
+		e.restore[k] = true
+	}
+	for _, ch := range e.capture {
+		if !ch.enabled && e.restore[CaptureChannelKey{PeerName: ch.peerName, ChannelName: ch.name}] {
+			e.startCaptureLocked(ch)
+		}
+	}
+}
+
+// restoreSet returns a copy of the current restore set (for persistence).
+func (e *linkAudioEngine) restoreSet() map[CaptureChannelKey]bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make(map[CaptureChannelKey]bool, len(e.restore))
+	for k := range e.restore {
+		out[k] = true
+	}
+	return out
 }
 
 // SetCaptureDump toggles the debug capture-to-WAV dump (pre-Opus + post-Opus)
@@ -415,10 +461,15 @@ func (e *linkAudioEngine) reconcileChannels(chans []abllink.Channel) {
 		ch, ok := e.capture[id]
 		if !ok {
 			// Register discovered channel as available but disabled; the user
-			// enables it via SetCaptureEnabled (explicit opt-in send-mixer).
+			// enables it via SetCaptureEnabled (explicit opt-in send-mixer) —
+			// unless it matches the remembered set, in which case it starts now.
 			ch = &captureChannel{id: c.ID, name: c.Name, peerName: c.PeerName, streamID: e.nextStreamID}
 			e.nextStreamID++
 			e.capture[id] = ch
+			if e.restore[CaptureChannelKey{PeerName: c.PeerName, ChannelName: c.Name}] {
+				log.Printf("[audio] auto-enabling remembered capture channel %q · %q", c.PeerName, c.Name)
+				e.startCaptureLocked(ch)
+			}
 		} else {
 			ch.name = c.Name
 			ch.peerName = c.PeerName
