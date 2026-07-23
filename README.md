@@ -2,7 +2,7 @@
 
 WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across the internet using a WebSocket relay server. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN, with intervalic audio (NINJAM-style) captured, Opus-encoded, and transmitted via the server.
 
-WAIL is an Ableton **Link Audio** peer — it captures and plays audio directly over Link, so there are no WAIL plugins to install. Ableton Live 12.3+ supports Link Audio natively; with any other DAW you can bridge audio in and out of Link Audio using the third-party [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst).
+WAIL is an Ableton **Link Audio** peer — it captures and plays audio directly over Link, so with a Link-Audio-capable DAW there are no WAIL plugins to install. Ableton Live 12.3+ supports Link Audio natively. For any other DAW you have two options: install the first-party **WAIL CLAP plugins** (WAIL Send / WAIL Recv, bundled with the app — see below), or bridge with the third-party [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst).
 
 ## Install
 
@@ -15,7 +15,7 @@ brew tap MostDistant/wail
 brew install MostDistant/wail/wail
 ```
 
-This builds and installs the WAIL binary from source. WAIL captures and plays audio as an Ableton Link Audio peer, so there are no plugins to install.
+This builds and installs the WAIL binary (and the CLAP plugins) from source. With a Link-Audio DAW you need no plugins; for a DAW without Link Audio, run `wail-install-plugins` afterward to copy the WAIL Send / WAIL Recv CLAP plugins into your CLAP folder, then rescan in your DAW.
 
 **Windows** — Download `wail-windows-x64-<version>.zip` from the Releases page, extract it, and run `bin\wail.exe`. The binary is unsigned, so SmartScreen will warn on first launch — click "More info" → "Run anyway".
 
@@ -27,13 +27,17 @@ tar -xzf wail-linux-x64-*.tar.gz
 ./wail-*/bin/wail
 ```
 
+### DAW plugins (only for DAWs without Link Audio)
+
+WAIL ships two optional CLAP plugins — **WAIL Send** and **WAIL Recv** — for DAWs that don't support Ableton Link Audio. On the Windows and Linux release builds they auto-install on first launch into your per-user CLAP folder (`%LOCALAPPDATA%\Programs\Common\CLAP` / `~/.clap`); if that's blocked, copy `wail-send.clap` and `wail-recv.clap` from the release's `lib/` folder there yourself and rescan. On Homebrew, run `wail-install-plugins`. They bridge raw audio to/from the running WAIL app over loopback — Ableton Live 12.3+ users don't need them.
+
 ## Getting Started
 
 1. **Launch the WAIL app.**
 
 2. **Enable Ableton Link (tempo/phase) and Link Audio (the audio exchange) in your DAW.** These are two separate things: Link sync is widely supported; Link Audio is newer.
    - *Ableton Live 12.3+* — the only DAW with **native Link Audio** today. Preferences > Link, Tempo, MIDI > turn on "Show Link Toggle", then enable Link in the transport bar.
-   - *Any other DAW (Bitwig, REAPER, etc.)* — enable Ableton **Link** for tempo/phase sync (Bitwig: Settings > Synchronization; REAPER: install [ReaBlink](https://github.com/ak5k/reablink)), and to send/receive **Link Audio** use the third-party [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst), which bridges your DAW's audio to and from Link Audio channels that WAIL can capture and publish.
+   - *Any other DAW (Bitwig, REAPER, etc.)* — enable Ableton **Link** for tempo/phase sync (Bitwig: Settings > Synchronization; REAPER: install [ReaBlink](https://github.com/ak5k/reablink)). For audio, either load the first-party **WAIL Send / WAIL Recv** CLAP plugins (see Install) — WAIL Send taps a track's audio to WAIL, WAIL Recv plays remote streams on its output ports — or bridge with the third-party [VoidLinkAudio VST](https://structurevoid.gumroad.com/l/voidlinkaudio-vst) into Link Audio channels WAIL captures and publishes.
 
 3. **Route audio to Link Audio.** Send the tracks or busses you want to share to Link Audio output channels in your DAW. WAIL captures those channels, so anything you route there is streamed to your peers. You can share several independent streams (e.g. drums on one channel, synth on another).
 

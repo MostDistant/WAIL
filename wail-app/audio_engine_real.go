@@ -94,10 +94,22 @@ type linkAudioEngine struct {
 	tempoBPM float64
 	dumpDir  string // guarded by mu; current dump session directory
 
-	capture      map[string]*captureChannel // by channel-id hex
+	capture      map[string]*captureChannel // by channel-id hex (or "ipc:N" for plugin sends)
 	emit         map[affinity.Key]*emitStream
 	own          *affinity.OwnChannels // our published sinks, for discovery exclusion
 	nextStreamID uint16
+	pluginEpoch  uint64 // monotonic; stamps each plugin (re)connection's channel
+
+	// recvPool fans decoded remote audio to connected CLAP Recv plugins over IPC
+	// (ADR-0005). nil until the IPC server sets it; each emit stream then also
+	// carries an ipcEmitSink. Guarded by mu.
+	recvPool *IPCWriterPool
+
+	// stopping is set under mu before Stop's wg.Wait, and checked before any wg.Add
+	// (startDrainLocked). It stops a late AddPluginSource / SetCaptureEnabled from
+	// racing a wg.Add against the Wait (which would panic) or resurrecting state on a
+	// torn-down engine.
+	stopping bool
 
 	// restore is the remembered set of user-enabled capture channels, keyed by
 	// human-stable (peer, channel) name. A discovered channel matching the set
@@ -169,8 +181,12 @@ type captureChannel struct {
 	peerName string
 	streamID uint16
 	enabled  bool
+	// epoch distinguishes successive plugin connections that reuse a channel key
+	// ("ipc:N"): RemovePluginSource only tears down if its epoch still matches, so a
+	// dropped connection's late cleanup can't nuke a newer reconnection's channel.
+	epoch uint64
 
-	source *abllink.Source
+	source captureSource
 	asm    *capture.Assembler
 	enc    *IntervalEncoder
 	loss   lanloss.Tracker
@@ -200,9 +216,12 @@ type emitStream struct {
 	dec      *IntervalDecoder
 	reasm    *emit.Reassembler
 	sched    *playout.Scheduler
-	sink     *abllink.Sink // published Link Audio channel; the emit map keyed by
-	// affinity.Key IS the affinity (a reconnecting identity reuses this stream +
+	// sinks are this stream's published outputs: the Link Audio channel always,
+	// plus one IPC sink per attached CLAP recv plugin (ADR-0005). sinks[0] is the
+	// Link Audio sink — the write-rejected metric anchors on it. The emit map keyed
+	// by affinity.Key IS the affinity (a reconnecting identity reuses this stream +
 	// channel), so no separate registry is needed.
+	sinks []emitSink
 
 	// Last raw name inputs; recompute + rename the channel only when these change
 	// (avoids per-frame name formatting on the hot path).
@@ -278,6 +297,12 @@ func (e *linkAudioEngine) Start() error {
 }
 
 func (e *linkAudioEngine) Stop() {
+	// Mark stopping under mu before Wait so any concurrent startDrainLocked (which
+	// does wg.Add under mu) either already happened-before this, or sees stopping and
+	// bails — never a wg.Add racing the Wait below.
+	e.mu.Lock()
+	e.stopping = true
+	e.mu.Unlock()
 	if e.cancel != nil {
 		e.cancel()
 	}
@@ -294,8 +319,8 @@ func (e *linkAudioEngine) Stop() {
 	}
 	e.capture = make(map[string]*captureChannel)
 	for _, st := range e.emit {
-		if st.sink != nil {
-			st.sink.Close()
+		for _, sk := range st.sinks {
+			sk.Close()
 		}
 	}
 	e.emit = make(map[affinity.Key]*emitStream)
@@ -533,8 +558,12 @@ func (e *linkAudioEngine) reconcileChannels(chans []abllink.Channel) {
 			ch.peerName = c.PeerName
 		}
 	}
-	// Drop channels that disappeared.
+	// Drop channels that disappeared. Plugin sends ("ipc:N") aren't Link-discovered
+	// — they're managed via Add/RemovePluginSource — so never reap them here.
 	for id, ch := range e.capture {
+		if strings.HasPrefix(id, "ipc:") {
+			continue
+		}
 		if !seen[id] {
 			e.stopCaptureLocked(ch)
 			delete(e.capture, id)
@@ -552,19 +581,30 @@ func (e *linkAudioEngine) startCaptureLocked(ch *captureChannel) {
 		log.Printf("[audio] failed to create source for channel %q", ch.name)
 		return
 	}
-	ch.source = src
-	ch.enabled = true
-	// Channel count is learned from the first buffer; default stereo encoder.
-	enc, err := NewIntervalEncoder(2, engineInternalRate, engineBitrateKbps)
+	if !e.startDrainLocked(ch, linkCaptureSource{s: src}, 2) {
+		src.Close()
+	}
+}
+
+// startDrainLocked wires an already-built captureSource into the
+// encode→pace→send path and launches its drain goroutine. Shared by Link Audio
+// channels and plugin sends (ADR-0005). It returns false — leaving ch disabled and
+// the source unadopted, so the caller can release it — if the encoder fails to
+// init. mu held.
+func (e *linkAudioEngine) startDrainLocked(ch *captureChannel, src captureSource, channels int) bool {
+	if ch.enabled || e.stopping {
+		return false
+	}
+	// Channel count is fixed at setup; capture is stereo today.
+	enc, err := NewIntervalEncoder(channels, engineInternalRate, engineBitrateKbps)
 	if err != nil {
 		log.Printf("[audio] encoder init failed for %q: %v", ch.name, err)
-		ch.enabled = false
-		src.Close()
-		ch.source = nil
-		return
+		return false
 	}
+	ch.source = src
+	ch.enabled = true
 	ch.enc = enc
-	ch.asm = capture.NewWindowed(e.cfg, 2, engineInternalRate, samplesPerWaifFrame(engineInternalRate))
+	ch.asm = capture.NewWindowed(e.cfg, channels, engineInternalRate, samplesPerWaifFrame(engineInternalRate))
 	name := ch.name // stable copy: the onDrop callback runs off the pacer goroutine
 	ch.pacer = pace.New(sendFrameGap, sendQueueBatches, e.send, func(n int) {
 		log.Printf("[audio] WARN: send backlog on %q — dropped a batch of %d frames", name, n)
@@ -574,6 +614,7 @@ func (e *linkAudioEngine) startCaptureLocked(ch *captureChannel) {
 	ch.drain = dcancel
 	e.wg.Add(1)
 	go e.drainCapture(dctx, ch)
+	return true
 }
 
 // stopCaptureLocked tears down a channel's source + drain. mu held.
@@ -612,13 +653,20 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 	t := time.NewTicker(engineTickInterval)
 	defer t.Stop()
 
+	// Snapshot the source once. Teardown may nil/close ch.source under e.mu while
+	// this goroutine is mid-tick (we read it lock-free), so hold our own reference:
+	// a closed source's Pop/Dropped are safe no-ops, but reading a niled ch.source
+	// would panic. Each (re)connection gets its own captureChannel, so this local is
+	// never shared with another drain goroutine.
+	src := ch.source
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			e.reconcileDump(ch)
-			ch.statRingDropped.Store(ch.source.Dropped())
+			ch.statRingDropped.Store(src.Dropped())
 			ch.statLANLost.Store(ch.loss.LostBuffers())
 			ch.statLANGaps.Store(ch.loss.GapEvents())
 			if n := ch.asm.Resnaps(); n > ch.statResnaps.Load() {
@@ -632,8 +680,8 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 			e.syncCaptureConfig(ch)
 			bpi := e.cfgSnapshot().BeatsPerInterval() // stable within a tick; snapshot once, not per buffer
 			for {
-				buf, ok := ch.source.Pop()
-				if !ok {
+				buf, beat, mapped, popped := src.PopMapped(ss, bpi)
+				if !popped {
 					break
 				}
 				if gap := ch.loss.Observe(buf.Count); gap != nil {
@@ -644,7 +692,6 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 					// sample-contiguous; see capture.Assembler).
 					ch.asm.Reanchor()
 				}
-				beat, mapped := ch.source.BeginBeats(&buf, ss, bpi)
 				if !mapped {
 					continue // cross-session buffer; can't place it
 				}
@@ -733,13 +780,18 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		}
 		label := streamLabel(streamName, f.StreamID)
 		sinkName := affinity.FormatName(displayName, label)
+		// Publish to Link Audio always; also to any connected CLAP Recv plugins.
+		sinks := []emitSink{e.link.NewSink(sinkName, engineInternalRate*2)}
+		if e.recvPool != nil {
+			sinks = append(sinks, newIPCEmitSink(e.recvPool, key.Identity, key.Stream))
+		}
 		st = &emitStream{
 			key:             key,
 			channels:        channels,
 			dec:             dec,
 			reasm:           emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
 			sched:           playout.New(e.offsetD),
-			sink:            e.link.NewSink(sinkName, engineInternalRate*2),
+			sinks:           sinks,
 			feeder:          emit.NewFeeder(e.cushionFrames, emitChunkFrames),
 			lastDisplayName: displayName,
 			lastStreamName:  streamName,
@@ -749,12 +801,12 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		log.Printf("[audio] publishing Link Audio channel %q for %s stream %d", sinkName, fromIdentity, f.StreamID)
 	} else if st.lastDisplayName != displayName || st.lastStreamName != streamName {
 		// Name became known / changed: rename the existing channel in place, don't
-		// re-mint it (affinity preserves the channel).
-		if st.sink != nil {
-			newName := affinity.FormatName(displayName, streamLabel(streamName, f.StreamID))
-			st.sink.SetName(newName)
-			e.own.Published(newName)
+		// re-mint it (affinity preserves the channel). All sinks share the name.
+		newName := affinity.FormatName(displayName, streamLabel(streamName, f.StreamID))
+		for _, sk := range st.sinks {
+			sk.SetName(newName)
 		}
+		e.own.Published(newName)
 		st.lastDisplayName = displayName
 		st.lastStreamName = streamName
 	}
@@ -983,18 +1035,27 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, bpi float64, loca
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, st := range e.emit {
-		if st.sink == nil {
+		if len(st.sinks) == 0 {
 			continue
 		}
 		st.feeder.Advance(localBeat, func(samples []int16, beat float64) {
 			frames := len(samples) / st.channels
-			ok := st.sink.WriteInterleaved(samples, ss, beat, bpi, frames, st.channels, engineInternalRate)
+			// Fan the same chunk to every sink (Link Audio + any recv-plugin IPC
+			// sinks). sinks[0] is the Link Audio channel; anchor the write-rejected
+			// metric on it so its meaning is unchanged from the single-sink path.
+			linkOK := false
+			for i, sk := range st.sinks {
+				ok := sk.WriteInterleaved(samples, ss, beat, bpi, frames, st.channels, engineInternalRate)
+				if i == 0 {
+					linkOK = ok
+				}
+			}
 			// The feeder's cursor has moved past this chunk either way, so a
 			// refusal while a listener was streaming is a permanent hole.
-			if !ok && st.lastWriteOK {
+			if !linkOK && st.lastWriteOK {
 				st.sinkWriteRejected.Add(1)
 			}
-			st.lastWriteOK = ok
+			st.lastWriteOK = linkOK
 		})
 		ev, fr := st.feeder.Underruns()
 		st.sinkUnderrunEvents.Store(ev)

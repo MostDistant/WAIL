@@ -59,8 +59,15 @@ signaling-server/         Go WebSocket relay server (deployed to fly.io)
 ├── interval_clock.go     interval_anchor broadcast
 └── cmd/wail-metrics/     CLI metrics client
 
+plugins/                  Thin CLAP bridge plugins (C) for DAWs without Link Audio (ADR-0005)
+├── wail_send.c           Capture: taps a track's audio → RawPCM over loopback IPC
+├── wail_recv.c           Playback: RemotePCM over IPC → 16 stereo output ports
+├── wail_ipc.h            Shared framing/socket/thread helpers (wire matches wail-app/ipc.go)
+└── CMakeLists.txt        Builds both .clap bundles
+
 vendor/
-└── link/                 Ableton Link 4.0 SDK (git submodule, pinned to Link-4.0)
+├── link/                 Ableton Link 4.0 SDK (git submodule, pinned to Link-4.0)
+└── clap/                 CLAP SDK headers (git submodule, pinned to 1.2.10) for the bridge plugins
 ```
 
 ## Build
@@ -69,6 +76,7 @@ Requires: Go 1.26+, a C++ toolchain (cgo, for the Link Audio binding in `interna
 
 ```sh
 git submodule update --init --recursive vendor/link   # fetch Link SDK + its asio submodule
+git submodule update --init vendor/clap                # CLAP headers (for the bridge plugins)
 
 cd wail-app && go build                                # build the app (needs cgo)
 cd wail-app && go test ./...                           # run app + internal package tests
@@ -81,6 +89,9 @@ cd wail-app && go test -tags linkstub ./...
 
 # Signaling server
 cd signaling-server && go build ./... && go test ./...
+
+# CLAP bridge plugins (C, ADR-0005) — optional, for DAWs without Link Audio; needs vendor/clap
+cmake -S plugins -B build/plugins && cmake --build build/plugins
 ```
 
 Note: Go needs GOCACHE write access; if you build inside a sandbox you may need to disable it.
@@ -244,14 +255,14 @@ When encountering code quality trade-offs, follow these principles (derived from
 ### Trade-off log
 All deferred decisions and remaining code quality items are tracked in `tradeoffs.md` at the repo root. When making a trade-off decision during development, record it there with the rationale.
 
-## Direction: Link Audio Is the Only Audio Interface (ADR-0001)
+## Direction: Link Audio Is the Primary Audio Interface (ADR-0001, amended by ADR-0005)
 
 Ableton Link 4.0 (final, May 2026) introduces Link Audio — real-time uncompressed PCM streaming between Link peers on a LAN (unicast UDP, fire-and-forget). The API (LinkAudio.hpp) provides:
 - `LinkAudioSink`: publish audio channels to the network
 - `LinkAudioSource`: subscribe to remote audio channels
 - Channel discovery via `channels()` and `setChannelsChangedCallback()`
 
-Decided direction (see `CONTEXT.md` pillars and `docs/adr/0001`): WAIL interacts with local audio exclusively as a Link peer — capture subscribes to local Link Audio channels, playback publishes remote streams as Link Audio channels one interval late. This is now the implemented reality: the Send/Recv plugins, the TCP IPC protocol, and the entire Rust workspace have been retired.
+Decided direction (see `CONTEXT.md` pillars and `docs/adr/0001`): WAIL interacts with local audio primarily as a Link peer — capture subscribes to local Link Audio channels, playback publishes remote streams as Link Audio channels one interval late. The original Rust Send/Recv plugins, their TCP IPC, and the entire Rust workspace were retired. **Amended by ADR-0005:** a thin first-party CLAP bridge (WAIL Send/Recv, in `plugins/`) is back as an *optional* path for DAWs without Link Audio — but it carries only raw PCM over loopback IPC into the same Go engine (via the `captureSource`/`emitSink` seams); all codec/interval/relay logic stays in Go, so Link Audio remains the primary interface.
 
 `vendor/link` is pinned to the final `Link-4.0` tag. Research: `docs/link-4-research.md`, `docs/link-audio-research.md`.
 

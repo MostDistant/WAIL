@@ -31,9 +31,11 @@ type App struct {
 	emitter     EventEmitter
 	identity    string
 	streamNames map[uint16]string
-	dataDir     string
-	fileLog     *RotatingFileWriter
-	wsLog       *WsLogWriter
+	dataDir      string
+	instance     int      // per-instance offset; sets the CLAP IPC port (9191 + instance)
+	pluginErrors []string // CLAP auto-install errors from startup, surfaced to the UI
+	fileLog      *RotatingFileWriter
+	wsLog        *WsLogWriter
 	// rememberEnabled mirrors the frontend "Remember settings" checkbox (pushed
 	// via SetRememberEnabled); it gates persisting captureEnabled to disk.
 	rememberEnabled bool
@@ -52,10 +54,21 @@ func NewApp(instance int) *App {
 	identity := getOrCreateIdentity(dataDir)
 	streamNames := LoadStreamNames(dataDir)
 
+	// Auto-install the bundled CLAP plugins into the user's CLAP directory on first
+	// launch (ADR-0005). They ship in the release archive, so this is a zero-friction
+	// path for DAWs without Link Audio; any errors surface via GetPluginInstallErrors
+	// so the UI can point at the manual-copy fallback.
+	var pluginErrors []string
+	if pluginDir := FindPluginDir(""); pluginDir != "" {
+		pluginErrors = InstallPluginsIfMissing(pluginDir)
+	}
+
 	return &App{
 		streamNames:     streamNames,
 		dataDir:         dataDir,
 		identity:        identity,
+		instance:        instance,
+		pluginErrors:    pluginErrors,
 		rememberEnabled: true, // frontend default; corrected on settings load
 		captureEnabled:  LoadCaptureEnabled(dataDir),
 	}
@@ -71,6 +84,14 @@ func (a *App) SetEmitter(emitter EventEmitter) {
 // GetAppVersion returns the app version string (kept in sync with Cargo.toml).
 func (a *App) GetAppVersion() string {
 	return appVersion
+}
+
+// GetPluginInstallErrors returns any CLAP plugin auto-install errors from startup,
+// so the UI can surface them and point the user at the manual-install fallback.
+func (a *App) GetPluginInstallErrors() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.pluginErrors
 }
 
 type JoinResult struct {
@@ -184,6 +205,7 @@ func (a *App) JoinRoom(
 		Quantum:        actualQuantum,
 		Recording:      recording,
 		StreamCount:    actualStreamCount,
+		IPCPort:        uint16(9191 + a.instance),
 		CaptureRestore: a.captureEnabled,
 		OnCaptureEnabledChanged: func(keys []CaptureChannelKey) {
 			a.mu.Lock()

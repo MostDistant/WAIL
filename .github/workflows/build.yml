@@ -39,6 +39,11 @@ jobs:
         run: go test -tags nolibopusfile ./...
         working-directory: wail-app
 
+      - name: Build CLAP plugins
+        run: |
+          cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/plugins
+
       - name: Build & test signaling-server
         run: go build ./... && go test ./...
         working-directory: signaling-server
@@ -144,6 +149,11 @@ jobs:
         run: go build -tags nolibopusfile -o NUL .
         working-directory: wail-app
 
+      - name: Build CLAP plugins
+        run: |
+          cmake -S plugins -B build/plugins
+          cmake --build build/plugins --config Release
+
       - name: ccache stats
         if: always()
         shell: bash
@@ -217,6 +227,11 @@ jobs:
       - name: Test Go app
         run: go test -tags nolibopusfile ./...
         working-directory: wail-app
+
+      - name: Build CLAP plugins
+        run: |
+          cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/plugins
 
       - name: ccache stats
         if: always()

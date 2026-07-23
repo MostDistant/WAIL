@@ -201,6 +201,17 @@ jobs:
           Documentation: https://github.com/MostDistant/WAIL
           EOF
 
+      - name: Build & stage CLAP plugins
+        shell: bash
+        # Bundle the thin CLAP bridge plugins under dist/lib so the app's
+        # first-launch auto-installer (FindPluginDir → {exe}/../lib) finds them.
+        run: |
+          cmake -S plugins -B build/plugins
+          cmake --build build/plugins --config Release
+          mkdir -p dist/lib
+          find build/plugins -maxdepth 2 -name '*.clap' -exec cp -R {} dist/lib/ \;
+          test -e dist/lib/wail-send.clap && test -e dist/lib/wail-recv.clap
+
       - uses: actions/upload-artifact@v7
         with:
           name: wail-release-windows
@@ -295,6 +306,16 @@ jobs:
 
           Documentation: https://github.com/MostDistant/WAIL
           EOF
+
+      - name: Build & stage CLAP plugins
+        # Bundle the thin CLAP bridge plugins under dist/lib so the app's
+        # first-launch auto-installer (FindPluginDir → {exe}/../lib) finds them.
+        run: |
+          cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/plugins
+          mkdir -p dist/lib
+          find build/plugins -maxdepth 2 -name '*.clap' -exec cp -R {} dist/lib/ \;
+          test -e dist/lib/wail-send.clap && test -e dist/lib/wail-recv.clap
 
       - uses: actions/upload-artifact@v7
         with:
