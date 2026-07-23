@@ -84,8 +84,17 @@ func InstallPluginsIfMissing(pluginDir string) []string {
 			continue // not bundled in this build
 		}
 		dest := filepath.Join(destDir, name)
-		if _, err := os.Stat(dest); err == nil {
-			continue // already installed
+		if info, err := os.Lstat(dest); err == nil {
+			if info.Mode()&os.ModeSymlink == 0 {
+				continue // already installed
+			}
+			// A symlink here is stale: Homebrew's relative Cellar links break
+			// when copied into the CLAP folder, and links into the Cellar go
+			// dead on `brew uninstall`. Replace with a real copy.
+			if err := os.Remove(dest); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: remove stale symlink: %v", name, err))
+				continue
+			}
 		}
 		if err := os.MkdirAll(destDir, 0o755); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: create dir: %v", name, err))
