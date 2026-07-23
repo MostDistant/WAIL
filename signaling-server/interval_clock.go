@@ -58,25 +58,36 @@ func (r *room) observeSync(payload json.RawMessage) (anchorMsg, bool) {
 	r.clockMu.Lock()
 	defer r.clockMu.Unlock()
 
+	bpm, bars, quantum := r.tempoBPM, r.cfg.Bars, r.cfg.Quantum
 	if p.BPM > 0 {
-		r.tempoBPM = p.BPM
+		bpm = p.BPM
 	}
 	if p.Bars > 0 {
-		r.cfg.Bars = p.Bars
+		bars = p.Bars
 	}
 	if p.Quantum > 0 {
-		r.cfg.Quantum = p.Quantum
+		quantum = p.Quantum
 	}
 	// Sensible defaults until both tempo and config are known.
-	if r.tempoBPM == 0 {
-		r.tempoBPM = 120
+	if bpm == 0 {
+		bpm = 120
 	}
-	if r.cfg.Bars == 0 {
-		r.cfg.Bars = 4
+	if bars == 0 {
+		bars = 4
 	}
-	if r.cfg.Quantum == 0 {
-		r.cfg.Quantum = 4
+	if quantum == 0 {
+		quantum = 4
 	}
+
+	// Values unchanged: no re-anchor, no broadcast. A redundant anchor only
+	// re-rolls every client's labeler alignment, and each re-roll can shift a
+	// peer's room labels by a whole interval — peers then disagree with each
+	// other until the next anchor. (Joins re-broadcast IntervalConfig per
+	// ADR-0004; without this guard every join flooded the room with re-rolls.)
+	if r.haveClock && bpm == r.tempoBPM && bars == r.cfg.Bars && quantum == r.cfg.Quantum {
+		return anchorMsg{}, false
+	}
+	r.tempoBPM, r.cfg.Bars, r.cfg.Quantum = bpm, bars, quantum
 
 	now := serverNowUs()
 	if !r.haveClock {
