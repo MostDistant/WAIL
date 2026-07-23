@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.9.6 (2026-07-23)
+
+### Fixes
+
+- quit the macOS app when the window is closed (#409)
+
 ## 3.9.5 (2026-07-23)
 
 ### Fixes
