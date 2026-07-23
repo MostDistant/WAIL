@@ -63,6 +63,9 @@ plugins/                  Thin CLAP bridge plugins (C) for DAWs without Link Aud
 ├── wail_send.c           Capture: taps a track's audio → RawPCM over loopback IPC
 ├── wail_recv.c           Playback: RemotePCM over IPC → 16 stereo output ports
 ├── wail_ipc.h            Shared framing/socket/thread helpers (wire matches wail-app/ipc.go)
+├── tests/                DAW-less harness: clap-trap host + IPC test double (ctest via
+│                         -DWAIL_PLUGIN_TESTS=ON) + wail-plugin-chain E2E driver
+│                         (scripts/plugin-e2e.sh: plugins ⇄ 2 real apps ⇄ relay)
 └── CMakeLists.txt        Builds both .clap bundles
 
 vendor/
@@ -92,6 +95,10 @@ cd signaling-server && go build ./... && go test ./...
 
 # CLAP bridge plugins (C, ADR-0005) — optional, for DAWs without Link Audio; needs vendor/clap
 cmake -S plugins -B build/plugins && cmake --build build/plugins
+
+# Plugin integration tests (DAW-less: clap-trap host + IPC test double; fetches clap-trap)
+cmake -S plugins -B build/plugins -DWAIL_PLUGIN_TESTS=ON && cmake --build build/plugins
+ctest --test-dir build/plugins --output-on-failure
 ```
 
 Note: Go needs GOCACHE write access; if you build inside a sandbox you may need to disable it.
@@ -169,7 +176,7 @@ cd signaling-server && go test ./...            # relay server
 
 Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOCACHE write access; in a sandbox you may need to disable it. `-tags linkstub` swaps Link for a stub so the app and its pure logic packages build without the SDK.
 
-`go test` is all in-process. To exercise the real Link Audio Sink/Source path + relay round trip end-to-end on one machine (no DAW), run `./scripts/tier2-e2e.sh` (local relay + WAV-sweep sender + receiver + `linkaudio-probe`; exit 0 = PASS). See DEVELOPMENT.md → "Tier 2 audio E2E".
+`go test` is all in-process. To exercise the real Link Audio Sink/Source path + relay round trip end-to-end on one machine (no DAW), run `./scripts/tier2-e2e.sh` (local relay + WAV-sweep sender + receiver + `linkaudio-probe`; exit 0 = PASS). See DEVELOPMENT.md → "Tier 2 audio E2E". For the CLAP bridge path (ADR-0005), `./scripts/plugin-e2e.sh` does the equivalent through the plugins: clap-trap-hosted wail-send/wail-recv wired to two real headless apps over a local relay, sweep in, RMS/freq analysis out (exit 0 = PASS).
 
 **Skip tests for docs-only changes.** If a PR only modifies `.md` files (or other non-code docs), do not run the test suite — building the audio path requires the Link SDK/cgo and is slow. Tests are not needed when no code paths change.
 

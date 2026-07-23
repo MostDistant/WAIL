@@ -48,6 +48,15 @@ endfunction()
 add_wail_plugin(wail-send wail_send.c)
 add_wail_plugin(wail-recv wail_recv.c)
 
+# DAW-less integration tests (clap-trap host + IPC test double). Off by default:
+# enabling fetches clap-trap over the network at configure time.
+option(WAIL_PLUGIN_TESTS "Build the CLAP plugin integration tests (fetches clap-trap)" OFF)
+if(WAIL_PLUGIN_TESTS)
+  enable_language(CXX) # tests only — the plugins themselves are pure C
+  enable_testing()
+  add_subdirectory(tests)
+endif()
+
 # State-extension roundtrip test: loads each built bundle and drives clap.state
 # with a fake host (see test_state.c). wail-send also asserts its "Stream
 # Index" param survives a save/load cycle.

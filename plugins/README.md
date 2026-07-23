@@ -38,8 +38,32 @@ No `libopus` or other companion libraries: the plugin has no codec, so the Windo
 lock, or allocation. All socket I/O runs on a dedicated IPC thread that owns the
 connection and reconnects on drop.
 
+## Testing
+
+DAW-less integration tests live in `tests/` (opt-in; fetches
+[clap-trap](https://github.com/dfl/clap-trap) at configure time):
+
+```sh
+cmake -S plugins -B build/plugins -DWAIL_PLUGIN_TESTS=ON
+cmake --build build/plugins
+ctest --test-dir build/plugins --output-on-failure   # add -C Release for multi-config
+```
+
+`wail-plugin-tests` hosts each built plugin via clap-trap's `TestHost` and plays the
+WAIL app's role on the loopback IPC socket (`tests/ipc_test_server.h` mirrors
+`wail-app/ipc.go`), so the plugin ⇄ app contract is exercised without a DAW or the
+Go app: RawPCM framing/PCM exactness, transport flag, Stream Index param, stream →
+port routing, port naming + rescan, StreamGone, mono duplication, underrun silence,
+slot exhaustion, and no-server resilience. `test_state` covers the clap.state
+roundtrip. Both run in CI.
+
+`wail-plugin-chain` (same build) is the driver for `scripts/plugin-e2e.sh`: it hosts
+both plugins wired to two real headless WAIL apps over a local relay and sweeps
+audio through the full Opus/WAIF/playout path — the DAW-less end-to-end check for
+the bridge (manual, ~1 min, like `scripts/tier2-e2e.sh`).
+
 ## Status
 
-Compile-, link-, and bundle-verified in CI. End-to-end audio behavior (loading in a
-CLAP host and confirming a live room) must be validated on a machine with a
-Link-Audio-less DAW (e.g. Reaper, Bitwig) running alongside the WAIL app.
+Compile-, link-, bundle-, and IPC-behavior-verified in CI (see Testing). A live-room
+sanity check in a real Link-Audio-less DAW (e.g. Reaper, Bitwig) is still worth doing
+once on each platform, but day-to-day plugin changes are covered without one.

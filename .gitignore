@@ -1,3 +1,5 @@
 /target
 /signaling-server/wail-signaling
 wail-app/wail-app
+/build/
+.envrc
