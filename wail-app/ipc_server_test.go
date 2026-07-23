@@ -10,6 +10,55 @@ import (
 	"time"
 )
 
+// TestIPCServerSendTrackName verifies a send-role TrackName frame renames the
+// plugin capture channel, so the DAW track name propagates to the room's stream
+// names (effectiveStreamNames) instead of the "Plugin Send N" placeholder.
+func TestIPCServerSendTrackName(t *testing.T) {
+	lb := NewLinkBridge(120, 4)
+	eng := newAudioEngine(lb, "TestPeer", func([]byte) {}, 1).(*linkAudioEngine)
+	pool := NewIPCWriterPool()
+	eng.SetRecvPool(pool)
+
+	srv := &ipcServer{engine: eng, pool: pool}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Start() normally does this, but it also launches the Link discovery/emit
+	// loops the test doesn't need; AddPluginSource's drain goroutine needs a ctx.
+	eng.ctx, eng.cancel = context.WithCancel(ctx)
+	if err := srv.start(ctx, 0); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+
+	conn, err := net.Dial("tcp", srv.ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	// Send handshake: role + stream index, then a TrackName frame.
+	if _, err := conn.Write([]byte{IPCRoleSend, 0x03, 0x00}); err != nil {
+		t.Fatalf("write handshake: %v", err)
+	}
+	if err := WriteFrame(conn, EncodeTrackName(3, "Bass DI")); err != nil {
+		t.Fatalf("write TrackName: %v", err)
+	}
+
+	streamID := uint16(0x8000) + 3 // ipcPluginStreamIDBase + index
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		for _, cc := range eng.CaptureChannels() {
+			if cc.StreamID == streamID {
+				if cc.Name == "Bass DI" {
+					return // success
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("capture channel for plugin stream 3 never renamed; channels: %+v", eng.CaptureChannels())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestIPCServerRecvReplay verifies the server dispatches a recv-role connection and
 // replays the current stream names to it, so a Recv plugin can label its ports for
 // streams whose audio is already flowing.

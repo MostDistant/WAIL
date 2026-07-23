@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include "clap/clap.h"
+#include "clap/ext/track-info.h"
 #include "wail_ipc.h"
 
 #define SEND_RING_SLOTS 64
@@ -39,9 +40,42 @@ typedef struct {
    uint64_t     frame_counter; // audio-thread owned
    _Atomic int  stream_index;  // from the "Stream Index" param; read by IPC thread
 
+   // DAW track name from the host's clap.track-info. Written only on the main
+   // thread (init / track_info.changed), read by the IPC thread through a
+   // seqlock (name_seq odd = write in progress); name_dirty tells the IPC
+   // thread to (re)send a TrackName frame. The host is never called off the
+   // main thread.
+   char             track_name[CLAP_NAME_SIZE];
+   _Atomic uint32_t name_seq;
+   _Atomic bool     name_dirty;
+
    wail_thread  ipc_thread;
    _Atomic bool running;
 } wail_send;
+
+// send_refresh_track_name queries the host's clap.track-info for the name of
+// the track this instance sits on and caches it for the IPC thread.
+// [main-thread]
+static void send_refresh_track_name(wail_send *self) {
+   const clap_host_track_info_t *ti = self->host->get_extension(self->host, CLAP_EXT_TRACK_INFO);
+   if (!ti || !ti->get)
+      ti = self->host->get_extension(self->host, CLAP_EXT_TRACK_INFO_COMPAT);
+   if (!ti || !ti->get)
+      return;
+   clap_track_info_t info;
+   memset(&info, 0, sizeof(info));
+   if (!ti->get(self->host, &info))
+      return;
+   if (!(info.flags & CLAP_TRACK_INFO_HAS_TRACK_NAME) || info.name[0] == '\0')
+      return;
+   if (strncmp(self->track_name, info.name, CLAP_NAME_SIZE - 1) == 0)
+      return;
+   atomic_fetch_add_explicit(&self->name_seq, 1, memory_order_acq_rel); // odd: write in progress
+   strncpy(self->track_name, info.name, CLAP_NAME_SIZE - 1);
+   self->track_name[CLAP_NAME_SIZE - 1] = '\0';
+   atomic_fetch_add_explicit(&self->name_seq, 1, memory_order_release); // even: stable
+   atomic_store_explicit(&self->name_dirty, true, memory_order_release);
+}
 
 // --- audio-thread capture ---
 
@@ -101,6 +135,34 @@ static clap_process_status CLAP_ABI send_process(const clap_plugin_t *plugin, co
    return CLAP_PROCESS_CONTINUE;
 }
 
+// send_track_name_frame snapshots the cached track name (seqlock read) and
+// sends it as a TrackName frame. A no-op (success) when the host gave no name.
+// [IPC thread]
+static int send_track_name_frame(wail_send *self, wail_sock sock) {
+   char name[CLAP_NAME_SIZE];
+   for (;;) {
+      uint32_t s1 = atomic_load_explicit(&self->name_seq, memory_order_acquire);
+      if (s1 & 1u)
+         continue; // main thread mid-write; it only does a short memcpy
+      memcpy(name, self->track_name, CLAP_NAME_SIZE);
+      atomic_thread_fence(memory_order_acquire);
+      uint32_t s2 = atomic_load_explicit(&self->name_seq, memory_order_acquire);
+      if (s1 == s2)
+         break;
+   }
+   if (name[0] == '\0')
+      return 0;
+   uint8_t buf[1 + 2 + 2 + CLAP_NAME_SIZE];
+   size_t off = 0;
+   buf[off++] = WAIL_TAG_TRACKNAME;
+   wail_put_u16(buf, &off, (uint16_t)atomic_load_explicit(&self->stream_index, memory_order_relaxed));
+   size_t n = strnlen(name, CLAP_NAME_SIZE);
+   wail_put_u16(buf, &off, (uint16_t)n);
+   memcpy(buf + off, name, n);
+   off += n;
+   return wail_send_frame(sock, buf, (uint32_t)off);
+}
+
 // --- IPC thread ---
 
 static void *send_ipc_thread(void *arg) {
@@ -124,6 +186,15 @@ static void *send_ipc_thread(void *arg) {
          hs[off++] = WAIL_IPC_ROLE_SEND;
          wail_put_u16(hs, &off, (uint16_t)atomic_load_explicit(&self->stream_index, memory_order_relaxed));
          if (wail_sock_write_all(sock, hs, off) != 0) {
+            wail_sock_close(sock);
+            sock = WAIL_INVALID_SOCK;
+            continue;
+         }
+         // (Re)sent on every (re)connect: the app registers this stream fresh.
+         atomic_store_explicit(&self->name_dirty, true, memory_order_release);
+      }
+      if (atomic_exchange_explicit(&self->name_dirty, false, memory_order_acq_rel)) {
+         if (send_track_name_frame(self, sock) != 0) {
             wail_sock_close(sock);
             sock = WAIL_INVALID_SOCK;
             continue;
@@ -168,7 +239,8 @@ static void *send_ipc_thread(void *arg) {
 // --- plugin lifecycle ---
 
 static bool CLAP_ABI send_init(const clap_plugin_t *plugin) {
-   (void)plugin;
+   wail_send *self = plugin->plugin_data;
+   send_refresh_track_name(self);
    return true;
 }
 static void CLAP_ABI send_destroy(const clap_plugin_t *plugin) { free(plugin->plugin_data); }
@@ -191,6 +263,7 @@ static bool CLAP_ABI send_activate(const clap_plugin_t *plugin, double sr, uint3
    atomic_store(&self->head, 0);
    atomic_store(&self->tail, 0);
    self->frame_counter = 0;
+   send_refresh_track_name(self); // the track may only be known post-init
    atomic_store(&self->running, true);
    if (wail_thread_create(&self->ipc_thread, send_ipc_thread, self) != 0) {
       atomic_store(&self->running, false);
@@ -321,11 +394,20 @@ static bool CLAP_ABI send_state_load(const clap_plugin_t *plugin, const clap_ist
 }
 static const clap_plugin_state_t send_state = {send_state_save, send_state_load};
 
+// --- track-info extension: the host tells us when our track's name changes ---
+
+static void CLAP_ABI send_track_info_changed(const clap_plugin_t *plugin) {
+   send_refresh_track_name(plugin->plugin_data);
+}
+static const clap_plugin_track_info_t send_track_info = {send_track_info_changed};
+
 static const void *CLAP_ABI send_get_extension(const clap_plugin_t *p, const char *id) {
    (void)p;
    if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &send_audio_ports;
    if (!strcmp(id, CLAP_EXT_PARAMS)) return &send_params;
    if (!strcmp(id, CLAP_EXT_STATE)) return &send_state;
+   if (!strcmp(id, CLAP_EXT_TRACK_INFO)) return &send_track_info;
+   if (!strcmp(id, CLAP_EXT_TRACK_INFO_COMPAT)) return &send_track_info;
    return NULL;
 }
 

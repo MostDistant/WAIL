@@ -7,7 +7,9 @@ or `WAIL_IPC_ADDR`).
 
 - **`wail-send`** — insert on a track/bus. Passes audio through and taps a copy to
   WAIL. One CLAP param, *Stream Index* (0–15), lets you run several instances as
-  separate streams (drums, synth, …).
+  separate streams (drums, synth, …). Reports the DAW track's name to the app
+  (host `clap.track-info`, live on rename), so remote peers see the stream
+  labeled e.g. "Bass DI" instead of "Plugin Send 0".
 - **`wail-recv`** — 16 stereo output ports, one per remote stream. Ports are named
   live (`{peer} · {stream}`) as audio arrives.
 
@@ -53,8 +55,9 @@ ctest --test-dir build/plugins --output-on-failure   # add -C Release for multi-
 WAIL app's role on the loopback IPC socket (`tests/ipc_test_server.h` mirrors
 `wail-app/ipc.go`), so the plugin ⇄ app contract is exercised without a DAW or the
 Go app: RawPCM framing/PCM exactness, transport flag, Stream Index param, stream →
-port routing, port naming + rescan, StreamGone, mono duplication, underrun silence,
-slot exhaustion, and no-server resilience. `test_state` covers the clap.state
+port routing, port naming + rescan, StreamGone, track-name reporting (initial +
+rename via clap.track-info, and silence when the host lacks it), mono
+duplication, underrun silence, slot exhaustion, and no-server resilience. `test_state` covers the clap.state
 roundtrip. Both run in CI.
 
 `wail-plugin-chain` (same build) is the driver for `scripts/plugin-e2e.sh`: it hosts

@@ -78,6 +78,24 @@ func (e *linkAudioEngine) RemovePluginSource(key string, epoch uint64) {
 	}
 }
 
+// SetPluginSourceName renames a plugin capture channel from the Send plugin's
+// DAW track name (clap.track-info). Epoch-guarded like RemovePluginSource: a
+// stale connection's late rename can't touch a newer reconnection's channel.
+// The new name reaches the room on the next status tick via effectiveStreamNames.
+func (e *linkAudioEngine) SetPluginSourceName(key string, epoch uint64, name string) {
+	if name == "" {
+		return // no track-info from the host: keep the "Plugin Send N" placeholder
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ch, ok := e.capture[key]
+	if !ok || ch.epoch != epoch || ch.name == name {
+		return
+	}
+	log.Printf("[audio] plugin send %s renamed %q → %q (DAW track name)", key, ch.name, name)
+	ch.name = name
+}
+
 // StreamNameFrames snapshots a length-framed StreamName message for every
 // currently-published stream, so a freshly-connected Recv plugin can label the ports
 // it assigns to streams whose audio is already flowing (their live SetName broadcasts

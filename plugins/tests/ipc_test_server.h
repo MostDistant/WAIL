@@ -26,6 +26,9 @@
 
 namespace wailtest {
 
+// (defined in the codecs section below)
+inline bool decodeTrackName(const std::vector<uint8_t> &p, uint16_t &streamIndex, std::string &name);
+
 // unusedPort returns a loopback port that was free a moment ago — for tests that
 // want the plugin's connection attempts to be refused.
 inline int unusedPort() {
@@ -140,6 +143,28 @@ public:
    bool waitFrameCount(size_t n, int timeoutMs) {
       std::unique_lock<std::mutex> lk(mu_);
       return cv_.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&] { return frames_.size() >= n; });
+   }
+
+   // waitTrackName blocks until a TrackName frame (Send → App, mirrors
+   // DecodeTrackName in wail-app/ipc.go) arrives carrying exactly `name`.
+   bool waitTrackName(const std::string &name, int timeoutMs) {
+      std::unique_lock<std::mutex> lk(mu_);
+      return cv_.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&] {
+         for (const auto &f : frames_) {
+            uint16_t idx;
+            std::string n;
+            if (decodeTrackName(f, idx, n) && n == name) return true;
+         }
+         return false;
+      });
+   }
+
+   // hasTag reports whether any received frame carries the given IPC tag.
+   bool hasTag(uint8_t tag) {
+      std::lock_guard<std::mutex> lk(mu_);
+      for (const auto &f : frames_)
+         if (!f.empty() && f[0] == tag) return true;
+      return false;
    }
 
    // frames returns a snapshot of every payload received so far (never consumed).
@@ -298,6 +323,17 @@ inline std::vector<uint8_t> encodeStreamGone(const std::string &peerID, uint16_t
    putStr8(m, peerID);
    putU16(m, streamID);
    return m;
+}
+
+// decodeTrackName mirrors DecodeTrackName: Send → App DAW track name for a
+// plugin stream (tag + u16 stream index + str16 name).
+inline bool decodeTrackName(const std::vector<uint8_t> &p, uint16_t &streamIndex, std::string &name) {
+   if (p.size() < 5 || p[0] != WAIL_TAG_TRACKNAME) return false;
+   streamIndex = wail_get_u16(&p[1]);
+   uint16_t n = wail_get_u16(&p[3]);
+   if (p.size() < 5u + n) return false;
+   name.assign((const char *)p.data() + 5, n);
+   return true;
 }
 
 // RawPCM is a decoded Send → App block (mirrors DecodeRawPCM).

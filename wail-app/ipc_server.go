@@ -139,8 +139,15 @@ func (s *ipcServer) handleSend(ctx context.Context, conn net.Conn) {
 				if payload == nil {
 					break
 				}
-				if raw, ok := DecodeRawPCM(payload); ok {
-					src.Push(rawPCMToInt16(raw.Flags, raw.Samples), raw.FrameCounter, int(raw.Channels), raw.SampleRate)
+				switch IPCTag(payload) {
+				case int(IPCTagRawPCM):
+					if raw, ok := DecodeRawPCM(payload); ok {
+						src.Push(rawPCMToInt16(raw.Flags, raw.Samples), raw.FrameCounter, int(raw.Channels), raw.SampleRate)
+					}
+				case int(IPCTagTrackName):
+					if _, name, ok := DecodeTrackName(payload); ok {
+						s.engine.SetPluginSourceName(key, epoch, name)
+					}
 				}
 			}
 		}
