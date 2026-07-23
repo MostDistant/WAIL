@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.9.4 (2026-07-23)
+
+### Fixes
+
+- revert "timing bugs that desync peers (relay clock + capture grid) (#397)"
+
 ## 3.9.3 (2026-07-23)
 
 ### Fixes
