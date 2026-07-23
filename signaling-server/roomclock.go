@@ -54,13 +54,6 @@ type roomAnchor struct {
 // roomClock derives room interval indices and boundary times from an anchor.
 type roomClock struct {
 	a roomAnchor
-	// Transition pin: after a reanchor, the index is pinned to the interval
-	// still in progress until the next boundary. Without it, a tempo increase
-	// makes the new-tempo math report an index BEHIND the current one during
-	// the transition window — the room index would tick backward and every
-	// client labeler aligned from a broadcast in that window is off by one.
-	pinIndex       int64
-	pinUntilMicros int64 // 0 = no pin
 }
 
 func newRoomClock(a roomAnchor) *roomClock { return &roomClock{a: a} }
@@ -69,9 +62,6 @@ func (rc *roomClock) anchor() roomAnchor { return rc.a }
 
 // indexAt returns the room interval index in effect at server-clock time now.
 func (rc *roomClock) indexAt(nowMicros int64) int64 {
-	if rc.pinUntilMicros > 0 && nowMicros < rc.pinUntilMicros {
-		return rc.pinIndex
-	}
 	bpi := rc.a.Config.beatsPerInterval()
 	elapsedSec := float64(nowMicros-rc.a.AtMicros) / 1e6
 	elapsedBeats := elapsedSec * clampTempo(rc.a.TempoBPM) / 60.0
@@ -95,12 +85,10 @@ func (rc *roomClock) boundaryMicros(index int64) int64 {
 
 // reanchor applies a tempo/config change at the next interval boundary, so the
 // current interval finishes under the old tempo (quantize tempo changes to
-// boundaries, ADR-0003). The index is pinned until that boundary (see above).
+// boundaries, ADR-0003).
 func (rc *roomClock) reanchor(nowMicros int64, newTempoBPM float64, newConfig intervalConfig) {
 	nextIdx := rc.indexAt(nowMicros) + 1
 	nextBoundary := rc.boundaryMicros(nextIdx)
-	rc.pinIndex = nextIdx - 1
-	rc.pinUntilMicros = nextBoundary
 	rc.a = roomAnchor{
 		Index:    nextIdx,
 		AtMicros: nextBoundary,
