@@ -50,6 +50,26 @@ func emittedFrames(out []emitted) int {
 	return n
 }
 
+func TestFeederSetCushionGrows(t *testing.T) {
+	var out []emitted
+	f, _ := newTestFeeder(0, stampedSource(fTotal, 0))
+	f.SetCushion(fCushion * 2)
+	f.Advance(0, collector(&out))
+	if got := emittedFrames(out); got != fCushion*2 {
+		t.Fatalf("after SetCushion(%d): filled %d frames, want %d", fCushion*2, got, fCushion*2)
+	}
+}
+
+func TestFeederSetCushionFloorsToChunk(t *testing.T) {
+	var out []emitted
+	f, _ := newTestFeeder(0, stampedSource(fTotal, 0))
+	f.SetCushion(1) // below chunk → floored to fChunk
+	f.Advance(0, collector(&out))
+	if got := emittedFrames(out); got != fChunk {
+		t.Fatalf("after SetCushion(1): filled %d frames, want floored %d", got, fChunk)
+	}
+}
+
 func TestFeederInitialFillToCushion(t *testing.T) {
 	var out []emitted
 	f, r := newTestFeeder(0, stampedSource(fTotal, 0))

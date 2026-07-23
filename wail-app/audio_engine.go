@@ -40,6 +40,13 @@ type AudioEngine interface {
 	// writes two WAV files — the PCM fed to Opus and that audio decoded as a
 	// receiver would — for diagnosing where transmitted audio degrades.
 	SetCaptureDump(enabled bool)
+	// SetMetronome publishes (or tears down) a locally-generated "WAIL Metronome"
+	// Link Audio channel — a click on every beat (accented on bar downbeats) on
+	// the local Link grid, for aligning against the DAW's own metronome.
+	SetMetronome(enabled bool)
+	// SetCushionMs live-adjusts the emit feed-ahead depth (ms) for all streams
+	// and the metronome; returns the effective clamped value.
+	SetCushionMs(ms int) int
 	// Health snapshots the engine's cumulative diagnostic counters. Each
 	// increment marks an event that risks an audible artifact; the session
 	// diffs snapshots to surface them in the log panel and Network tab.
@@ -63,6 +70,10 @@ type EngineHealth struct {
 	EmitSinkWriteRejected   uint64 `json:"emit_sink_write_rejected"`    // sink refused a chunk mid-stream (queue full / listener left) — hole in delivered audio
 	WireDecodeFailures      uint64 `json:"wire_decode_failures"`        // WAIF wire-decode errors
 	OpusDecodeFailures      uint64 `json:"opus_decode_failures"`        // Opus decode errors
+	// EmitCushionMs is the current effective emit feed-ahead (config, not a
+	// counter): it rides the snapshot so the UI can show/initialise the cushion
+	// control. Not a HEALTH_FIELDS row.
+	EmitCushionMs int `json:"emit_cushion_ms"`
 }
 
 // CaptureChannelInfo describes a discovered local Link Audio channel for the
