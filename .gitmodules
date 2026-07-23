@@ -1,3 +1,6 @@
 [submodule "vendor/link"]
 	path = vendor/link
 	url = https://github.com/Ableton/link.git
+[submodule "vendor/clap"]
+	path = vendor/clap
+	url = https://github.com/free-audio/clap.git

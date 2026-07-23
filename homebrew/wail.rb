@@ -43,6 +43,24 @@ class Wail < Formula
       system "go", "build", "-tags", "nolibopusfile", "-ldflags", "-X main.appVersion=#{version}", "-o", "wail", "."
     end
     bin.install "wail-app/wail"
+
+    # Build the CLAP plugins (thin PCM bridge for non-Link-Audio DAWs, ADR-0005) and
+    # stage them under lib/. Homebrew can't write into the user's plugin folder, so
+    # `wail-install-plugins` (below) copies them there on demand.
+    system "cmake", "-S", "plugins", "-B", "build/plugins", "-DCMAKE_BUILD_TYPE=Release"
+    system "cmake", "--build", "build/plugins"
+    lib.install Dir["build/plugins/*.clap"]
+    bin.install "scripts/wail-install-plugins.sh" => "wail-install-plugins"
+  end
+
+  def caveats
+    <<~EOS
+      The WAIL CLAP plugins were built but not copied into your DAW plugin folder
+      (Homebrew can't write there). Install them with:
+        wail-install-plugins
+      Then rescan plugins in your DAW. You only need them for DAWs without native
+      Ableton Link Audio (Live 12.3+ needs no plugin).
+    EOS
   end
 
   test do

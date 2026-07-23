@@ -51,18 +51,18 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 	for _, s := range le.emit {
 		st = s
 	}
-	if st.sink == nil {
-		t.Fatal("expected the stream to publish a Link Audio sink")
+	if len(st.sinks) != 1 {
+		t.Fatalf("expected the stream to publish exactly one Link Audio sink, got %d", len(st.sinks))
 	}
 
 	// Reconnect: same identity+stream, renamed peer → reuse the same stream and
 	// channel (affinity), just refresh the name. Must not mint a new stream/sink.
-	firstSink := st.sink
+	firstSink := st.sinks[0]
 	eng.HandleRemoteAudio("identity-A", "Alice (reconnected)", "guitar", frames[0])
 	if len(le.emit) != 1 {
 		t.Fatalf("reconnect minted a new stream: %d", len(le.emit))
 	}
-	if st.sink != firstSink {
+	if len(st.sinks) != 1 || st.sinks[0] != firstSink {
 		t.Fatal("reconnect replaced the sink — channel affinity broken")
 	}
 	if st.lastDisplayName != "Alice (reconnected)" {

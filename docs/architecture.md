@@ -119,6 +119,15 @@ DAW / Link-Audio app B plays WAIL B's published channel — Peer A's previous in
 
 `audio_engine.go` defines the `AudioEngine` interface; `audio_engine_real.go` (`//go:build !linkstub`) is the implementation, with a no-op `audio_engine_stub.go` for stub builds. The engine owns the capture drain goroutines (one per bridged channel), the emit loop (boundary detection + paced sink writes), and Link Audio channel discovery. It wraps the pure, unit-tested packages above plus the `internal/abllink` cgo binding. The realtime capture callback stays pure C (`internal/abllink/capture.c`) and never enters the Go runtime, so a GC pause can never drop incoming Link Audio UDP (ADR-0002).
 
+### Optional CLAP bridge (IPC)
+
+For DAWs without Link Audio, two thin first-party CLAP plugins (`plugins/wail_send.c`, `plugins/wail_recv.c`) bridge raw PCM to/from the running app over loopback TCP (`127.0.0.1:9191 + instance`; ADR-0005). The plugin carries **no codec** — the app owns all Opus/WAIF/interval/relay work — so the CLAP path is just an alternate front end to the same engine:
+
+- The engine's capture source and emit sink are interfaces (`captureSource` / `emitSink`, `audio_engine_ports.go`). `*abllink.Source` / `*abllink.Sink` are the Link Audio implementations; `ipcCaptureSource` / `ipcEmitSink` are the IPC ones. Both feed the same `linkAudioEngine`, so Link Audio and plugin audio can run at once.
+- **Send:** the plugin taps its track's audio into a lock-free ring; an IPC thread streams `RawPCM` (float32 + a monotonic frame counter + a PLAYING flag) to the app. `ipcCaptureSource` anchors that frame counter to the app's local Link clock once and extrapolates by sample count — reproducing the sample-accurate begin-beat the Link Audio path gets from `Source.BeginBeats` (the DAW is a Link *sync* peer, so it shares the timeline). From there the normal capture → assemble → Opus → WAIF → relay path runs unchanged.
+- **Recv:** the app fans each stream's paced playout chunk to the Link Audio sink *and* to any connected recv plugin as `RemotePCM`. The plugin routes each stream to one of 16 stereo output ports and renames it live to `{peer} · {stream}` via CLAP's `RESCAN_NAMES` (allowed while active).
+- Protocol + framing live in `wail-app/ipc.go` (cgo-free, unit-tested); the server and adapters are `ipc_server.go` / `ipc_source.go` / `ipc_sink.go` (`//go:build !linkstub`; a no-op server under the stub). Realtime discipline mirrors ADR-0002: the plugin's `process()` only touches lock-free rings, never the socket.
+
 ### Wire Format (AudioFrameWire / WAIF)
 
 Streaming format: one WAIF frame per 20ms Opus packet. The final frame of an interval carries metadata so the receiver can reconstruct the full interval. When the interval length isn't a multiple of the 20ms window (most tempos), the final frame's tail is padded with the next interval's real head samples — never silence — so the encoder's input stays continuous across the boundary; the receiver plays through that padding and starts the next interval past its twice-encoded head (silent padding from older senders falls back to truncating playout at the exact interval end).
