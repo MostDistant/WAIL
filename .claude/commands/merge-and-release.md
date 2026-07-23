@@ -29,7 +29,7 @@ If there's **no feature PR to merge** — e.g. a `chore: prepare release` PR is 
 
 - `gh pr view <N> --json title,mergeable,mergeStateStatus,headRefName` and `gh pr checks <N>`.
 - The **title must be a conventional commit** (`feat:` / `fix:` / `feat!:`): you'll squash-merge, so the title becomes the commit knope reads for the bump (`feat`→minor, `fix`→patch, `!`→major). Fix it with `gh pr edit <N> --title ...` if it's wrong.
-- A `chore:` / `docs:` PR is fine to merge, but knope ignores it — it **won't cut a release**, so expect no release PR in step 4 and stop after step 3.
+- Know the type's release impact before merging: `feat:`→minor, `fix:`→patch, breaking (`!`)→major, and **`chore:`→patch too** — knope in this repo bumps a patch for `chore:` and lists it under "Fixes" (observed: a lone `chore:` cut v3.5.1). Only `docs:` is ignored (no bump, no release PR). So a `chore:` **will** open a release PR in step 4; don't expect it to skip. If you're merging a `chore:` you don't want a standalone release for (e.g. an internal tooling/doc tweak), bundle it into a feature PR or let it ride the next feature release instead of cutting a dedicated version for it.
 - If `mergeStateStatus` is `DIRTY` / `mergeable` is `CONFLICTING`: resolve in a throwaway worktree — `git worktree add`, merge `origin/main`, fix the conflicts, run `cd wail-app && go build ./... && go test ./...` (plus `signaling-server` if it was touched), push the branch, re-check mergeability. Remove the worktree afterward.
 - If checks are red: stop and report. Don't merge over failing CI.
 
@@ -52,7 +52,7 @@ gh run list --limit 6 --json name,status,conclusion,headBranch,event \
 gh pr list --state open --head release --base main --json number,title,url
 ```
 
-If the merged commit was `chore:` / `docs:`, "Prepare Release" concludes `skipped` and no PR opens — that's expected; you're done. Otherwise, give up and report if nothing shows after a few minutes (check `gh run view` for a failed prepare-release). Sanity-check the version bump matches the commit type you merged.
+If the merged commit was `docs:` (the only type knope ignores), "Prepare Release" opens no release PR — that's expected; you're done. A `chore:` **does** open one (patch bump, entry under "Fixes"), so proceed to step 5. Otherwise, give up and report if nothing shows after a few minutes (check `gh run view` for a failed prepare-release). Sanity-check the version bump matches the commit type you merged (`feat`→minor, `fix`/`chore`→patch, `!`→major).
 
 ### 5. Merge the release PR
 
