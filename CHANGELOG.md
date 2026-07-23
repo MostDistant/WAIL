@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.9.1 (2026-07-23)
+
+### Fixes
+
+- enable MSVC C11 atomics for CLAP bridge plugin builds (#398)
+
 ## 3.9.0 (2026-07-23)
 
 ### Features
