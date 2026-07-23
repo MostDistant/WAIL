@@ -11,10 +11,11 @@ on:
         type: string
 
 jobs:
-  # Build a "fat" source tarball that includes the vendor/link git submodule.
-  # GitHub's auto-generated archives omit submodule contents, so we produce our
-  # own tarball and upload it as a release artifact.  The Homebrew formula uses
-  # this tarball as its `url` so that the Ableton Link SDK is available during
+  # Build a "fat" source tarball that includes the vendor/link and vendor/clap
+  # git submodules. GitHub's auto-generated archives omit submodule contents, so
+  # we produce our own tarball and upload it as a release artifact. The Homebrew
+  # formula uses this tarball as its `url` so that the Ableton Link SDK (cgo
+  # binding) and the CLAP headers (plugins/ cmake build) are available during
   # `brew install --build-from-source`.
   build-homebrew-tarball:
     runs-on: ubuntu-latest
@@ -36,16 +37,21 @@ jobs:
           # Export the repo tree (excludes .git) into a named staging directory
           mkdir -p "/tmp/${STAGING}"
           git archive --format=tar HEAD | tar -x -C "/tmp/${STAGING}"
-          # Overlay the submodule contents. git archive emits the gitlink as an
-          # empty vendor/link/ directory, so copy the submodule's *contents* into
-          # it — `cp -r vendor/link dest/vendor/link` would nest them one level
-          # too deep (vendor/link/link/), breaking the cgo include paths.
-          mkdir -p "/tmp/${STAGING}/vendor/link"
+          # Overlay the submodule contents. git archive emits the gitlinks as
+          # empty vendor/link/ and vendor/clap/ directories, so copy each
+          # submodule's *contents* into it — `cp -r vendor/link dest/vendor/link`
+          # would nest them one level too deep (vendor/link/link/), breaking the
+          # cgo include paths.
+          mkdir -p "/tmp/${STAGING}/vendor/link" "/tmp/${STAGING}/vendor/clap"
           cp -R vendor/link/. "/tmp/${STAGING}/vendor/link/"
+          cp -R vendor/clap/. "/tmp/${STAGING}/vendor/clap/"
           # Fail loudly if the headers the cgo binding needs aren't where
-          # wail-app/internal/abllink expects them.
+          # wail-app/internal/abllink expects them, or if the CLAP headers the
+          # plugins/ cmake build needs are missing (the Homebrew formula builds
+          # the plugins from this tarball).
           test -f "/tmp/${STAGING}/vendor/link/extensions/abl_link/include/abl_link.h"
           test -d "/tmp/${STAGING}/vendor/link/modules/asio-standalone/asio/include"
+          test -f "/tmp/${STAGING}/vendor/clap/include/clap/clap.h"
           # Package and compute checksum
           tar -czf "wail-${VERSION}-src.tar.gz" -C /tmp "${STAGING}"
           sha256sum "wail-${VERSION}-src.tar.gz" | awk '{print $1}' > "wail-${VERSION}-src.tar.gz.sha256"
