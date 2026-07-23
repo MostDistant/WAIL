@@ -98,6 +98,28 @@ func NewWindowed(cfg interval.Config, channels int, sampleRate uint32, windowFra
 	return a
 }
 
+// Config returns the interval grid the assembler is bucketing on.
+func (a *Assembler) Config() interval.Config { return a.cfg }
+
+// SetConfig switches the assembler to a new interval grid after a room config
+// change, dropping any partial old-grid interval (a bounded one-time hole) and
+// re-anchoring from the next buffer's beat. Without it the assembler keeps
+// bucketing on the old grid while the room labeler maps on the new one, so its
+// labels tick at the old rate against the room clock and the stream drifts
+// further out of sync every interval — and a BPI increase would freeze it
+// entirely (every new index reads as "late"). Dropping beats flushing here:
+// the labeler is already re-aligned to the new grid, so old-grid windows would
+// only be mislabeled.
+func (a *Assembler) SetConfig(cfg interval.Config) {
+	if cfg == a.cfg {
+		return
+	}
+	a.cfg = cfg
+	a.cur = nil
+	a.pending = nil
+	a.anchored = false
+}
+
 // reanchorThreshold is the stamp-vs-cursor divergence (frames) beyond which the
 // beat stamp wins over sample contiguity. 250ms: far above clock-drift noise,
 // far below any musically meaningful discontinuity.
