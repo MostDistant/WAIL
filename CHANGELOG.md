@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.12.4 (2026-07-24)
+
+### Fixes
+
+- frozen room-label offsets from stalled-pong clock poisoning (+ relay watchdog) (#433)
+
 ## 3.12.3 (2026-07-24)
 
 ### Fixes
