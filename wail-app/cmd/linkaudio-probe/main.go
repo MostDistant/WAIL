@@ -13,6 +13,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"math"
 	"os"
@@ -38,11 +39,16 @@ type chanState struct {
 	zeroCross  int
 	sampleRate uint32
 	channels   int
+	// gridFrames counts received frames per shared-grid interval index (the
+	// BPI-lens beat the buffer begins at, floored to its interval). Only
+	// populated when -bpi is set; used by the tier2 interval-placement E2E.
+	gridFrames map[int64]int
 }
 
 func main() {
 	peerName := flag.String("name", "wail-probe", "Link Audio peer name for this probe")
 	match := flag.String("match", "", "only subscribe to channels whose \"peer · name\" contains this substring (case-insensitive); empty = all")
+	bpi := flag.Float64("bpi", 0, "if >0, also report the shared-grid interval index of received audio (beat mapped at this beats-per-interval lens; must match the room's BPI)")
 	flag.Parse()
 	matchLower := strings.ToLower(*match)
 
@@ -51,6 +57,11 @@ func main() {
 	l.Enable(true)
 	l.EnableLinkAudio(true)
 	defer l.Close()
+
+	var ss *abllink.SessionState
+	if *bpi > 0 {
+		ss = abllink.NewSessionState()
+	}
 
 	subs := make(map[abllink.ChannelID]*chanState)
 
@@ -94,12 +105,15 @@ func main() {
 					if src == nil {
 						continue
 					}
-					subs[c.ID] = &chanState{src: src, name: c.Name, peer: c.PeerName}
+					subs[c.ID] = &chanState{src: src, name: c.Name, peer: c.PeerName, gridFrames: map[int64]int{}}
 					log.Printf("→ subscribed: %q · %q", c.PeerName, c.Name)
 				}
 			}
 
 			// Drain EVERY tick so the source ring never overflows.
+			if ss != nil {
+				l.CaptureAppSessionState(ss)
+			}
 			for _, st := range subs {
 				for {
 					buf, ok := st.src.Pop()
@@ -114,6 +128,14 @@ func main() {
 						ch = 1
 					}
 					st.channels = ch
+					if ss != nil {
+						// Map the buffer's begin onto the shared session grid at
+						// the BPI lens (the interval grid is session-shared,
+						// ADR-0003) and bin its frames by interval index.
+						if bb, ok := st.src.BeginBeats(&buf, ss, *bpi); ok {
+							st.gridFrames[int64(math.Floor(bb / *bpi))] += buf.NumFrames
+						}
+					}
 					if g := st.loss.Observe(buf.Count); g != nil {
 						log.Printf("  ! LAN loss on %q · %q: %d buffers (count %d→%d)",
 							st.peer, st.name, g.LostBuffers, g.ExpectedCount, g.GotCount)
@@ -153,10 +175,22 @@ func main() {
 					if st.frames > 0 && st.sampleRate > 0 {
 						freq = (float64(st.zeroCross) / 2.0) / (float64(st.frames) / float64(st.sampleRate))
 					}
-					log.Printf("[%s · %s] %d buf  %d fr  %dch@%dHz  rms=%.0f  ~%.0f Hz  lost=%d",
-						st.peer, st.name, st.buffers, st.frames, st.channels, st.sampleRate, rms, freq, st.loss.LostBuffers())
+					grid := ""
+					if len(st.gridFrames) > 0 {
+						var bestG int64
+						bestN := -1
+						for g, n := range st.gridFrames {
+							if n > bestN {
+								bestN, bestG = n, g
+							}
+						}
+						grid = fmt.Sprintf("  grid=%d", bestG)
+					}
+					log.Printf("[%s · %s] %d buf  %d fr  %dch@%dHz  rms=%.0f  ~%.0f Hz%s  lost=%d",
+						st.peer, st.name, st.buffers, st.frames, st.channels, st.sampleRate, rms, freq, grid, st.loss.LostBuffers())
 				}
 				st.buffers, st.frames, st.sumSq, st.zeroCross = 0, 0, 0, 0
+				st.gridFrames = map[int64]int{}
 			}
 		}
 	}
