@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.12.3 (2026-07-24)
+
+### Fixes
+
+- tempo hold-down + same-rate slew gate stop convergence tempo flapping (#431)
+
 ## 3.12.2 (2026-07-24)
 
 ### Fixes
