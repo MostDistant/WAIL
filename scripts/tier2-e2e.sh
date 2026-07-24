@@ -129,9 +129,8 @@ if [ "$MODE" = step ]; then
   #     STARTS on the sender, per its boundary marker. A heard frequency maps
   #     to content time ((f-f0)/step blocks × BLOCK seconds), and the room
   #     whose content range contains it is the capture room. Exact for ANY
-  #     room tempo (the room may not run at TIER2_BPM — the relay anchor can
-  #     race the founder's seed at join, and entry conformance then adopts
-  #     the anchor tempo).
+  #     room tempo (the room may not run at TIER2_BPM — WAIL adopts the LAN
+  #     Link session's tempo, pillar 4, and the room follows it).
   #   releases.txt  — wall time + room interval that STARTED PLAYING at each
   #     of the receiver's boundaries (its INTERVAL log line).
   # Assertion per received second: captureRoom(content) == playingRoom - D.
