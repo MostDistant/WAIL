@@ -84,27 +84,27 @@ func TestRoomClockReanchorTempoUpDoesNotRetreat(t *testing.T) {
 func TestObserveSyncSuppressesUnchangedAnchor(t *testing.T) {
 	r := newRoom()
 
-	if _, ok := r.observeSync([]byte(`{"type":"TempoChange","bpm":120,"quantum":4}`)); !ok {
+	if _, ok := r.observeSync("test", []byte(`{"type":"TempoChange","bpm":120,"quantum":4}`)); !ok {
 		t.Fatal("first TempoChange should anchor the clock")
 	}
 	// Identical values again: no re-anchor, no broadcast. A redundant anchor
 	// only re-rolls every client's labeler alignment — and each re-roll can
 	// shift a peer's room labels by a whole interval (off-by-one hazard).
-	if _, ok := r.observeSync([]byte(`{"type":"TempoChange","bpm":120,"quantum":4}`)); ok {
+	if _, ok := r.observeSync("test", []byte(`{"type":"TempoChange","bpm":120,"quantum":4}`)); ok {
 		t.Fatal("unchanged TempoChange must not re-anchor")
 	}
-	if _, ok := r.observeSync([]byte(`{"type":"IntervalConfig","bars":4,"quantum":4}`)); ok {
+	if _, ok := r.observeSync("test", []byte(`{"type":"IntervalConfig","bars":4,"quantum":4}`)); ok {
 		t.Fatal("unchanged IntervalConfig must not re-anchor")
 	}
 	// Real changes still anchor...
-	if _, ok := r.observeSync([]byte(`{"type":"TempoChange","bpm":128,"quantum":4}`)); !ok {
+	if _, ok := r.observeSync("test", []byte(`{"type":"TempoChange","bpm":128,"quantum":4}`)); !ok {
 		t.Fatal("a tempo change must re-anchor")
 	}
-	if _, ok := r.observeSync([]byte(`{"type":"IntervalConfig","bars":8,"quantum":4}`)); !ok {
+	if _, ok := r.observeSync("test", []byte(`{"type":"IntervalConfig","bars":8,"quantum":4}`)); !ok {
 		t.Fatal("an interval change must re-anchor")
 	}
 	// ...and then go quiet on repeats.
-	if _, ok := r.observeSync([]byte(`{"type":"IntervalConfig","bars":8,"quantum":4}`)); ok {
+	if _, ok := r.observeSync("test", []byte(`{"type":"IntervalConfig","bars":8,"quantum":4}`)); ok {
 		t.Fatal("repeated IntervalConfig must not re-anchor")
 	}
 }
@@ -113,7 +113,7 @@ func TestObserveSyncMaintainsClock(t *testing.T) {
 	r := newRoom()
 
 	// A non-clock sync leaves the clock uninitialised.
-	if _, ok := r.observeSync([]byte(`{"type":"ChatMessage","text":"hi"}`)); ok {
+	if _, ok := r.observeSync("test", []byte(`{"type":"ChatMessage","text":"hi"}`)); ok {
 		t.Fatal("ChatMessage should not affect the clock")
 	}
 	if _, ok := r.currentAnchor(); ok {
@@ -121,7 +121,7 @@ func TestObserveSyncMaintainsClock(t *testing.T) {
 	}
 
 	// A TempoChange bootstraps the clock and yields an anchor.
-	am, ok := r.observeSync([]byte(`{"type":"TempoChange","bpm":120,"quantum":4}`))
+	am, ok := r.observeSync("test", []byte(`{"type":"TempoChange","bpm":120,"quantum":4}`))
 	if !ok {
 		t.Fatal("TempoChange should produce an anchor")
 	}
@@ -133,7 +133,7 @@ func TestObserveSyncMaintainsClock(t *testing.T) {
 	}
 
 	// IntervalConfig updates bars and re-anchors.
-	am2, ok := r.observeSync([]byte(`{"type":"IntervalConfig","bars":8,"quantum":4}`))
+	am2, ok := r.observeSync("test", []byte(`{"type":"IntervalConfig","bars":8,"quantum":4}`))
 	if !ok || am2.Bars != 8 {
 		t.Fatalf("IntervalConfig anchor = %+v, ok=%v", am2, ok)
 	}
@@ -146,7 +146,7 @@ func TestObserveSyncMaintainsClock(t *testing.T) {
 
 func TestAnchorCarriesNextBoundary(t *testing.T) {
 	r := newRoom()
-	r.observeSync(json.RawMessage(`{"type":"TempoChange","bpm":120,"quantum":4}`))
+	r.observeSync("test", json.RawMessage(`{"type":"TempoChange","bpm":120,"quantum":4}`))
 	am, ok := r.currentAnchor()
 	if !ok {
 		t.Fatal("no anchor after TempoChange")

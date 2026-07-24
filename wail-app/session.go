@@ -721,7 +721,7 @@ func sessionLoop(
 					// relay RTT estimate and the grid steer's server↔local offset.
 					if msg.ServerNowMicros != 0 {
 						if rtt := clock.HandleServerPong(msg.PingSentAtUs); rtt > 0 {
-							steer.OnServerPong(msg.ServerNowMicros+rtt/2, intervalCfg.BeatsPerInterval(), time.Now())
+							steer.OnServerPong(msg.ServerNowMicros+rtt/2, rtt, intervalCfg.BeatsPerInterval(), time.Now())
 						}
 					}
 				} else {

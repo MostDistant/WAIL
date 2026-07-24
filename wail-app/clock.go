@@ -7,8 +7,11 @@ import (
 )
 
 const (
-	clockWindowSize   = 8
-	PingIntervalMs    = 2000
+	clockWindowSize = 8
+	PingIntervalMs  = 2000
+	// maxRelayRTTUs caps accepted relay pongs: anything older is a stale
+	// pong (sleep/stall buffering), not a timing measurement.
+	maxRelayRTTUs = 5_000_000 // 5s
 )
 
 // PeerClock tracks RTT samples for one peer.
@@ -89,10 +92,16 @@ func (c *ClockSync) HandlePong(peerID string, pingSentAtUs, pongSentAtUs int64) 
 // sub-microsecond loopback RTT also returns 0 and is treated as a failure
 // by the caller (skipping the offset sample) — unreachable with ns clocks
 // in practice, and self-correcting on the next pong.
+// HandleServerPong handles the relay's direct Pong and returns the measured
+// RTT in microseconds (0 = rejected). RTTs beyond maxRelayRTTUs are rejected
+// as stale: a pong buffered through a laptop sleep or network stall carries
+// no timing information, and its RTT/2 would poison the grid aligner's
+// server↔local offset (field finding: stalled pongs put peers' label offsets
+// out by whole intervals, frozen for the session).
 func (c *ClockSync) HandleServerPong(pingSentAtUs int64) int64 {
 	rtt := c.NowUs() - pingSentAtUs
-	if rtt < 0 {
-		return 0 // clock anomaly
+	if rtt < 0 || rtt > maxRelayRTTUs {
+		return 0 // clock anomaly or stale pong
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

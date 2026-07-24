@@ -122,11 +122,13 @@ func (s *Steerer) OnAnchor(nextBoundaryServerUs, index int64, roomBPM, bpi float
 }
 
 // OnServerPong folds one relay time sample into the server↔local offset
-// filter. serverNowEstUs is the server's clock reading estimated at the
-// local receipt instant (server stamp + RTT/2); the local clock is sampled
-// from the bridge at the same instant. Runs entry conformance if armed.
-func (s *Steerer) OnServerPong(serverNowEstUs int64, bpi float64, now time.Time) {
-	s.aligner.ObserveServerTime(serverNowEstUs, s.link.State().TimestampUs)
+// estimate. serverNowEstUs is the server's clock reading estimated at the
+// local receipt instant (server stamp + RTT/2); rttUs is the measured round
+// trip (the offset estimate takes the lowest-RTT samples — see GridAligner);
+// the local clock is sampled from the bridge at the same instant. Runs entry
+// conformance if armed.
+func (s *Steerer) OnServerPong(serverNowEstUs, rttUs int64, bpi float64, now time.Time) {
+	s.aligner.ObserveServerTime(serverNowEstUs, s.link.State().TimestampUs, rttUs)
 	s.tryEntry(bpi, now)
 }
 
@@ -308,6 +310,7 @@ func (s *Steerer) applyRoomLabel(bpi float64) {
 	}
 	li, ok := s.roomLabelLocalIndex(bpi)
 	if !ok {
+		s.logf("[align] label derive failed (anchor/BPM/offset not ready) — keeping sample align")
 		return
 	}
 	s.alignRoomLabel(s.anchorIndex, li)
@@ -353,6 +356,12 @@ func (s *Steerer) roomLabelLocalIndex(bpi float64) (int64, bool) {
 	curIdx := int64(math.Floor(st.Beat / bpi))
 	tEnd := s.link.TimeAtBeat(float64(curIdx+1) * bpi)
 	k := int64(math.Round(float64(boundaryLocalUs-tEnd) / float64(periodUs)))
+	// Diagnostic (field hunt: frozen +N label offsets after anchor
+	// turbulence, v3.12.3 jam): every input to the rounding, so a wrong k
+	// can be attributed — torn State/TimeAtBeat read across a Link timeline
+	// jump, a bad offsetUs (stale pong RTT), or an unaligned grid.
+	s.logf("[align] label derive: anchorIdx=%d boundarySrv=%d offsetUs=%d periodUs=%d beat=%.2f curIdx=%d tEnd=%d k=%d → local=%d",
+		s.anchorIndex, boundaryServerUs, offsetUs, periodUs, st.Beat, curIdx, tEnd, k, curIdx+k)
 	return curIdx + k, true
 }
 
