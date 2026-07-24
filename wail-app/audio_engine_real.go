@@ -401,10 +401,27 @@ func (e *linkAudioEngine) RoomIndex(localIndex int64) (int64, bool) {
 	return e.labeler.RoomIndex(localIndex)
 }
 
+// AlignRoomLabel aligns the labeler to an explicitly derived local index for
+// the given room index (ADR-0006 "known by construction": the session
+// computed localIndex from the anchor's boundary time on an aligned grid, so
+// this never suffers the sample-align/snap off-by-one). Logs only on change —
+// re-running entry conformance is idempotent.
+func (e *linkAudioEngine) AlignRoomLabel(roomIndex, localIndex int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	prevOff, wasAligned := e.labeler.Offset(), e.labeler.Aligned()
+	e.labeler.Align(roomIndex, localIndex)
+	if newOff := e.labeler.Offset(); !wasAligned || newOff != prevOff {
+		log.Printf("[audio] room label aligned by construction: room %d ↔ local %d — label offset %+d (was %+d)",
+			roomIndex, localIndex, newOff, prevOff)
+	}
+}
+
 // LabelOffsetFor returns the worst (largest-|delta|) interval-label verdict
 // across one identity's streams: 0 = labels agree with our room index, k = the
-// peer's audio silently plays k intervals off (negative = late). ok is false
-// when no stream has finalized a verdict yet (too little data, or unaligned).
+// peer's audio silently plays k intervals off (positive = late: frames labeled
+// ahead are held extra boundaries by playout). ok is false when no stream has
+// finalized a verdict yet (too little data, or unaligned).
 func (e *linkAudioEngine) LabelOffsetFor(identity string) (int64, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -871,8 +888,14 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 	// that many intervals late/early).
 	if roomIdx := e.curRoomIdx.Load(); roomIdx != math.MinInt64 {
 		if verdict, changed := st.labelTrack.Add(roomIdx, f.IntervalIndex); changed && verdict != 0 {
-			log.Printf("[audio] warn: %s stream %d labels intervals off by %+d — their audio plays %d interval(s) late",
-				fromIdentity, f.StreamID, verdict, -verdict)
+			// Frames labeled ahead of our room index (positive) are held extra
+			// boundaries by playout (release = label − D) → positive = late.
+			dir, n := "late", verdict
+			if n < 0 {
+				dir, n = "early", -n
+			}
+			log.Printf("[audio] warn: %s stream %d labels intervals off by %+d — their audio plays %d interval(s) %s",
+				fromIdentity, f.StreamID, verdict, n, dir)
 		}
 	}
 

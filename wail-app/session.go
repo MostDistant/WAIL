@@ -205,6 +205,10 @@ func sessionLoop(
 	var alignLastSnapAt, alignLastTempoAt time.Time
 	var alignLastSlewTarget float64 // 0 = sitting at exact room tempo
 	alignLastState := ""
+	// Latest room anchor index, for re-deriving the labeler offset by
+	// construction after entry conformance (see alignRoomLabelByConstruction).
+	var anchorIndex int64
+	haveRoomAnchor := false
 	emitAlign := func(deltaUs int64) {
 		state := alignStateName(deltaUs)
 		if state == alignLastState {
@@ -212,6 +216,25 @@ func sessionLoop(
 		}
 		alignLastState = state
 		emitter.Emit("align:state", AlignStateEvent{State: state, ErrorMs: float64(deltaUs) / 1000})
+	}
+	// alignRoomLabelByConstruction re-derives the labeler offset from the
+	// anchor's boundary time (exact by construction on an aligned grid) and
+	// overrides SetRoomAnchor's sample align. A sample taken before the entry
+	// snap is off by one whenever the snap moves the sampling instant across
+	// a local boundary — the peer then labels every interval one off and its
+	// audio silently plays an interval late/early for the whole session
+	// (anchors only re-send on tempo/config change). Runs only once entry
+	// conformance has completed (grid aligned); without it the sample align
+	// stays as the fallback (ADR-0006).
+	alignRoomLabelByConstruction := func() {
+		if !alignEnabled || alignEntryPending || !haveRoomAnchor {
+			return
+		}
+		li, ok := roomAlignLocalIndex(aligner, link, intervalCfg.BeatsPerInterval())
+		if !ok {
+			return
+		}
+		audioEngine.AlignRoomLabel(anchorIndex, li)
 	}
 	tryEntryConformance := func() {
 		if !alignEnabled || !alignEntryPending || !aligner.Ready() {
@@ -244,6 +267,9 @@ func sessionLoop(
 			logInfo("[align] entry: grid already aligned (δ=%+.1f ms)", float64(delta)/1000)
 		}
 		emitAlign(delta)
+		// The snap may have shifted the grid past a boundary since
+		// SetRoomAnchor sampled the labeler — re-derive by construction.
+		alignRoomLabelByConstruction()
 	}
 
 	// Receivers label our republished channels with these names (StreamNames
@@ -801,7 +827,11 @@ func sessionLoop(
 				// ADR-0006: feed the room grid + server time to the aligner and
 				// run entry conformance (join/rejoin only; measure-then-snap).
 				aligner.SetAnchor(msg.NextBoundaryMicros, msg.BPM, intervalCfg.BeatsPerInterval())
+				anchorIndex, haveRoomAnchor = msg.Index, true
 				tryEntryConformance()
+				// Steady-state anchor (tempo/config change): entry wasn't pending,
+				// so re-derive the label here — race-free on an aligned grid.
+				alignRoomLabelByConstruction()
 				// ADR-0004: the room interval is communicated, never enforced —
 				// prompt joiners (once) to match their DAW's launch quantization.
 				if !foundedRoom && !intervalPromptSent && msg.Bars > 0 {
