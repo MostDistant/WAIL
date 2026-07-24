@@ -231,9 +231,9 @@
           <input type="checkbox" id="metronome-broadcast-toggle">
           <span>Broadcast metronome to room</span>
         </label>
-        <div class="cushion-control" title="How far ahead of the playhead each Link Audio sink is kept fed. Default 0 (minimal — some receivers like the VOID plugin stall on any feed-ahead). Raise it if a buffering-tolerant receiver runs dry with sink underruns (see below).">
-          <label for="cushion-slider">Emit cushion <span id="cushion-value">0 ms</span></label>
-          <input type="range" id="cushion-slider" min="0" max="500" step="5" value="0">
+        <div class="cushion-control" title="How far ahead of the playhead each Link Audio sink is kept fed. Default 100ms — below that the emit loop has no jitter tolerance and underruns audibly. Receivers that stall on any feed-ahead (e.g. the VOID plugin) may prefer it lower; the floor is 100 for now.">
+          <label for="cushion-slider">Emit cushion <span id="cushion-value">100 ms</span></label>
+          <input type="range" id="cushion-slider" min="100" max="500" step="5" value="100">
         </div>
       </section>
 

@@ -242,7 +242,7 @@ Releases are fully automated — no manual `knope` commands needed:
 - **Change Link polling rate**: `linkPollInterval` in `wail-app/link_types.go`
 - **Change Opus bitrate**: `engineBitrateKbps` in `wail-app/audio_engine_real.go` (passed to `NewIntervalEncoder` in `interval_codec.go`)
 - **Change the interval offset D**: `WAIL_INTERVAL_OFFSET` env var (default 1), read in `wail-app/session.go` and applied via `playout.New` in `audio_engine_real.go`
-- **Change the emit cushion**: `WAIL_EMIT_CUSHION_MS` env var (default 80, clamped 10–500), read in `wail-app/audio_engine_real.go`; it adds directly to a Link Audio subscriber's reported buffering
+- **Change the emit cushion**: `WAIL_EMIT_CUSHION_MS` env var or the Debug-tab slider (default 100, clamped 100–500), read in `wail-app/audio_engine_real.go`; it adds directly to a Link Audio subscriber's reported buffering
 - **Modify wire format**: `wail-app/wire.go` (bump the flags/format)
 
 
