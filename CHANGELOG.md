@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.10.1 (2026-07-24)
+
+### Fixes
+
+- default emit cushion to 100ms and floor the clamp at 100 (#418)
+
 ## 3.10.0 (2026-07-23)
 
 ### Features
