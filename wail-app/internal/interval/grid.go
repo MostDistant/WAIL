@@ -22,8 +22,6 @@ const (
 	SlewDeadbandUs = 10_000
 	// SlewMaxFraction caps the steady-state tempo nudge (0.3% — inaudible).
 	SlewMaxFraction = 0.003
-	// gridOffsetWindow is the median-filter width for server↔local offset samples.
-	gridOffsetWindow = 8
 )
 
 // WrapPhase wraps a phase difference to the range (-period/2, period/2], so a
@@ -44,9 +42,9 @@ func WrapPhase(deltaUs, periodUs int64) int64 {
 }
 
 // GridAligner tracks the room grid (in the relay's clock domain) plus a
-// filtered server↔local clock offset, and computes the local grid's alignment
-// error δ from locally sampled clocks. Not safe for concurrent use — the
-// session loop owns it.
+// server↔local clock offset, and computes the local grid's alignment error δ
+// from locally sampled clocks. Not safe for concurrent use — the session loop
+// owns it.
 type GridAligner struct {
 	// Anchor: the server-clock time of the boundary that ends the anchor's
 	// CurrentIndex, plus the interval period at the room tempo.
@@ -55,29 +53,44 @@ type GridAligner struct {
 	bpm                  float64
 	haveAnchor           bool
 
-	// server − local clock offset, median-filtered. "Local" is whatever
-	// monotonic clock domain the caller samples (the Link clock).
-	offsetSamples []int64
+	// server − local clock offset, taken from the LOWEST-RTT sample (NTP's
+	// minimum-filter principle: network buffering only ever ADDS delay, so
+	// the cleanest sample is the most accurate; median filters let a single
+	// stalled pong — laptop sleep, Wi-Fi stall — poison the estimate,
+	// especially at join when few samples exist). Samples within 1.5× of the
+	// best RTT are also accepted so the offset can track slow clock drift.
 	offsetUs      int64
+	bestRttUs     int64
+	offsetSamples int
 	haveOffset    bool
 }
+
+// minOffsetSamples is how many server pongs must arrive before the aligner is
+// Ready. One wild sample must never be enough to run entry conformance or a
+// label derivation (field finding: a stalled first pong put a joiner's offset
+// out by seconds — intervals of label error, frozen for the session).
+const minOffsetSamples = 3
 
 // NewGridAligner creates an empty aligner (not Ready until both an anchor and
 // an offset sample arrive).
 func NewGridAligner() *GridAligner { return &GridAligner{} }
 
-// ObserveServerTime folds one server-time measurement into the offset filter.
-// serverNowEstUs is the server's clock reading estimated at the local receipt
-// instant (server stamp + RTT/2); localNowUs is the local clock sampled at the
-// same instant. The offset is server − local.
-func (g *GridAligner) ObserveServerTime(serverNowEstUs, localNowUs int64) {
+// ObserveServerTime folds one server-time measurement into the offset
+// estimate. serverNowEstUs is the server's clock reading estimated at the
+// local receipt instant (server stamp + RTT/2); localNowUs is the local clock
+// sampled at the same instant; rttUs is the measured round trip. The offset
+// comes from the lowest-RTT sample (buffering only adds delay); samples
+// within 1.5× of the best RTT also update it, so slow clock drift tracks.
+func (g *GridAligner) ObserveServerTime(serverNowEstUs, localNowUs, rttUs int64) {
 	sample := serverNowEstUs - localNowUs
-	g.offsetSamples = append(g.offsetSamples, sample)
-	if len(g.offsetSamples) > gridOffsetWindow {
-		g.offsetSamples = g.offsetSamples[1:]
+	g.offsetSamples++
+	if !g.haveOffset || rttUs <= g.bestRttUs+g.bestRttUs/2 {
+		if !g.haveOffset || rttUs < g.bestRttUs {
+			g.bestRttUs = rttUs
+		}
+		g.offsetUs = sample
+		g.haveOffset = true
 	}
-	g.offsetUs = medianOfSamples(g.offsetSamples)
-	g.haveOffset = true
 }
 
 // SetAnchor records the room grid from an interval_anchor: the server-clock
@@ -94,9 +107,11 @@ func (g *GridAligner) SetAnchor(nextBoundaryServerUs int64, bpm, beatsPerInterva
 	g.haveAnchor = true
 }
 
-// Ready reports whether both an anchor and at least one offset sample have
+// Ready reports whether both an anchor and enough offset samples have
 // arrived — until then no δ can be computed and neither snap nor slew may run.
-func (g *GridAligner) Ready() bool { return g.haveAnchor && g.haveOffset }
+func (g *GridAligner) Ready() bool {
+	return g.haveAnchor && g.haveOffset && g.offsetSamples >= minOffsetSamples
+}
 
 // RoomBPM returns the anchor's tempo (valid once SetAnchor accepted one).
 func (g *GridAligner) RoomBPM() (float64, bool) {
@@ -180,19 +195,4 @@ func SlewTempo(roomBPM float64, deltaUs, periodUs int64) (target float64, active
 		return roomBPM * (1 + frac), true
 	}
 	return roomBPM * (1 - frac), true
-}
-
-func medianOfSamples(s []int64) int64 {
-	if len(s) == 0 {
-		return 0
-	}
-	cp := make([]int64, len(s))
-	copy(cp, s)
-	// insertion sort — window is tiny (8)
-	for i := 1; i < len(cp); i++ {
-		for j := i; j > 0 && cp[j] < cp[j-1]; j-- {
-			cp[j], cp[j-1] = cp[j-1], cp[j]
-		}
-	}
-	return cp[len(cp)/2]
 }

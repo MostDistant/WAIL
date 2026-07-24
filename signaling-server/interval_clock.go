@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -43,8 +44,9 @@ type anchorMsg struct {
 
 // observeSync inspects a relayed sync payload; when it carries tempo or interval
 // config, it updates the room clock and returns the anchor to broadcast. The
-// returned bool is false for payloads that don't affect the clock.
-func (r *room) observeSync(payload json.RawMessage) (anchorMsg, bool) {
+// returned bool is false for payloads that don't affect the clock. roomName is
+// for the fly.io-visible clock logs.
+func (r *room) observeSync(roomName string, payload json.RawMessage) (anchorMsg, bool) {
 	// Cheap pre-filter: the vast majority of relayed sync traffic is Ping/Pong/
 	// StateSnapshot, which never re-anchors. Skip the unmarshal unless the payload
 	// could be one of the two anchor-bearing types.
@@ -97,8 +99,11 @@ func (r *room) observeSync(payload json.RawMessage) (anchorMsg, bool) {
 	if !r.haveClock {
 		r.clk = newRoomClock(roomAnchor{Index: 0, AtMicros: now, TempoBPM: r.tempoBPM, Config: r.cfg})
 		r.haveClock = true
+		log.Printf("[roomclock] room %s clock created: tempo=%.1f cfg=%dx%.0f", roomName, r.tempoBPM, r.cfg.Bars, r.cfg.Quantum)
 	} else {
+		oldTempo := r.clk.anchor().TempoBPM
 		r.clk.reanchor(now, r.tempoBPM, r.cfg)
+		log.Printf("[roomclock] room %s re-anchor: tempo %.1f→%.1f cfg=%dx%.0f", roomName, oldTempo, r.tempoBPM, r.cfg.Bars, r.cfg.Quantum)
 	}
 	return r.anchorMsgLocked(now), true
 }

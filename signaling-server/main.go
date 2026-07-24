@@ -314,10 +314,14 @@ type room struct {
 	haveClock bool
 	tempoBPM  float64
 	cfg       intervalConfig
+
+	// Label watchdog: heals peers whose room-label offset froze wrong
+	// (see labelwatch.go). Owns its mutex.
+	watch *labelWatchdog
 }
 
 func newRoom() *room {
-	r := &room{connMap: make(map[string]*conn)}
+	r := &room{connMap: make(map[string]*conn), watch: newLabelWatchdog()}
 	empty := make([]connEntry, 0)
 	r.conns.Store(&empty)
 	return r
@@ -547,6 +551,8 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 	})
 	// Give a late joiner the current room interval anchor so it aligns immediately.
 	if am, ok := r.currentAnchor(); ok {
+		log.Printf("[roomclock] room %s late-join anchor for %s (%s): idx=%d tempo=%.1f cfg=%dx%.0f",
+			roomName, peerID, c.displayName, am.CurrentIndex, am.BPM, am.Bars, am.Quantum)
 		c.sendJSON(am)
 	}
 	return roomName, peerID, streamCount
@@ -576,7 +582,7 @@ func (h *hub) broadcastSync(room, peerID string, c *conn, msg clientMsg) {
 	}
 	// The relay owns the room interval clock (ADR-0003): if this sync carried a
 	// tempo/config change, update the clock and broadcast the new anchor to all.
-	if am, ok := r.observeSync(msg.Payload); ok {
+	if am, ok := r.observeSync(room, msg.Payload); ok {
 		r.broadcastAnchor(am)
 	}
 	// Relay time service (ADR-0006): answer a broadcast Ping directly with a
@@ -610,6 +616,16 @@ func (h *hub) broadcastAudioBinary(room, peerID string, c *conn, data []byte, lo
 	if room == "" { return }
 	r := h.getRoom(room)
 	if r == nil { return }
+
+	// Label watchdog: peek the sender's interval label and heal frozen
+	// offsets (see labelwatch.go). Cheap: one header parse per frame.
+	if label, ok := waifIntervalIndex(data); ok {
+		if am, haveAnchor := r.currentAnchor(); haveAnchor {
+			r.watch.observe(room, peerID, label, am.CurrentIndex, time.Now(), func() {
+				c.sendJSON(am)
+			})
+		}
+	}
 
 	pidBytes := []byte(peerID)
 	frame := make([]byte, 1+len(pidBytes)+len(data))
@@ -656,6 +672,9 @@ func (h *hub) metricsReport(room, peerID string, c *conn, msg clientMsg) {
 func (h *hub) leave(room, peerID string, c *conn) {
 	if room == "" { return }
 	r := h.getRoom(room)
+	if r != nil {
+		r.watch.forget(peerID)
+	}
 	if r == nil {
 		c.room = ""
 		c.peerID = ""

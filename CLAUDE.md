@@ -59,6 +59,8 @@ signaling-server/         Go WebSocket relay server (deployed to fly.io)
 ├── main.go               Relay + room management (SQLite)
 ├── roomclock.go          Relay-authoritative room interval clock (ADR-0003)
 ├── interval_clock.go     interval_anchor broadcast
+├── labelwatch.go         Label watchdog: heals peers whose room-label offset froze
+│                         wrong (WAIF label vs room index → unicast fresh anchor)
 └── cmd/wail-metrics/     CLI metrics client
 
 plugins/                  Thin CLAP bridge plugins (C) for DAWs without Link Audio (ADR-0005)

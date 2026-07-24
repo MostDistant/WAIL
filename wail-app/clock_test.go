@@ -89,3 +89,20 @@ func TestServerPongRelayRTT(t *testing.T) {
 		t.Fatal("anomalous pong must not update the estimate")
 	}
 }
+
+func TestStaleServerPongRejected(t *testing.T) {
+	c := NewClockSync()
+	// A pong answering a ping "sent" 60s ago (sleep/stall buffering) must be
+	// rejected, not sampled — its RTT/2 would poison the grid offset.
+	if rtt := c.HandleServerPong(c.NowUs() - 60_000_000); rtt != 0 {
+		t.Fatalf("stale pong accepted: rtt = %d", rtt)
+	}
+	if _, ok := c.RelayRTTUs(); ok {
+		t.Fatal("stale pong must not populate the relay RTT estimate")
+	}
+	// A fresh pong is accepted normally.
+	ping := c.NowUs() - 50_000
+	if rtt := c.HandleServerPong(ping); rtt <= 0 {
+		t.Fatal("fresh pong rejected")
+	}
+}

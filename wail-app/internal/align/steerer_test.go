@@ -48,10 +48,13 @@ func newSteerer(timeAtBeat int64) (*Steerer, *fakeGrid, *[]emitted) {
 	return s, f, emits
 }
 
-// observe feeds the anchor and one server pong (entry fires if pending).
+// observe feeds the anchor and enough server pongs for Ready (entry fires
+// if pending). The aligner requires 3 offset samples (wild-RTT guard).
 func observe(s *Steerer, now time.Time) {
 	s.OnAnchor(8_000_000, 0, 120, 16, now)
-	s.OnServerPong(10_000_000, 16, now)
+	for i := 0; i < 3; i++ {
+		s.OnServerPong(10_000_000, 100_000, 16, now)
+	}
 }
 
 func lastTempo(f *fakeGrid) float64 {
@@ -78,7 +81,9 @@ func TestEntrySnapFiresWhenLate(t *testing.T) {
 	if len(f.snaps) != 0 {
 		t.Fatal("snap before any server time sample — aligner not Ready yet")
 	}
-	s.OnServerPong(10_000_000, 16, now)
+	for i := 0; i < 3; i++ {
+		s.OnServerPong(10_000_000, 100_000, 16, now)
+	}
 	if len(f.snaps) != 1 || f.snaps[0] != 100_000 {
 		t.Fatalf("snaps = %v, want [100000]", f.snaps)
 	}
@@ -109,7 +114,7 @@ func TestEntryRetriesWhenLinkUnready(t *testing.T) {
 	}
 	// Link recovers; the next relay pong retries the pending entry.
 	f.state.BPM = 120
-	s.OnServerPong(10_000_000, 16, now.Add(time.Second))
+	s.OnServerPong(10_000_000, 100_000, 16, now.Add(time.Second))
 	if len(f.snaps) != 1 {
 		t.Fatalf("pending entry did not retry: snaps = %v", f.snaps)
 	}
@@ -311,7 +316,7 @@ func TestRejoinRearmsEntry(t *testing.T) {
 	// Rejoin with a genuinely diverged grid: the fresh pong re-runs entry.
 	f.timeAtBeat = 14_100_000
 	s.OnRejoin()
-	s.OnServerPong(10_000_000, 16, now.Add(time.Second))
+	s.OnServerPong(10_000_000, 100_000, 16, now.Add(time.Second))
 	if len(f.snaps) != 1 {
 		t.Fatalf("rejoin entry did not fire: snaps = %v", f.snaps)
 	}
@@ -395,7 +400,9 @@ func readyTimelineSteerer(g *timelineGrid, alignRoomLabel func(int64, int64)) *S
 	s := NewSteerer(g, 120, nil, nil, alignRoomLabel)
 	now := time.Now()
 	s.OnAnchor(440_000_000, 54, 120, 16, now)
-	s.OnServerPong(g.nowUs+2_000_000, 16, now) // server = local + 2s
+	for i := 0; i < 3; i++ {
+		s.OnServerPong(g.nowUs+2_000_000, 100_000, 16, now) // server = local + 2s
+	}
 	return s
 }
 
