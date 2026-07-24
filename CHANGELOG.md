@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.12.0 (2026-07-24)
+
+### Features
+
+- active grid alignment with the room clock (ADR-0006) (#422)
+
 ## 3.11.0 (2026-07-24)
 
 ### Features
