@@ -190,6 +190,18 @@ func (r *Reassembler) Take(index int64) (samples []int16, received, total int, o
 	return r.sized(p), p.received, p.total, true
 }
 
+// MaxIndex returns the highest interval index currently buffered; ok is false
+// when nothing is buffered. Used by the emit loop to measure how far a
+// sender's room labels run ahead of local playout (anchor offset mismatch).
+func (r *Reassembler) MaxIndex() (max int64, ok bool) {
+	for idx := range r.partials {
+		if !ok || idx > max {
+			max, ok = idx, true
+		}
+	}
+	return max, ok
+}
+
 // Drop discards any partial for interval `index` and every earlier interval
 // (they can never be played once we've moved past them).
 func (r *Reassembler) Drop(upToInclusive int64) {

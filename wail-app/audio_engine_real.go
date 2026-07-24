@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -81,6 +82,12 @@ type linkAudioEngine struct {
 
 	wireDecodeFailures atomic.Uint64 // WAIF wire-decode errors (pre-Opus)
 	unlabeledWindows   atomic.Uint64 // capture windows dropped before a room anchor
+
+	// Latest room label of the current local interval, refreshed each emit-loop
+	// tick. HandleRemoteAudio diffs incoming frame labels against this to
+	// measure anchor offset disagreement with each sender in real time.
+	lastRoomLabel   atomic.Int64
+	lastRoomLabeled atomic.Bool
 
 	// Capture-dump debug toggle. dumpEnabled/dumpGen are read lock-free on the
 	// hot path; dumpDir (resolved fresh per enable) is read under mu only when a
@@ -251,6 +258,10 @@ type emitStream struct {
 	sinkUnderrunEvents  atomic.Uint64 // paced feed fell behind the playhead past the cushion
 	sinkUnderrunFrames  atomic.Uint64 // frames skipped (played as silence) due to underrun
 	framesMissedAtPlay  atomic.Uint64 // frames still absent when their interval retired
+	framesTooLate       atomic.Uint64 // frames dropped: sender labels already behind our playout (anchor mismatch)
+	labelGapBand        atomic.Int64  // last logged sender-label gap (edge-trigger)
+	labelGapLogNs       atomic.Int64  // rate limit for the label-gap warn
+	gapLogs             uint64        // buffered-ahead warn count (emit-loop-owned, rate limit)
 	framesConcealed     atomic.Uint64 // missing frames masked by Opus PLC
 	sinkWriteRejected   atomic.Uint64 // sink refused a chunk mid-stream (queue full / listener left)
 }
@@ -359,7 +370,17 @@ func (e *linkAudioEngine) SetRoomAnchor(currentIndex int64, bpm float64, bars ui
 	}
 	localBeat := ss.BeatAtTime(clockMicros, e.cfg.BeatsPerInterval())
 	localIdx := e.cfg.IndexAtBeat(localBeat)
+	prevOff, wasAligned := e.labeler.Offset(), e.labeler.Aligned()
 	e.labeler.Align(currentIndex, localIdx)
+	newOff := e.labeler.Offset()
+	switch {
+	case !wasAligned:
+		log.Printf("[audio] room anchor applied: index=%d (bpm %.1f, %d bars x %.0f beats) — label offset %+d at local idx %d",
+			currentIndex, e.tempoBPM, e.cfg.Bars, e.cfg.Quantum, newOff, localIdx)
+	case newOff != prevOff:
+		log.Printf("[audio] room anchor re-aligned: index=%d — label offset %+d → %+d at local idx %d (room labels shift %+d intervals)",
+			currentIndex, prevOff, newOff, localIdx, newOff-prevOff)
+	}
 }
 
 func (e *linkAudioEngine) RoomIndex(localIndex int64) (int64, bool) {
@@ -873,9 +894,27 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			st.framesConcealed.Add(1)
 		}
 	}
+	// Room-label gap: the frame's interval index is the sender's room label,
+	// ours is the emit loop's latest. Both tick in lockstep in a healthy room
+	// (gap ∈ {-1,0,+1}); a persistent larger gap is an anchor offset mismatch
+	// — this stream will sound gap intervals late (positive) or be dropped as
+	// too-late (very negative). Edge-triggered + rate-limited per stream.
+	if e.lastRoomLabeled.Load() {
+		if gap := f.IntervalIndex - e.lastRoomLabel.Load(); gap < -1 || gap > 1 {
+			nowNs := time.Now().UnixNano()
+			if st.labelGapBand.Load() != gap || nowNs-st.labelGapLogNs.Load() > int64(5*time.Second) {
+				st.labelGapBand.Store(gap)
+				st.labelGapLogNs.Store(nowNs)
+				log.Printf("[audio] WARN: %s stream %d labels run %+d intervals vs our room clock (frame interval %d, our label %d) — anchor offset mismatch; audio ≈%+d intervals off (negative beyond -%d: dropped as too-late)",
+					fromIdentity, f.StreamID, gap, f.IntervalIndex, e.lastRoomLabel.Load(), gap, st.sched.Offset()+1)
+			}
+		}
+	}
 	switch st.sched.OnFrame(f.IntervalIndex) {
 	case playout.TooLate:
-		// interval already finished playing; drop
+		// Interval already finished playing; drop. A nonzero rate here means
+		// the sender's labels run behind our playout (anchor offset mismatch).
+		st.framesTooLate.Add(1)
 	default:
 		// Buffer or LiveAppend: place the frame; the paced reader picks it up.
 		st.reasm.Add(f.IntervalIndex, int(f.FrameNumber), pcm, f.IsFinal, int(f.TotalFrames))
@@ -905,6 +944,7 @@ func (e *linkAudioEngine) Health() EngineHealth {
 		h.EmitSinkUnderrunFrames += st.sinkUnderrunFrames.Load()
 		h.EmitFramesMissingAtPlay += st.framesMissedAtPlay.Load()
 		h.EmitFramesConcealed += st.framesConcealed.Load()
+		h.EmitFramesTooLate += st.framesTooLate.Load()
 		h.EmitSinkWriteRejected += st.sinkWriteRejected.Load()
 		h.OpusDecodeFailures += st.decodeFailures.Load()
 	}
@@ -924,6 +964,8 @@ func (e *linkAudioEngine) emitLoop() {
 
 	var lastLocalIdx int64
 	haveLast := false
+	var lastBeat, lastBeatAt float64
+	haveLastBeat := false
 
 	for {
 		select {
@@ -941,6 +983,24 @@ func (e *linkAudioEngine) emitLoop() {
 			localIdx := cfg.IndexAtBeat(localBeat)
 			roomLabel, labeled := e.labeler.RoomIndex(localIdx)
 			e.mu.Unlock()
+
+			if labeled {
+				e.lastRoomLabel.Store(roomLabel)
+				e.lastRoomLabeled.Store(true)
+			}
+			// Local-grid jump detection: the beat should advance by exactly
+			// elapsed-wall × tempo between ticks. Anything else is a Link
+			// session merge/transport reset — which silently invalidates the
+			// labeler offset until the next anchor (the stable-multi-interval-
+			// delay failure mode seen in the field).
+			if haveLastBeat {
+				expected := (float64(clockMicros)/1e6 - lastBeatAt) * tempo / 60.0
+				if d := localBeat - lastBeat; math.Abs(d-expected) > 0.5 {
+					log.Printf("[audio] WARN: local Link beat jumped %+.2f beats (expected %+.2f from elapsed time) — room-label offset stale until the next anchor (≈%+d intervals of potential shift)",
+						d, expected, int64(math.Round(d/bpi)))
+				}
+			}
+			lastBeat, lastBeatAt, haveLastBeat = localBeat, float64(clockMicros)/1e6, true
 
 			if labeled && (!haveLast || localIdx > lastLocalIdx) {
 				e.onBoundary(cfg, tempo, localIdx, roomLabel)
@@ -990,6 +1050,20 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 				_, recv, total, _ := st.reasm.Interval(idx)
 				log.Printf("[audio] interval %d released with %d/%d frames for %v (tail in flight — expected with streaming send; %d total)",
 					idx, recv, total, st.key, n)
+			}
+		}
+
+		// Buffered-ahead gap: a healthy sender streams in real time, so at
+		// release the reassembler holds at most ~D intervals of future audio.
+		// More means the sender's labels run ahead of our playout — the same
+		// anchor mismatch as the label-gap warn, measured at release time.
+		if maxBuf, ok := st.reasm.MaxIndex(); ok {
+			if g := maxBuf - idx; g > st.sched.Offset()+2 {
+				st.gapLogs++
+				if st.gapLogs == 1 || st.gapLogs%50 == 0 {
+					log.Printf("[audio] WARN: %v buffered through room interval %d while releasing %d — sender labels %d intervals ahead of playout (anchor offset mismatch)",
+						st.key, maxBuf, idx, g-st.sched.Offset())
+				}
 			}
 		}
 
