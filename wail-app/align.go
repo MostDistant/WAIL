@@ -72,7 +72,12 @@ func roomAlignLocalIndex(aligner *interval.GridAligner, link LinkBridgeInterface
 	boundaryLocalUs := boundaryServerUs - offsetUs
 	// The local interval in progress ends at tEnd; each later local interval
 	// ends one period after that. Round the room boundary to the nearest
-	// local boundary and count intervals between them.
+	// local boundary and count intervals between them. Note the rounding
+	// divides a local-clock distance by the ROOM period: on a tempo-change
+	// anchor processed before local tempo adoption the two grids tick at
+	// slightly different periods. The error is ~tempo-ratio × |δ|/period and
+	// stays far below period/2 for any plausible tempo change (δ ≤ 25 ms
+	// post-conformance), so math.Round still lands on the right boundary.
 	curIdx := int64(math.Floor(st.Beat / bpi))
 	tEnd := link.TimeAtBeat(float64(curIdx+1) * bpi)
 	k := int64(math.Round(float64(boundaryLocalUs-tEnd) / float64(periodUs)))

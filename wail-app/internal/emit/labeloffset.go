@@ -34,7 +34,10 @@ type LabelOffsetTracker struct {
 // room index has rolled since the last frame, the previous interval's verdict
 // is finalized first; Add then reports (verdict, true) if the verdict changed.
 // verdict is the modal (frame label − room index) of the completed interval:
-// 0 = healthy, k = peer's labels are k intervals off.
+// 0 = healthy, k = peer's labels are k intervals off. Sign convention
+// (source of truth): positive = the peer's frames are labeled AHEAD of our
+// room index, so playout (release = label − D) holds them extra boundaries —
+// their audio plays k intervals LATE; negative = early.
 func (t *LabelOffsetTracker) Add(roomIdx, frameIdx int64) (int64, bool) {
 	changed := false
 	if !t.started || t.countIdx != roomIdx {
