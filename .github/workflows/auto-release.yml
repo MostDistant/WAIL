@@ -49,7 +49,11 @@ jobs:
           else
             RANGE="HEAD"
           fi
-          if git log --oneline "$RANGE" | grep -qE '^[0-9a-f]+ (feat|fix|feat!|fix!|refactor|perf)[(:!]'; then
+          # NOTE: keep this regex aligned with what knope actually bumps on
+          # (stock config: feat!/feat/fix!/fix only). refactor/perf used to be
+          # listed here, which skipped the fallback changeset and then failed
+          # knope prepare-release with "No packages are ready to release".
+          if git log --oneline "$RANGE" | grep -qE '^[0-9a-f]+ (feat|fix|feat!|fix!)[(:!]'; then
             HAS_CONVENTIONAL=true
           fi
 
