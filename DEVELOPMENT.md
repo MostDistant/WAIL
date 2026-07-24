@@ -153,9 +153,10 @@ Two modes (`TIER2_MODE`):
 
 Tunables: `TIER2_PORT`, `TIER2_BPM`, `TIER2_SWEEP_DUR`, `TIER2_PROBE_SECS`,
 `TIER2_ROOM`, `TIER2_MODE`, `TIER2_BPI`, `TIER2_D`. Note the room may not
-actually run at `TIER2_BPM` — the relay anchor can race the founder's seed at
-join, and entry conformance then adopts the anchor tempo; the step mode's
-placement check is exact for any room tempo.
+actually run at `TIER2_BPM`: WAIL joins the LAN's Link session, and if that
+session already has peers at a different tempo, Link convergence pulls WAIL to
+the *LAN* tempo (pillar 4: the local Link session is authoritative) and the room
+follows it. The step mode's placement check is exact for any room tempo.
 
 The instances point at the local relay via the `WAIL_SIGNAL_URL` env var (e.g.
 `WAIL_SIGNAL_URL=ws://localhost:8899`), which overrides the default production
