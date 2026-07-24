@@ -22,6 +22,12 @@ type AudioEngine interface {
 	// SetRoomAnchor applies a fresh relay interval_anchor: aligns the local→room
 	// interval labeler and adopts the room tempo/config.
 	SetRoomAnchor(currentIndex int64, bpm float64, bars uint32, quantum float64)
+	// AlignRoomLabel aligns the local→room labeler to an explicitly derived
+	// local index (ADR-0006 "known by construction": the session computed
+	// localIndex from the anchor's boundary time on an aligned grid). Exact
+	// regardless of when in the interval it runs, unlike SetRoomAnchor's
+	// sample align; overrides it whenever grid alignment is active.
+	AlignRoomLabel(roomIndex, localIndex int64)
 	// RoomIndex maps a local interval index to the shared room index via the
 	// labeler aligned by SetRoomAnchor; ok is false until an anchor has arrived.
 	// The session uses it for boundary logging and to tag in-app-sender frames,

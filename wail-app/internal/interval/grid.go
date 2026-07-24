@@ -115,6 +115,28 @@ func (g *GridAligner) OffsetUs() (int64, bool) {
 	return g.offsetUs, true
 }
 
+// AnchorBoundary returns the server-clock time of the boundary that ends the
+// anchor's CurrentIndex (valid once SetAnchor accepted an anchor). With the
+// OffsetUs mapping this pins the room grid in the local clock domain, so the
+// local→room index mapping is derivable by construction instead of by
+// sampling (ADR-0006: a sample align taken before a grid snap is off by one
+// whenever the snap moves the sampling instant across a boundary).
+func (g *GridAligner) AnchorBoundary() (int64, bool) {
+	if !g.haveAnchor {
+		return 0, false
+	}
+	return g.nextBoundaryServerUs, true
+}
+
+// PeriodUs returns the anchor's interval period in whole microseconds (valid
+// once SetAnchor accepted an anchor).
+func (g *GridAligner) PeriodUs() (int64, bool) {
+	if !g.haveAnchor {
+		return 0, false
+	}
+	return int64(math.Round(g.periodUs)), true
+}
+
 // Delta returns how LATE the local grid runs relative to the room grid, in
 // microseconds, wrapped to ±period/2: positive means local boundaries occur
 // after the corresponding room boundaries (the local grid must advance to

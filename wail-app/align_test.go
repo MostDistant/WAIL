@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -10,16 +11,28 @@ import (
 
 // fakeBridge is a minimal LinkBridgeInterface for alignment glue tests.
 type fakeBridge struct {
-	state       LinkState
-	timeAtBeat  int64
-	snapDeltaUs *int64
-	setTempos   []float64
+	state        LinkState
+	timeAtBeat   int64
+	snapDeltaUs  *int64
+	setTempos    []float64
+	stateFn      func() LinkState
+	timeAtBeatFn func(beat float64) int64
 }
 
-func (f *fakeBridge) Enable()                   {}
-func (f *fakeBridge) Disable()                  {}
-func (f *fakeBridge) State() LinkState          { return f.state }
-func (f *fakeBridge) TimeAtBeat(float64) int64  { return f.timeAtBeat }
+func (f *fakeBridge) Enable()  {}
+func (f *fakeBridge) Disable() {}
+func (f *fakeBridge) State() LinkState {
+	if f.stateFn != nil {
+		return f.stateFn()
+	}
+	return f.state
+}
+func (f *fakeBridge) TimeAtBeat(b float64) int64 {
+	if f.timeAtBeatFn != nil {
+		return f.timeAtBeatFn(b)
+	}
+	return f.timeAtBeat
+}
 func (f *fakeBridge) SetTempo(bpm float64)      { f.setTempos = append(f.setTempos, bpm) }
 func (f *fakeBridge) ForceBeat(float64, *int64) {}
 func (f *fakeBridge) Detector() *TempoChangeDetector {
@@ -102,6 +115,94 @@ func TestSlewGates(t *testing.T) {
 	// Everything old enough: allowed.
 	if !slewAllowed(now, now.Add(-10*time.Second), now.Add(-10*time.Second)) {
 		t.Fatal("settled snap + old tempo change should allow slew")
+	}
+}
+
+// timelineBridge returns a fakeBridge on a linear 120 BPM Link timeline:
+// beat 0 occurs at beat0Us; State is sampled at nowUs. Models the grid
+// shifts that SnapGrid produces so label-derivation tests can move the grid.
+func timelineBridge(beat0Us, nowUs int64) *fakeBridge {
+	const beatPeriodUs = 500_000.0 // 120 BPM
+	return &fakeBridge{
+		stateFn: func() LinkState {
+			return LinkState{
+				BPM:         120,
+				Beat:        float64(nowUs-beat0Us) / beatPeriodUs,
+				TimestampUs: nowUs,
+			}
+		},
+		timeAtBeatFn: func(b float64) int64 {
+			return beat0Us + int64(math.Round(b*beatPeriodUs))
+		},
+	}
+}
+
+// readyAligner120 returns a Ready aligner: 120 BPM, 16 BPI (8s period),
+// room boundary ending CurrentIndex at nextBoundaryServerUs, server clock
+// running 2s ahead of the local Link clock.
+func readyAligner120(nextBoundaryServerUs int64) *interval.GridAligner {
+	a := interval.NewGridAligner()
+	a.SetAnchor(nextBoundaryServerUs, 120, 16)
+	a.ObserveServerTime(nextBoundaryServerUs+2_000_000, nextBoundaryServerUs)
+	return a
+}
+
+func TestRoomAlignLocalIndexAlignedGrid(t *testing.T) {
+	// Room boundary ending interval 54 at server 440s ↔ local 438s (offset 2s).
+	// Aligned grid: local interval 1 (beats [16,32)) ends at local 438s.
+	aligner := readyAligner120(440_000_000)
+	const beat0 = 438_000_000 - 32*500_000 // beat 32 ↔ 438s
+	for _, now := range []int64{430_000_000, 437_900_000, 438_100_000} {
+		fb := timelineBridge(beat0, now)
+		idx, ok := roomAlignLocalIndex(aligner, fb, 16)
+		if !ok {
+			t.Fatalf("roomAlignLocalIndex not ok at now=%d", now)
+		}
+		if idx != 1 {
+			t.Fatalf("now=%d: local index ending at room boundary = %d, want 1", now, idx)
+		}
+	}
+}
+
+// The ADR-0006 hazard this fixes: the labeler was sample-aligned BEFORE the
+// entry snap, and the snap shifted the grid past a boundary, leaving the
+// offset off by one (labels one high → audio played one interval late).
+func TestRoomAlignLocalIndexFixesSnapHazard(t *testing.T) {
+	aligner := readyAligner120(440_000_000)
+	// Receipt at local 431s, early in room interval 54 (local [430,438)).
+	const now = 431_000_000
+	// Pre-snap grid runs 3.9s late: beat 32 ↔ 441.9s. Sampling the local index
+	// now (the old SetRoomAnchor path) reads interval 0 — but post-snap the
+	// interval ending at the room boundary is 1.
+	preSnap := timelineBridge(441_900_000-32*500_000, now)
+	if got := int64(math.Floor(preSnap.State().Beat / 16)); got != 0 {
+		t.Fatalf("pre-snap sample = %d, want 0 (the hazard setup)", got)
+	}
+	// SnapGrid(+3.9s): beats happen 3.9s earlier → beat 32 ↔ 438s.
+	postSnap := timelineBridge(438_000_000-32*500_000, now)
+	idx, ok := roomAlignLocalIndex(aligner, postSnap, 16)
+	if !ok {
+		t.Fatal("roomAlignLocalIndex not ok")
+	}
+	if idx != 1 {
+		t.Fatalf("post-snap by-construction index = %d, want 1 (pre-snap sample gave 0, off by one)", idx)
+	}
+}
+
+func TestRoomAlignLocalIndexNotReady(t *testing.T) {
+	fb := timelineBridge(422_000_000, 430_000_000)
+	if _, ok := roomAlignLocalIndex(interval.NewGridAligner(), fb, 16); ok {
+		t.Fatal("aligner without anchor/offset must not derive an index")
+	}
+	aligner := readyAligner120(440_000_000)
+	if _, ok := roomAlignLocalIndex(aligner, fb, 0); ok {
+		t.Fatal("zero BPI must not derive an index")
+	}
+	dead := timelineBridge(422_000_000, 430_000_000)
+	dead.state = LinkState{BPM: 0}
+	dead.stateFn = func() LinkState { return LinkState{BPM: 0} }
+	if _, ok := roomAlignLocalIndex(aligner, dead, 16); ok {
+		t.Fatal("unusable Link state (BPM 0) must not derive an index")
 	}
 }
 
