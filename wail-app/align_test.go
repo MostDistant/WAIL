@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -114,5 +115,66 @@ func TestAlignStateName(t *testing.T) {
 	}
 	if s := alignStateName(-100_000); s != "drifted" {
 		t.Fatalf("-100ms = %q, want drifted", s)
+	}
+}
+
+func TestSnapshotTempoAdopt(t *testing.T) {
+	// No anchor (old server / clockless room): pre-anchor behavior — adopt any
+	// differing tempo.
+	if !snapshotTempoAdopt(0, false, 110, 120) {
+		t.Fatal("no anchor: differing tempo should be adopted")
+	}
+	if snapshotTempoAdopt(0, false, 120, 120) {
+		t.Fatal("same tempo is always a no-op")
+	}
+	// With an anchor: only anchor-matching snapshots are adopted.
+	if !snapshotTempoAdopt(120, true, 120, 110) {
+		t.Fatal("anchor-matching snapshot should be adopted")
+	}
+	if snapshotTempoAdopt(120, true, 110, 120) {
+		t.Fatal("anchor-diverging snapshot must be ignored (oscillator)")
+	}
+}
+
+// Two-peer snapshot oscillator (field report: 110↔120 flap every ~200ms with
+// no DAWs involved). With naive adoption, crossing snapshots invert the pair
+// every period forever; anchor-gated adoption converges on the room tempo.
+func TestSnapshotAdoptionOscillator(t *testing.T) {
+	// One exchange of crossing snapshots: each side may adopt the other's
+	// tempo as of before the exchange.
+	step := func(a, b float64, adopt func(msg, local float64) bool) (float64, float64) {
+		na, nb := a, b
+		if adopt(b, a) {
+			na = b
+		}
+		if adopt(a, b) {
+			nb = a
+		}
+		return na, nb
+	}
+
+	naive := func(msg, local float64) bool { return math.Abs(msg-local) > tempoChangeThreshold }
+	a, b := 120.0, 110.0
+	a, b = step(a, b, naive)
+	if a != 110 || b != 120 {
+		t.Fatalf("naive step 1: a=%v b=%v, want inverted 110/120", a, b)
+	}
+	a, b = step(a, b, naive)
+	if a != 120 || b != 110 {
+		t.Fatalf("naive step 2: a=%v b=%v, want re-inverted 120/110 (oscillation)", a, b)
+	}
+
+	gated := func(msg, local float64) bool { return snapshotTempoAdopt(120, true, msg, local) }
+	a, b = 120.0, 110.0
+	a, b = step(a, b, gated)
+	if a != 120 || b != 120 {
+		t.Fatalf("gated: a=%v b=%v, want both converged to anchor 120", a, b)
+	}
+	// And stable once converged (B's stale 110 snapshots keep being ignored).
+	a, b = step(a, b, func(msg, local float64) bool {
+		return snapshotTempoAdopt(120, true, msg, local)
+	})
+	if a != 120 || b != 120 {
+		t.Fatalf("gated steady state drifted: a=%v b=%v", a, b)
 	}
 }

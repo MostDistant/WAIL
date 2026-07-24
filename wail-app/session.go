@@ -829,8 +829,13 @@ func sessionLoop(
 				// Passive peer (ADR-0003): adopt tempo but never ForceBeat the local
 				// transport. Within-bar alignment comes from the local LAN's Link
 				// phase; the room interval index comes from the relay anchor.
-				if math.Abs(msg.BPM-lastBroadcastBPM) > 0.01 {
+				// ADR-0006: anchor-gated adoption — with a room anchor, snapshots
+				// diverging from the room tempo are stale and ignored (two-peer
+				// adoption oscillator: A drags B while B drags A every 200ms).
+				roomBPM, hasAnchor := aligner.RoomBPM()
+				if snapshotTempoAdopt(roomBPM, hasAnchor, msg.BPM, lastBroadcastBPM) {
 					lastBroadcastBPM = msg.BPM
+					alignLastTempoAt = time.Now() // slew gate parity with TempoChange
 					linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
 				}
 
