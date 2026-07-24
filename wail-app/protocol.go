@@ -54,6 +54,12 @@ type SyncMessage struct {
 	PluginConnected   bool   `json:"plugin_connected,omitempty"`
 	Seq               uint64 `json:"seq,omitempty"`
 
+	// Server timestamps (ADR-0006 grid alignment): server_now_micros rides
+	// the relay's Pong (relay time service) and the interval_anchor;
+	// next_boundary_micros rides the anchor.
+	ServerNowMicros    int64 `json:"server_now_micros,omitempty"`
+	NextBoundaryMicros int64 `json:"next_boundary_micros,omitempty"`
+
 	// ChatMessage
 	SenderName string `json:"sender_name,omitempty"`
 	Text       string `json:"text,omitempty"`
@@ -175,11 +181,14 @@ type ServerMsg struct {
 	To               string                     `json:"to,omitempty"`
 	PerPeer          map[string]PeerFrameReport `json:"per_peer,omitempty"`
 
-	// interval_anchor (relay-authoritative room interval clock, ADR-0003)
-	CurrentIndex int64   `json:"current_index,omitempty"`
-	BPM          float64 `json:"bpm,omitempty"`
-	Bars         uint32  `json:"bars,omitempty"`
-	Quantum      float64 `json:"quantum,omitempty"`
+	// interval_anchor (relay-authoritative room interval clock, ADR-0003;
+	// server timestamps feed grid alignment, ADR-0006)
+	CurrentIndex       int64   `json:"current_index,omitempty"`
+	BPM                float64 `json:"bpm,omitempty"`
+	Bars               uint32  `json:"bars,omitempty"`
+	Quantum            float64 `json:"quantum,omitempty"`
+	ServerNowMicros    int64   `json:"server_now_micros,omitempty"`
+	NextBoundaryMicros int64   `json:"next_boundary_micros,omitempty"`
 }
 
 // MeshEvent represents events from the peer mesh.

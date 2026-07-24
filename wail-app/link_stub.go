@@ -109,6 +109,23 @@ func (lb *LinkBridge) Detector() *TempoChangeDetector {
 	return lb.detector
 }
 
+// SnapGrid shifts the stub grid earlier by deltaUs (beat equivalent at the
+// current tempo), mirroring the real bridge's entry-conformance snap.
+func (lb *LinkBridge) SnapGrid(deltaUs int64) {
+	lb.mu.Lock()
+	lb.beat += float64(deltaUs) / 1e6 * lb.bpm / 60.0
+	lb.mu.Unlock()
+	lb.detector.ArmEchoGuard(time.Now().Add(echoGuardDuration))
+	log.Printf("[link-stub] grid snap: shifted %+.1f ms", float64(deltaUs)/1000)
+}
+
+// TimeAtBeat converts a beat to the stub's clock domain (µs since startTime).
+func (lb *LinkBridge) TimeAtBeat(beat float64) int64 {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return int64((beat - lb.beat) * 60.0 / lb.bpm * 1e6)
+}
+
 func (lb *LinkBridge) SpawnPoller(ctx context.Context) (chan<- LinkCommand, <-chan LinkEvent) {
 	return SpawnLinkPoller(ctx, lb)
 }

@@ -62,6 +62,8 @@ The first peer in a room sets its BPI; everyone who joins adopts it. Anyone can 
 
 The session header shows a small **interval clock** — a pie that starts full at each interval boundary and sweeps clockwise as the interval counts down, so you can see at a glance when the next one flips.
 
+Next to it, a **grid alignment badge** shows how closely your local interval grid matches the room's (ADR-0006). When you join, WAIL aligns your Link session to the room grid — a one-time snap if you're materially off, invisible if nothing is playing — and then gently keeps it there (a badge reading `grid ✓` means you're within ~10 ms; `aligning` means WAIL is nudging; `drifted` means the error is past the audible threshold and being corrected). This is what keeps every peer's interval *content* landing on the same downbeats, not just the interval numbering.
+
 ## Headless CLI Mode
 
 WAIL can run without the GUI for scripted or automated use. The `-headless` flag starts the app in CLI mode, and `-wav` streams a WAV file to peers in the room, looping continuously until stopped.

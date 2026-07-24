@@ -261,6 +261,7 @@ func ConnectSignaling(
 				case syncCh <- FromPeerSync{From: "", Msg: SyncMessage{
 					Type: "IntervalAnchor", Index: msg.CurrentIndex,
 					BPM: msg.BPM, Bars: msg.Bars, Quantum: msg.Quantum,
+					ServerNowMicros: msg.ServerNowMicros, NextBoundaryMicros: msg.NextBoundaryMicros,
 				}}:
 				default:
 				}

@@ -68,3 +68,24 @@ func TestMakePingIncrements(t *testing.T) {
 		t.Fatal("ping IDs should increment")
 	}
 }
+
+func TestServerPongRelayRTT(t *testing.T) {
+	cs := NewClockSync()
+	if _, ok := cs.RelayRTTUs(); ok {
+		t.Fatal("relay RTT must be unknown before any server pong")
+	}
+	sent := cs.NowUs()
+	rtt := cs.HandleServerPong(sent)
+	if rtt < 0 {
+		t.Fatal("negative RTT")
+	}
+	if _, ok := cs.RelayRTTUs(); !ok {
+		t.Fatal("relay RTT must be known after a server pong")
+	}
+	// Clock anomaly: a pong for a ping "from the future" is ignored.
+	before := cs.relayRTTUs
+	cs.HandleServerPong(cs.NowUs() + 1_000_000)
+	if cs.relayRTTUs != before {
+		t.Fatal("anomalous pong must not update the estimate")
+	}
+}

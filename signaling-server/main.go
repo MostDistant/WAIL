@@ -579,6 +579,15 @@ func (h *hub) broadcastSync(room, peerID string, c *conn, msg clientMsg) {
 	if am, ok := r.observeSync(msg.Payload); ok {
 		r.broadcastAnchor(am)
 	}
+	// Relay time service (ADR-0006): answer a broadcast Ping directly with a
+	// server-stamped Pong so the sender can estimate relay RTT and the
+	// server↔local clock offset for grid alignment. Peer pongs are unaffected.
+	if pong, ok := serverPongPayload(msg.Payload); ok {
+		envelope, err := json.Marshal(map[string]any{"type": "sync", "from": "", "payload": json.RawMessage(pong)})
+		if err == nil {
+			c.sendWS(wsMessage{websocket.TextMessage, envelope})
+		}
+	}
 }
 
 func (h *hub) syncTo(room, peerID string, c *conn, msg clientMsg) {

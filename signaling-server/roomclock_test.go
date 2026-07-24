@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestRoomClockIndexAndBoundary(t *testing.T) {
 	rc := newRoomClock(roomAnchor{Index: 100, AtMicros: 0, TempoBPM: 120, Config: intervalConfig{Bars: 4, Quantum: 4}})
@@ -138,5 +141,51 @@ func TestObserveSyncMaintainsClock(t *testing.T) {
 	// Late joiner can read the current anchor.
 	if _, ok := r.currentAnchor(); !ok {
 		t.Fatal("currentAnchor should exist after a tempo change")
+	}
+}
+
+func TestAnchorCarriesNextBoundary(t *testing.T) {
+	r := newRoom()
+	r.observeSync(json.RawMessage(`{"type":"TempoChange","bpm":120,"quantum":4}`))
+	am, ok := r.currentAnchor()
+	if !ok {
+		t.Fatal("no anchor after TempoChange")
+	}
+	// 16 beats at 120 BPM = 8s period: next boundary must be exactly one
+	// period past the current interval's start, and in the future.
+	idx := r.clk.indexAt(am.ServerNowMicros)
+	if am.CurrentIndex != idx {
+		t.Fatalf("CurrentIndex = %d, want %d", am.CurrentIndex, idx)
+	}
+	want := r.clk.boundaryMicros(idx + 1)
+	if am.NextBoundaryMicros != want {
+		t.Fatalf("NextBoundaryMicros = %d, want %d", am.NextBoundaryMicros, want)
+	}
+	if am.NextBoundaryMicros <= am.ServerNowMicros {
+		t.Fatalf("next boundary %d not in the future of server_now %d", am.NextBoundaryMicros, am.ServerNowMicros)
+	}
+}
+
+func TestServerPongPayload(t *testing.T) {
+	pong, ok := serverPongPayload(json.RawMessage(`{"type":"Ping","id":7,"sent_at_us":123456}`))
+	if !ok {
+		t.Fatal("Ping payload should get a Pong")
+	}
+	var m map[string]any
+	if err := json.Unmarshal(pong, &m); err != nil {
+		t.Fatalf("pong unmarshal: %v", err)
+	}
+	if m["type"] != "Pong" || m["id"].(float64) != 7 || m["ping_sent_at_us"].(float64) != 123456 {
+		t.Fatalf("bad pong fields: %v", m)
+	}
+	if m["server_now_micros"].(float64) <= 0 {
+		t.Fatalf("missing server_now_micros: %v", m)
+	}
+	// Non-Ping payloads get no direct reply.
+	if _, ok := serverPongPayload(json.RawMessage(`{"type":"StateSnapshot","bpm":120}`)); ok {
+		t.Fatal("StateSnapshot should not get a Pong")
+	}
+	if _, ok := serverPongPayload(json.RawMessage(`{"type":"Ping"}`)); !ok {
+		t.Fatal("Ping with zero id/sent_at is still a Ping")
 	}
 }

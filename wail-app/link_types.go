@@ -169,4 +169,11 @@ type LinkBridgeInterface interface {
 	State() LinkState
 	Detector() *TempoChangeDetector
 	SpawnPoller(ctx context.Context) (chan<- LinkCommand, <-chan LinkEvent)
+	// SnapGrid shifts the local interval grid earlier by deltaUs (positive =
+	// local grid runs late vs the room grid). ADR-0006 entry conformance;
+	// confined to join/rejoin, never steady state.
+	SnapGrid(deltaUs int64)
+	// TimeAtBeat returns the Link-clock time at which the given
+	// interval-quantum phase-encoded beat occurs (grid boundary math).
+	TimeAtBeat(beat float64) int64
 }
