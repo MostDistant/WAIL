@@ -66,6 +66,25 @@ func slewAllowed(now, lastSnapAt, lastTempoAt time.Time) bool {
 	return true
 }
 
+// snapshotTempoAdopt decides whether a StateSnapshot's tempo may be applied
+// locally. With a room anchor, the anchor's tempo is authoritative: snapshots
+// disagreeing with it are stale (e.g. from a not-yet-conformed joiner), and
+// adopting them feeds the two-peer adoption oscillator — A adopts B's tempo
+// while B adopts A's, inverting the pair every 200ms snapshot period forever
+// (the 110↔120 field report). Genuine changes travel the TempoChange path
+// (event-driven, re-anchors the room), so gating snapshots costs nothing.
+// Without an anchor (old server, or a room with no clock yet), keep the
+// pre-anchor convergence behavior.
+func snapshotTempoAdopt(roomBPM float64, hasAnchor bool, msgBPM, localBPM float64) bool {
+	if math.Abs(msgBPM-localBPM) <= tempoChangeThreshold {
+		return false
+	}
+	if !hasAnchor {
+		return true
+	}
+	return math.Abs(msgBPM-roomBPM) <= tempoChangeThreshold
+}
+
 // alignStateName buckets δ for the UI: aligned inside the deadband, aligning
 // while the slew is working, drifted past the perceptual threshold.
 func alignStateName(deltaUs int64) string {

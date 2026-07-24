@@ -166,6 +166,8 @@ On the receiver side, `internal/emit.Reassembler` collects decoded WAIF frames p
 9. Remote DAWs see tempo change via Link
 ```
 
+Periodic `StateSnapshot` messages (every 200ms) are a backstop for peers that missed a `TempoChange` — but their tempo adoption is **anchor-gated** (ADR-0006): with a room anchor, snapshots diverging from the room tempo are ignored, because unconditional adoption of crossing snapshots is a 2-cycle oscillator (A adopts B's tempo while B adopts A's, inverting the pair every period — the 110↔120 flap seen in the field). Genuine changes always travel the event-driven `TempoChange` path above, which re-anchors the room, so snapshots re-agree afterward.
+
 ## Connection Establishment
 
 ```
