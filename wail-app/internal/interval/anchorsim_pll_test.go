@@ -1,7 +1,12 @@
 package interval
 
 // PLL-labeler simulation: the proposed redesign on top of the two-independent-
-// Link harness (anchorsim_test.go). Steady state keeps today's baked offset —
+// Link harness (anchorsim_test.go).
+//
+// STATUS: superseded as the primary direction by ADR-0006 (active grid
+// alignment) — retained in the tree as the pre-validated fallback design and
+// as regression cover for the label-only fallback path (pre-anchor, headless,
+// old servers). Steady state keeps today's baked offset —
 // labels advance as localIdx + off, integer-exact and jitter-free — while a
 // server-time evaluation of the relay clock acts as a correction signal that
 // only re-locks the offset after N CONSECUTIVE disagreeing boundaries

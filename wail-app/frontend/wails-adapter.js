@@ -48,6 +48,7 @@
         'set_metronome': 'main.App.SetMetronome',
         'set_metronome_broadcast': 'main.App.SetMetronomeBroadcast',
         'set_cushion_ms': 'main.App.SetCushionMs',
+        'set_grid_align': 'main.App.SetGridAlign',
         'rename_stream': 'main.App.RenameStream',
         'get_app_version': 'main.App.GetAppVersion',
     };
@@ -73,6 +74,7 @@
         'set_metronome': ['enabled'],
         'set_metronome_broadcast': ['enabled'],
         'set_cushion_ms': ['ms'],
+        'set_grid_align': ['enabled'],
     };
 
     async function invoke(command, args) {
