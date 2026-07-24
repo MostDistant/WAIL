@@ -47,6 +47,10 @@ type AudioEngine interface {
 	// SetCushionMs live-adjusts the emit feed-ahead depth (ms) for all streams
 	// and the metronome; returns the effective clamped value.
 	SetCushionMs(ms int) int
+	// LabelOffsetFor returns the worst interval-label verdict across one
+	// identity's streams (ADR-0006 follow-up): 0 = the peer's labels agree
+	// with our room index, k = their audio silently plays k intervals off.
+	LabelOffsetFor(identity string) (int64, bool)
 	// Health snapshots the engine's cumulative diagnostic counters. Each
 	// increment marks an event that risks an audible artifact; the session
 	// diffs snapshots to surface them in the log panel and Network tab.

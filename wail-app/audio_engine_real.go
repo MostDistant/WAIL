@@ -131,6 +131,11 @@ type linkAudioEngine struct {
 	// mirrors (metronome != nil) so the emit loop skips it lock-free when off.
 	metronome   *metronomeStream
 	metronomeOn atomic.Bool
+
+	// curRoomIdx is the room index of the local interval currently in progress
+	// (emit loop publishes, HandleRemoteAudio reads) for label-offset
+	// confirmation. math.MinInt64 until the labeler is aligned.
+	curRoomIdx atomic.Int64
 }
 
 // Cushion clamp bounds (see emitCushionMs): 100 is the floor — below it the
@@ -250,6 +255,11 @@ type emitStream struct {
 	expectSeq uint32
 	lastPos   emit.FramePos
 
+	// labelTrack confirms this stream's interval labels agree with our room
+	// index (ADR-0006 follow-up): a persistent nonzero verdict means the
+	// peer's audio plays that many intervals late/early, silently.
+	labelTrack emit.LabelOffsetTracker
+
 	// Observability (ADR-0003 / pillar 8). Atomic so Health() on another
 	// goroutine reads them race-free: decodeFailures/framesConcealed are bumped
 	// on the session goroutine, the rest on the emit-loop goroutine.
@@ -280,7 +290,7 @@ type metronomeStream struct {
 }
 
 func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), offsetD int) AudioEngine {
-	return &linkAudioEngine{
+	e := &linkAudioEngine{
 		lb:       lb,
 		link:     lb.Link(),
 		peerName: peerName,
@@ -295,6 +305,8 @@ func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), off
 
 		cushionFrames: engineCushionFrames(),
 	}
+	e.curRoomIdx.Store(math.MinInt64) // unlabeled until the first room anchor
+	return e
 }
 
 func (e *linkAudioEngine) Start() error {
@@ -387,6 +399,26 @@ func (e *linkAudioEngine) RoomIndex(localIndex int64) (int64, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.labeler.RoomIndex(localIndex)
+}
+
+// LabelOffsetFor returns the worst (largest-|delta|) interval-label verdict
+// across one identity's streams: 0 = labels agree with our room index, k = the
+// peer's audio silently plays k intervals off (negative = late). ok is false
+// when no stream has finalized a verdict yet (too little data, or unaligned).
+func (e *linkAudioEngine) LabelOffsetFor(identity string) (int64, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var worst int64
+	found := false
+	for key, st := range e.emit {
+		if key.Identity != identity {
+			continue
+		}
+		if v, ok := st.labelTrack.Verdict(); ok && (!found || abs64(v) > abs64(worst)) {
+			worst, found = v, true
+		}
+	}
+	return worst, found
 }
 
 func (e *linkAudioEngine) CaptureChannels() []CaptureChannelInfo {
@@ -833,6 +865,17 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		st.lastDisplayName = displayName
 		st.lastStreamName = streamName
 	}
+	// Label-offset confirmation (ADR-0006 follow-up): bucket this frame's
+	// label against our current room index; a verdict change means the peer's
+	// labeling shifted — warn when it's nonzero (their audio silently plays
+	// that many intervals late/early).
+	if roomIdx := e.curRoomIdx.Load(); roomIdx != math.MinInt64 {
+		if verdict, changed := st.labelTrack.Add(roomIdx, f.IntervalIndex); changed && verdict != 0 {
+			log.Printf("[audio] warn: %s stream %d labels intervals off by %+d — their audio plays %d interval(s) late",
+				fromIdentity, f.StreamID, verdict, -verdict)
+		}
+	}
+
 	dec := st.dec // st.dec is only touched on this (session) goroutine
 	cur := emit.FramePos{Interval: f.IntervalIndex, Frame: int(f.FrameNumber)}
 
@@ -982,6 +1025,9 @@ func (e *linkAudioEngine) emitLoop() {
 			localBeat := ss.BeatAtTime(clockMicros, bpi)
 			localIdx := cfg.IndexAtBeat(localBeat)
 			roomLabel, labeled := e.labeler.RoomIndex(localIdx)
+			if labeled {
+				e.curRoomIdx.Store(roomLabel)
+			}
 			e.mu.Unlock()
 
 			if labeled {

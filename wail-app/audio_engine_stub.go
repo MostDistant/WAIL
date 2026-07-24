@@ -22,4 +22,5 @@ func (s *stubAudioEngine) SetCaptureRestore(_ []CaptureChannelKey)              
 func (s *stubAudioEngine) SetCaptureDump(_ bool)                                 {}
 func (s *stubAudioEngine) SetMetronome(_ bool)                                   {}
 func (s *stubAudioEngine) SetCushionMs(ms int) int                               { return ms }
+func (s *stubAudioEngine) LabelOffsetFor(identity string) (int64, bool)          { return 0, false }
 func (s *stubAudioEngine) Health() EngineHealth                                  { return EngineHealth{} }

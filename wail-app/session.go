@@ -46,7 +46,7 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetMetronome", "SetMetronomeBroadcast", "SetCushionMs", "SetInterval", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetMetronome", "SetMetronomeBroadcast", "SetCushionMs", "SetInterval", "SetGridAlign", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
@@ -195,6 +195,57 @@ func sessionLoop(
 	lastBroadcastBPM := bpm
 	localStreamNames := make(map[uint16]string)
 
+	// Grid alignment (ADR-0006): entry conformance (measure-then-snap on
+	// join/rejoin) plus a gated steady-state grid slew, both against the
+	// relay's room clock. Entry conformance re-arms on every (re)join and runs
+	// once the anchor and the first relay time sample are both in.
+	aligner := interval.NewGridAligner()
+	alignEnabled := true
+	alignEntryPending := true
+	var alignLastSnapAt, alignLastTempoAt time.Time
+	var alignLastSlewTarget float64 // 0 = sitting at exact room tempo
+	alignLastState := ""
+	emitAlign := func(deltaUs int64) {
+		state := alignStateName(deltaUs)
+		if state == alignLastState {
+			return
+		}
+		alignLastState = state
+		emitter.Emit("align:state", AlignStateEvent{State: state, ErrorMs: float64(deltaUs) / 1000})
+	}
+	tryEntryConformance := func() {
+		if !alignEnabled || !alignEntryPending || !aligner.Ready() {
+			return
+		}
+		// Adopt the room's authoritative tempo first — the snap assumes the
+		// grids tick at the same rate. Idempotent, so safe across retries.
+		if roomBPM, ok := aligner.RoomBPM(); ok {
+			if st := link.State(); math.Abs(st.BPM-roomBPM) > tempoChangeThreshold {
+				link.SetTempo(roomBPM)
+				alignLastTempoAt = time.Now()
+				lastBroadcastBPM = roomBPM
+				logInfo("[align] entry: adopted room tempo %.1f BPM", roomBPM)
+			}
+		}
+		delta, ok := measureDelta(aligner, link, intervalCfg.BeatsPerInterval())
+		if !ok {
+			// Transient (e.g. Link still coming up): stay pending so the next
+			// anchor or relay pong retries. Entry conformance is mandated on
+			// every (re)join (ADR-0006) — never skip it silently.
+			logInfo("[align] entry: δ measurement unavailable (Link not ready?) — will retry")
+			return
+		}
+		alignEntryPending = false
+		if snapNeeded(delta) {
+			link.SnapGrid(delta)
+			alignLastSnapAt = time.Now()
+			logInfo("[align] entry: snapped grid %+.1f ms onto the room grid", float64(delta)/1000)
+		} else {
+			logInfo("[align] entry: grid already aligned (δ=%+.1f ms)", float64(delta)/1000)
+		}
+		emitAlign(delta)
+	}
+
 	// Receivers label our republished channels with these names (StreamNames
 	// sync): enabled capture channels default to their discovered channel name,
 	// overridden by user-set names. Recomputed on the status tick (discovery
@@ -282,6 +333,8 @@ func sessionLoop(
 	defer statusTicker.Stop()
 	livenessTicker := time.NewTicker(5 * time.Second)
 	defer livenessTicker.Stop()
+	alignTicker := time.NewTicker(1 * time.Second)
+	defer alignTicker.Stop()
 
 	var lastBoundaryTime *time.Time
 
@@ -520,6 +573,24 @@ func sessionLoop(
 			case "SetCushionMs":
 				eff := audioEngine.SetCushionMs(cmd.Value)
 				logInfo("[audio] emit cushion set to %dms", eff)
+			case "SetGridAlign":
+				// ADR-0006 toggle. Disabling stops all steering (restoring the
+				// exact room tempo if mid-slew); enabling re-arms entry
+				// conformance so the grid re-measures and snaps if needed.
+				alignEnabled = cmd.Enabled
+				if !cmd.Enabled {
+					if alignLastSlewTarget != 0 {
+						linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: lastBroadcastBPM}
+						alignLastSlewTarget = 0
+					}
+					alignLastState = ""
+					emitter.Emit("align:state", AlignStateEvent{State: "off"})
+					logInfo("[align] grid alignment disabled")
+				} else {
+					alignEntryPending = true
+					tryEntryConformance()
+					logInfo("[align] grid alignment enabled")
+				}
 			case "Disconnect":
 				logInfo("Disconnecting...")
 				goto cleanup
@@ -636,6 +707,10 @@ func sessionLoop(
 				}()
 
 				reconnect = nil
+				// ADR-0006: rejoin is an entry — re-arm conformance. The fresh
+				// anchor + relay pongs re-measure δ; a mid-blip rejoin finds δ≈0
+				// and no-ops, a genuinely diverged grid snaps back onto the room.
+				alignEntryPending = true
 				logInfo("Signaling reconnected (attempt %d)", attempt)
 				emitter.Emit("session:reconnected", nil)
 			}
@@ -696,7 +771,20 @@ func sessionLoop(
 				mesh.SendTo(from, pong)
 
 			case "Pong":
-				clock.HandlePong(from, msg.PingSentAtUs, msg.PongSentAtUs)
+				if from == "" {
+					// Relay time service (ADR-0006): the relay's own pong feeds the
+					// relay RTT estimate and the aligner's server↔local offset
+					// (sampled against the Link clock, the domain δ is computed in).
+					if msg.ServerNowMicros != 0 {
+						if rtt := clock.HandleServerPong(msg.PingSentAtUs); rtt > 0 {
+							st := link.State()
+							aligner.ObserveServerTime(msg.ServerNowMicros+rtt/2, st.TimestampUs)
+						}
+						tryEntryConformance()
+					}
+				} else {
+					clock.HandlePong(from, msg.PingSentAtUs, msg.PongSentAtUs)
+				}
 
 			case "IntervalAnchor":
 				// Relay-authoritative room interval clock (ADR-0003): align the
@@ -710,6 +798,10 @@ func sessionLoop(
 					intervalCfg = interval.Config{Bars: msg.Bars, Quantum: msg.Quantum}
 				}
 				link.SetIntervalQuantum(intervalCfg.BeatsPerInterval())
+				// ADR-0006: feed the room grid + server time to the aligner and
+				// run entry conformance (join/rejoin only; measure-then-snap).
+				aligner.SetAnchor(msg.NextBoundaryMicros, msg.BPM, intervalCfg.BeatsPerInterval())
+				tryEntryConformance()
 				// ADR-0004: the room interval is communicated, never enforced —
 				// prompt joiners (once) to match their DAW's launch quantization.
 				if !foundedRoom && !intervalPromptSent && msg.Bars > 0 {
@@ -729,6 +821,7 @@ func sessionLoop(
 				}
 				logInfo("Tempo change from %s: %.1f BPM", name, msg.BPM)
 				lastBroadcastBPM = msg.BPM
+				alignLastTempoAt = time.Now() // slew gate: never fight tempo changes
 				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
 				emitter.Emit("tempo:changed", TempoChangedEvent{BPM: msg.BPM, Source: "remote"})
 
@@ -881,6 +974,7 @@ func sessionLoop(
 					// preference — the relay treats TempoChange.quantum as
 					// authoritative, so a mismatched joiner would reanchor (flap) it.
 					mesh.Broadcast(NewTempoChange(ev.BPM, intervalCfg.Quantum, ev.TimestampUs))
+					alignLastTempoAt = time.Now() // slew gate: the user owns the knob
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
 				handleBoundary(ev.Beat)
@@ -889,6 +983,40 @@ func sessionLoop(
 				mesh.Broadcast(NewStateSnapshot(ev.BPM, ev.Beat, ev.Phase, ev.Quantum, ev.TimestampUs))
 				handleBoundary(ev.Beat)
 			}
+
+		// --- Grid slew (ADR-0006): close steady-state drift against the room
+		// grid with bounded tempo nudges. Gated against entry settling and user
+		// tempo interaction; never fires while entry conformance is pending.
+		case <-alignTicker.C:
+			if !alignEnabled || !aligner.Ready() || alignEntryPending {
+				continue
+			}
+			if !slewAllowed(time.Now(), alignLastSnapAt, alignLastTempoAt) {
+				continue
+			}
+			delta, ok := measureDelta(aligner, link, intervalCfg.BeatsPerInterval())
+			if !ok {
+				continue
+			}
+			// The slew chases the anchor's authoritative room tempo (ADR-0006:
+			// "nudge the room tempo… then restore"), not our last broadcast —
+			// they can differ by the tempo-adoption threshold.
+			roomBPM, ok := aligner.RoomBPM()
+			if !ok || roomBPM <= 0 {
+				continue
+			}
+			periodUs := int64(intervalCfg.BeatsPerInterval() * 60.0 / roomBPM * 1e6)
+			target, active := interval.SlewTempo(roomBPM, delta, periodUs)
+			if active && target != alignLastSlewTarget {
+				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: target}
+				alignLastSlewTarget = target
+				logInfo("[align] slew: δ=%+.1f ms → tempo %.4f BPM", float64(delta)/1000, target)
+			} else if !active && alignLastSlewTarget != 0 {
+				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: roomBPM}
+				alignLastSlewTarget = 0
+				logInfo("[align] slew settled (δ=%+.1f ms), restored %.1f BPM", float64(delta)/1000, roomBPM)
+			}
+			emitAlign(delta)
 
 		// --- Ping timer ---
 		case <-pingTicker.C:
@@ -963,9 +1091,20 @@ func sessionLoop(
 					v := uint32(s + 1)
 					slot = &v
 				}
+				// Interval-label confirmation (ADR-0006 follow-up): nonzero means
+				// this peer's audio silently plays that many intervals off.
+				var labelOffset *int64
+				peers.WithPeer(p, func(ps *PeerState) {
+					if ps.Identity != nil {
+						if v, ok := audioEngine.LabelOffsetFor(*ps.Identity); ok {
+							labelOffset = &v
+						}
+					}
+				})
 				peerInfos = append(peerInfos, PeerInfo{
 					PeerID: p, DisplayName: dn, RTTMs: rttMs, Slot: slot,
 					Status: status, IsSending: isSend, IsReceiving: isRecv,
+					LabelOffset: labelOffset,
 				})
 			}
 
@@ -1044,6 +1183,23 @@ func sessionLoop(
 			// don't raise commands; refresh the advertised stream names here.
 			syncStreamNames()
 
+			// Grid alignment readout (ADR-0006) for the debug panel.
+			var alignStateStr string
+			var alignErrMs, relayRttMs *float64
+			if !alignEnabled {
+				alignStateStr = "off"
+			} else if aligner.Ready() {
+				if delta, ok := measureDelta(aligner, link, intervalCfg.BeatsPerInterval()); ok {
+					alignStateStr = alignStateName(delta)
+					v := float64(delta) / 1000.0
+					alignErrMs = &v
+				}
+				if rtt, ok := clock.RelayRTTUs(); ok {
+					v := float64(rtt) / 1000.0
+					relayRttMs = &v
+				}
+			}
+
 			emitter.Emit("status:update", StatusUpdate{
 				BPM: state.BPM, Beat: state.Beat, Phase: state.Phase,
 				LinkPeers: state.NumPeers, Peers: peerInfos, Slots: slotInfos,
@@ -1052,6 +1208,7 @@ func sessionLoop(
 				AudioSent:       audioIntervalsSent, AudioRecv: audioIntervalsReceived,
 				AudioBytesSent: audioBytesSent, AudioBytesRecv: audioBytesRecv,
 				AudioDCOpen: dcOpen, PluginConnected: true,
+				AlignState: alignStateStr, AlignErrorMs: alignErrMs, RelayRTTMs: relayRttMs,
 				Recording: recorder != nil,
 				RecordingSizeBytes: func() uint64 {
 					if recorder != nil {

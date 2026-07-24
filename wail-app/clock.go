@@ -23,6 +23,13 @@ type ClockSync struct {
 	epoch      time.Time
 	perPeer    map[string]*PeerClock
 	nextPingID uint64
+	// Relay RTT (ADR-0006): the relay answers broadcast Pings with a
+	// server-stamped Pong, giving the client a direct relay round-trip
+	// estimate — half of it compensates the anchor's server timestamps when
+	// measuring grid alignment error against the room clock.
+	relaySamples []int64
+	relayRTTUs   int64
+	haveRelay    bool
 }
 
 // NewClockSync creates a new clock sync tracker.
@@ -75,6 +82,38 @@ func (c *ClockSync) HandlePong(peerID string, pingSentAtUs, pongSentAtUs int64) 
 	}
 
 	clock.RTTUs = medianOf(clock.samples)
+}
+
+// HandleServerPong records a relay-stamped Pong and returns the relay
+// round-trip time in microseconds (0 on clock anomalies). A genuine
+// sub-microsecond loopback RTT also returns 0 and is treated as a failure
+// by the caller (skipping the offset sample) — unreachable with ns clocks
+// in practice, and self-correcting on the next pong.
+func (c *ClockSync) HandleServerPong(pingSentAtUs int64) int64 {
+	rtt := c.NowUs() - pingSentAtUs
+	if rtt < 0 {
+		return 0 // clock anomaly
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.relaySamples = append(c.relaySamples, rtt)
+	if len(c.relaySamples) > clockWindowSize {
+		c.relaySamples = c.relaySamples[1:]
+	}
+	c.relayRTTUs = medianOf(c.relaySamples)
+	c.haveRelay = true
+	return rtt
+}
+
+// RelayRTTUs returns the median relay round-trip estimate, or false if no
+// server-stamped Pong has arrived yet (old server, or pre-first-ping).
+func (c *ClockSync) RelayRTTUs() (int64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.haveRelay {
+		return 0, false
+	}
+	return c.relayRTTUs, true
 }
 
 // RTTUs returns the estimated RTT for a peer in microseconds, or nil if unknown.

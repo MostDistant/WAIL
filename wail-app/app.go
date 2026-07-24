@@ -449,6 +449,18 @@ func (a *App) SetCushionMs(ms int) error {
 	return nil
 }
 
+// SetGridAlign toggles active grid alignment (ADR-0006): the entry
+// conformance snap and the steady-state grid slew. Default on; disabling
+// restores the exact room tempo if a slew is in progress.
+func (a *App) SetGridAlign(enabled bool) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session != nil {
+		a.session.CmdCh <- SessionCommand{Type: "SetGridAlign", Enabled: enabled}
+	}
+	return nil
+}
+
 // RenameStream updates a stream name.
 func (a *App) RenameStream(streamIndex uint16, name string) error {
 	a.mu.Lock()
