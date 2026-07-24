@@ -176,6 +176,11 @@ func WavSenderTask(
 			totalFrames = FramesPerInterval(currentBPM, currentCfg)
 			now := time.Now()
 			intervalStart = &now
+			// Content↔room marker for the tier2 interval-placement E2E: the
+			// content starting at this boundary streams during this room
+			// interval, so receivers must play it D intervals later.
+			log.Printf("[wav-sender] boundary room=%d content=%.2fs", currentIdx,
+				float64(readPos/wavTargetChannels)/float64(wavTargetSampleRate))
 		default:
 		}
 

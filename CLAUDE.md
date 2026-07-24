@@ -45,6 +45,8 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 │   │                     publish/subscribe Link Audio channels.
 │   ├── interval/         Interval/room-clock math: local↔room index mapping,
 │   │                     RoomClock, RoomLabeler (ADR-0003)
+│   ├── align/            Grid steer (ADR-0006): entry conformance, gated grid
+│   │                     slew, snapshot-tempo arbitration, committed-tempo record
 │   ├── playout/          Hold-until-N+D playout scheduler (interval offset D, default 1)
 │   ├── lanloss/          Link Audio count-gap loss detection (LAN capture hop)
 │   ├── affinity/         (identity, stream) → stable published Link Audio channel
@@ -166,6 +168,8 @@ Streaming binary format in `wail-app/wire.go`: one WAIF frame per 20ms Opus pack
 ## Testing
 
 Run tests with `go test`.
+
+**Before opening any PR**, run the full test suite (`go test ./...` and `go test -tags linkstub ./...`) **and** `./scripts/tier2-e2e.sh` (step mode, the default — it verifies NINJAM-like interval placement end-to-end, not just audio integrity). No exceptions, even for changes that look unrelated to the audio path.
 
 ```sh
 cd wail-app && go test ./...                    # app + internal package tests

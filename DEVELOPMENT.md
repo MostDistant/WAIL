@@ -130,13 +130,33 @@ covers that gap on a single machine, no DAW required:
 ```
 
 It stands up a **local relay**, runs two headless WAIL instances against it — a
-`SweepSender` that injects a rising frequency-sweep WAV, and a `Receiver` that
-pulls the stream from the relay and republishes it as a real Link Audio channel —
-then runs `linkaudio-probe` (a DAW-free Link Audio consumer) to subscribe to that
-channel and measure what actually arrives. A PASS means non-silent, **lossless**
-audio whose estimated frequency **climbs with the sweep** (proof it's intact and
-in order). Tunables: `TIER2_PORT`, `TIER2_BPM`, `TIER2_SWEEP_DUR`, `TIER2_PROBE_SECS`,
-`TIER2_ROOM`.
+`SweepSender` that injects a test WAV, and a `Receiver` that pulls the stream from
+the relay and republishes it as a real Link Audio channel — then runs
+`linkaudio-probe` (a DAW-free Link Audio consumer) to subscribe to that channel and
+measure what actually arrives.
+
+Two modes (`TIER2_MODE`):
+
+- **`step` (default)** — the WAV is stepped tones: one constant frequency per
+  interval-length block (`gen-sweep -block`), so received audio identifies *which*
+  content block is playing. On top of the integrity checks this verifies **NINJAM-like
+  interval placement** end-to-end: content captured in room interval `N` must play
+  on the receiver during room interval `N+D`. Ground truth is wall-clock
+  correlated (absolute grid indices are per-peer — ADR-0003): the sender logs a
+  `(room, content-seconds)` marker per boundary (`[wav-sender] boundary room=…
+  content=…s`), the receiver's `>>> INTERVAL` log marks which room interval
+  started playing when, and every received second is asserted
+  `captureRoom == playingRoom − D`.
+- **`sweep`** — the original rising log sweep: a PASS means non-silent,
+  **lossless** audio whose estimated frequency **climbs with the sweep** (proof
+  it's intact and in order).
+
+Tunables: `TIER2_PORT`, `TIER2_BPM`, `TIER2_SWEEP_DUR`, `TIER2_PROBE_SECS`,
+`TIER2_ROOM`, `TIER2_MODE`, `TIER2_BPI`, `TIER2_D`. Note the room may not
+actually run at `TIER2_BPM`: WAIL joins the LAN's Link session, and if that
+session already has peers at a different tempo, Link convergence pulls WAIL to
+the *LAN* tempo (pillar 4: the local Link session is authoritative) and the room
+follows it. The step mode's placement check is exact for any room tempo.
 
 The instances point at the local relay via the `WAIL_SIGNAL_URL` env var (e.g.
 `WAIL_SIGNAL_URL=ws://localhost:8899`), which overrides the default production

@@ -108,3 +108,6 @@ The one-time re-mapping of the local Link session onto the room grid during entr
 **Grid slew**:
 A small bounded tempo nudge that closes steady-state alignment error; gated so it never acts near user tempo changes or just after entry. The only steady-state steering WAIL ever applies.
 _Avoid_: phase lock (WAIL deliberately does not phase-lock across the WAN), micro-slew (the capture path's per-buffer sample-domain drift correction — a different mechanism)
+
+**Grid steer**:
+The module that owns the ADR-0006 surface end to end: entry conformance, the gated grid slew, snapshot-tempo arbitration, and the committed-tempo record (what tempo the session last committed to, and when — the single home of the slew's tempo gate). Implemented as `internal/align`'s `Steerer`; it drives the `GridAligner` math and the Link bridge, and the session loop only forwards events to it.
