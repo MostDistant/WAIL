@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.12.1 (2026-07-24)
+
+### Fixes
+
+- tempo flap from ungated StateSnapshot adoption (110↔120 oscillator) (#424)
+- derive room label offset by construction post-snap (+ late/early sign fix) (#426)
+
 ## 3.12.0 (2026-07-24)
 
 ### Features
