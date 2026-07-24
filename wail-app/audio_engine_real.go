@@ -417,6 +417,16 @@ func (e *linkAudioEngine) AlignRoomLabel(roomIndex, localIndex int64) {
 	}
 }
 
+// abs64 returns |v| for the label-offset comparison below (int64; math.Abs
+// is float64). Formerly shared with the grid-alignment glue (now
+// internal/align, which has its own copy).
+func abs64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 // LabelOffsetFor returns the worst (largest-|delta|) interval-label verdict
 // across one identity's streams: 0 = labels agree with our room index, k = the
 // peer's audio silently plays k intervals off (positive = late: frames labeled

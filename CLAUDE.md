@@ -45,6 +45,8 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 │   │                     publish/subscribe Link Audio channels.
 │   ├── interval/         Interval/room-clock math: local↔room index mapping,
 │   │                     RoomClock, RoomLabeler (ADR-0003)
+│   ├── align/            Grid steer (ADR-0006): entry conformance, gated grid
+│   │                     slew, snapshot-tempo arbitration, committed-tempo record
 │   ├── playout/          Hold-until-N+D playout scheduler (interval offset D, default 1)
 │   ├── lanloss/          Link Audio count-gap loss detection (LAN capture hop)
 │   ├── affinity/         (identity, stream) → stable published Link Audio channel
