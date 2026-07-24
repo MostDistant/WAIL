@@ -139,7 +139,7 @@ Two modes (`TIER2_MODE`):
 
 - **`step` (default)** — the WAV is stepped tones: one constant frequency per
   interval-length block (`gen-sweep -block`), so received audio identifies *which*
-  content block is playing. On top of the integrity checks this verifies **NINJAM
+  content block is playing. On top of the integrity checks this verifies **NINJAM-like
   interval placement** end-to-end: content captured in room interval `N` must play
   on the receiver during room interval `N+D`. Ground truth is wall-clock
   correlated (absolute grid indices are per-peer — ADR-0003): the sender logs a

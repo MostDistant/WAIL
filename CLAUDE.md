@@ -169,6 +169,8 @@ Streaming binary format in `wail-app/wire.go`: one WAIF frame per 20ms Opus pack
 
 Run tests with `go test`.
 
+**Before opening any PR**, run the full test suite (`go test ./...` and `go test -tags linkstub ./...`) **and** `./scripts/tier2-e2e.sh` (step mode, the default — it verifies NINJAM-like interval placement end-to-end, not just audio integrity). No exceptions, even for changes that look unrelated to the audio path.
+
 ```sh
 cd wail-app && go test ./...                    # app + internal package tests
 cd wail-app && go test ./internal/interval      # a single package

@@ -17,7 +17,7 @@
 #   step  (default) — the WAV is stepped tones: one constant frequency per
 #         interval-length block, so received audio identifies WHICH content
 #         block is playing. On top of the integrity checks, this verifies
-#         NINJAM interval placement end-to-end: a block captured in room
+#         NINJAM-like interval placement end-to-end: a block captured in room
 #         interval N must arrive during the receiver's local grid interval
 #         labeled N+D. Ground truth: the sender logs (room, content) per
 #         boundary, the receiver's boundary log gives the local→room offset,
