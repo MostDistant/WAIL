@@ -20,8 +20,13 @@ type fakeGrid struct {
 
 func (f *fakeGrid) State() State             { return f.state }
 func (f *fakeGrid) TimeAtBeat(float64) int64 { return f.timeAtBeat }
-func (f *fakeGrid) SetTempo(bpm float64)     { f.tempos = append(f.tempos, bpm) }
-func (f *fakeGrid) SnapGrid(deltaUs int64)   { f.snaps = append(f.snaps, deltaUs) }
+
+// SetTempo models the real bridge: the session tempo actually moves.
+func (f *fakeGrid) SetTempo(bpm float64) {
+	f.tempos = append(f.tempos, bpm)
+	f.state.BPM = bpm
+}
+func (f *fakeGrid) SnapGrid(deltaUs int64) { f.snaps = append(f.snaps, deltaUs) }
 
 type emitted struct {
 	state string
@@ -202,6 +207,49 @@ func TestTickNeverFiresWhileEntryPending(t *testing.T) {
 	s.Tick(16, now)
 	if len(f.tempos) != 0 {
 		t.Fatalf("slew fired around entry conformance: %v", f.tempos)
+	}
+}
+
+func TestSlewHoldsOffWhenSessionTempoDiverges(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_100_000) // grid 100ms late: slew WOULD fire
+	observe(s, now)
+	// The session runs at 122 while the anchor says 120 (mid tempo change,
+	// LAN drag, pending hold-down broadcast): the grids tick at different
+	// rates, so δ is meaningless and the slew must hold off.
+	f.state.BPM = 122
+	s.Tick(16, now.Add(10*time.Second))
+	if len(f.tempos) != 0 {
+		t.Fatalf("slew steered while session tempo diverged from anchor: %v", f.tempos)
+	}
+	// Session returns to the anchor tempo: the slew may run.
+	f.state.BPM = 120
+	s.Tick(16, now.Add(11*time.Second))
+	if len(f.tempos) != 1 {
+		t.Fatalf("slew did not resume after tempo agreement: %v", f.tempos)
+	}
+}
+
+func TestSlewHoldsOffWhenDraggedFromOwnTarget(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_100_000)
+	observe(s, now)
+	s.Tick(16, now.Add(6*time.Second)) // slew active: target 120.36
+	if len(f.tempos) != 1 {
+		t.Fatalf("tempos = %v, want slew active", f.tempos)
+	}
+	// The session sits at the slew's own target: keep steering (no gate).
+	f.state.BPM = 120 * 1.003
+	f.timeAtBeat = 14_015_000 // δ=15ms → different nudge
+	s.Tick(16, now.Add(7*time.Second))
+	if len(f.tempos) != 2 {
+		t.Fatalf("slew gated itself at its own target: %v", f.tempos)
+	}
+	// Something drags the session away from the slew target: hold off.
+	f.state.BPM = 119.0
+	s.Tick(16, now.Add(8*time.Second))
+	if len(f.tempos) != 2 {
+		t.Fatalf("slew steered after the session was dragged off target: %v", f.tempos)
 	}
 }
 

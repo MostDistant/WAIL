@@ -164,7 +164,9 @@ func (s *Steerer) SnapshotTempoAdopt(msgBPM float64) bool {
 // anchor's authoritative room tempo (ADR-0006: "nudge the room tempo… then
 // restore"), not the committed tempo — they can differ by the adoption
 // threshold. Slew nudges deliberately do NOT touch the committed-tempo
-// record: that would arm the tempo gate and suppress the slew itself.
+// record: that would arm the tempo gate and suppress the slew itself. See
+// Tick for the same-rate gate that keeps the slew from fighting tempo
+// changes in flight.
 func (s *Steerer) Tick(bpi float64, now time.Time) {
 	if !s.enabled || !s.aligner.Ready() || s.entryPending {
 		return
@@ -172,12 +174,27 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 	if !slewAllowed(now, s.lastSnapAt, s.lastTempoAt) {
 		return
 	}
-	delta, ok := s.measureDelta(bpi)
-	if !ok {
-		return
-	}
 	roomBPM, ok := s.aligner.RoomBPM()
 	if !ok || roomBPM <= 0 {
+		return
+	}
+	// Same-rate gate: δ is a phase measurement that is only meaningful when
+	// both grids tick at the same rate. While the session tempo diverges
+	// from the slew's baseline (the slew target when actively slewing, else
+	// the anchor tempo) — a LAN convergence drag, a user knob turn, a tempo
+	// change whose re-anchor hasn't landed — something else owns the tempo
+	// and nudging would fight it (field finding: the slew chased a stale
+	// 120 anchor while the session moved to 122, preventing the settle the
+	// detector hold-down waits for — a live-lock).
+	baseline := roomBPM
+	if s.slewTarget != 0 {
+		baseline = s.slewTarget
+	}
+	if st := s.link.State(); math.Abs(st.BPM-baseline) > tempoThreshold {
+		return
+	}
+	delta, ok := s.measureDelta(bpi)
+	if !ok {
 		return
 	}
 	periodUs := int64(bpi * 60.0 / roomBPM * 1e6)
@@ -249,7 +266,7 @@ func (s *Steerer) tryEntry(bpi float64, now time.Time) {
 		return
 	}
 	if roomBPM, ok := s.aligner.RoomBPM(); ok {
-		if st := s.link.State(); math.Abs(st.BPM-roomBPM) > tempoThreshold {
+		if st := s.link.State(); st.BPM > 0 && math.Abs(st.BPM-roomBPM) > tempoThreshold {
 			s.link.SetTempo(roomBPM)
 			s.currentBPM = roomBPM
 			s.lastTempoAt = now
