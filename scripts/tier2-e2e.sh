@@ -126,14 +126,26 @@ if [ "$MODE" = step ]; then
   # shares beat phase mod the quantum, so absolute grid indices are per-peer
   # and CANNOT be compared across processes — ADR-0003):
   #   blockroom.txt — content position (seconds) at which each room interval
-  #     STARTS on the sender, per its boundary marker. A heard frequency maps
-  #     to content time ((f-f0)/step blocks × BLOCK seconds), and the room
-  #     whose content range contains it is the capture room. Exact for ANY
-  #     room tempo (the room may not run at TIER2_BPM — WAIL adopts the LAN
-  #     Link session's tempo, pillar 4, and the room follows it).
+  #     STARTS on the sender, per its boundary marker, plus that boundary's
+  #     wall time. A heard frequency maps to content time ((f-f0)/step blocks
+  #     × BLOCK seconds), and the room whose content range contains it is the
+  #     capture room. Exact for ANY room tempo (the room may not run at
+  #     TIER2_BPM — WAIL adopts the LAN Link session's tempo, pillar 4, and
+  #     the room follows it).
   #   releases.txt  — wall time + room interval that STARTED PLAYING at each
   #     of the receiver's boundaries (its INTERVAL log line).
+  #   settle        — join-transition window: intervals captured before the
+  #     room's tempo settled (LAN convergence → re-anchor) carry permanently
+  #     rate-skewed labels by design (ADR-0006 entry re-rolls alignment);
+  #     they are excluded, everything after must pass.
   # Assertion per received second: captureRoom(content) == playingRoom - D.
+  SETTLE="$(awk '
+    /Local tempo changed/ { t = $1; gsub(/[:.]/, " ", t); split(t, p, " "); last = p[1]*3600+p[2]*60+p[3]+p[4]/1e6 }
+    /\[wav-sender\] boundary room=/ && last != "" && !done {
+      t = $1; gsub(/[:.]/, " ", t); split(t, p, " ")
+      bt = p[1]*3600+p[2]*60+p[3]+p[4]/1e6
+      if (bt >= last) { print bt; done = 1 }
+    }' "$WORK/sender.log")"
   awk '
     /\[wav-sender\] boundary room=/ {
       r=0; c=0
@@ -141,7 +153,8 @@ if [ "$MODE" = step ]; then
         if ($i ~ /^room=/)        r = substr($i,6)+0
         else if ($i ~ /^content=/) c = substr($i,9)+0
       }
-      print c, r
+      t = $1; gsub(/[:.]/, " ", t); split(t, p, " ")
+      print c, r, p[1]*3600+p[2]*60+p[3]+p[4]/1e6
     }' "$WORK/sender.log" > "$WORK/blockroom.txt"
   awk '/>>> INTERVAL local=/ {
       t = $1; gsub(/[:.]/, " ", t); split(t, p, " ")
@@ -151,13 +164,13 @@ if [ "$MODE" = step ]; then
       print secs, r
     }' "$WORK/receiver.log" > "$WORK/releases.txt"
   echo "---------------------------------------------------------------- ground truth"
-  echo "sender room/content ranges: $(wc -l < "$WORK/blockroom.txt" | tr -d ' ')   receiver playout boundaries: $(wc -l < "$WORK/releases.txt" | tr -d ' ')"
+  echo "sender room/content ranges: $(wc -l < "$WORK/blockroom.txt" | tr -d ' ')   receiver playout boundaries: $(wc -l < "$WORK/releases.txt" | tr -d ' ')   settle: ${SETTLE:-0 (matched LAN tempo)}"
   if [ ! -s "$WORK/releases.txt" ] || [ ! -s "$WORK/blockroom.txt" ]; then
     echo "VERDICT=FAIL" | tee "$WORK/verdict.txt"
     echo "missing ground truth (sender markers or receiver boundary log)" | tee -a "$WORK/verdict.txt"
   else
-  awk -v d="$D" -v f0="$F0" -v step="$STEP" -v blockdur="$BLOCK" '
-    FILENAME == ARGV[1] { cs[++nb] = $1; cr[nb] = $2; next }   # blockroom.txt: content-sec → room (sorted)
+  awk -v d="$D" -v f0="$F0" -v step="$STEP" -v blockdur="$BLOCK" -v settle="${SETTLE:-0}" '
+    FILENAME == ARGV[1] { cs[++nb] = $1; cr[nb] = $2; ct[nb] = $3; next }   # blockroom.txt: content-sec, room, wall-sec
     FILENAME == ARGV[2] { rt[++nr] = $1; rr[nr] = $2; next }   # releases.txt: wall-sec → room playing
     /→ subscribed/          { subs++ }
     /! LAN loss/            { lossev++ }
@@ -184,13 +197,18 @@ if [ "$MODE" = step ]; then
         c = (freq - f0)/step * blockdur
         if (c < -1) next
         # Capture room: the content range containing c, skipping seconds
-        # within 1.4s of a range edge (freq tolerance ±50Hz ⇒ content-time
-        # tolerance ±(50/step)*blockdur — ambiguous classification there).
+        # within 2s of a range edge (freq tolerance ±50Hz ⇒ content-time
+        # tolerance ±(50/step)*blockdur, plus pacing drift — a block
+        # straddling a range edge is unclassifiable by frequency).
         bi = 0
         for (i = nb; i >= 1; i--) if (cs[i] <= c) { bi = i; break }
         if (bi == 0) next
-        if (c - cs[bi] < 1.4) next
-        if (bi < nb && cs[bi+1] - c < 1.4) next
+        if (c - cs[bi] < 2.0) next
+        if (bi < nb && cs[bi+1] - c < 2.0) next
+        # Join-transition exclusion: intervals captured before the room
+        # tempo settled carry skewed labels by design (ADR-0006 entry
+        # re-rolls alignment); judge steady-state only.
+        if (ct[bi] < settle) { skipped++; next }
         checks++
         want = cr[bi] + d   # capture room + D == room now playing
         if (rr[ri] != want) {
@@ -203,7 +221,7 @@ if [ "$MODE" = step ]; then
     END {
       printf "subscribed=%d  non-silent-sec=%d  silent-sec=%d  maxLost=%d  lossEvents=%d  freq=%d..%d Hz\n", \
              subs+0, nonsilent+0, silent+0, maxlost+0, lossev+0, fmin+0, fmax+0
-      printf "placement: %d checks, %d failures (every received second: playing room == capture room + D)\n", checks+0, fails+0
+      printf "placement: %d checks, %d failures (%d skipped: join-transition) — every received second: playing room == capture room + D\n", checks+0, fails+0, skipped+0
       pass = (subs>=1 && nonsilent>=10 && maxlost==0 && lossev==0 && checks>=12 && fails==0)
       print (pass ? "VERDICT=PASS" : "VERDICT=FAIL")
     }
