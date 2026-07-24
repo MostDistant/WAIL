@@ -12,6 +12,14 @@ const (
 	echoGuardDuration     = 150 * time.Millisecond
 	linkPollInterval      = 20 * time.Millisecond // 50 Hz
 	snapshotIntervalTicks = 10                     // ~200ms at 50Hz
+	// tempoHoldDown is how long a detected local tempo change must hold
+	// before it is reported as user intent. Link session convergence nudges
+	// (join merges, phase re-lock — up to ±2%) are transient, lasting a few
+	// polls each; a human's knob turn persists. Without this, convergence
+	// noise is broadcast to the room as tempo changes (field finding:
+	// a transient 119.6 re-anchored a 122 room; two insistent LANs then
+	// fed a 120↔122 flap at the 200ms snapshot cadence).
+	tempoHoldDown = 1 * time.Second
 )
 
 // LinkEvent represents events emitted by the Link bridge.
@@ -43,12 +51,17 @@ type LinkState struct {
 	NumPeers    uint64
 }
 
-// TempoChangeDetector is a pure-logic tempo change detector with echo guard.
-// Extracted so it can be tested without the Link C FFI.
+// TempoChangeDetector is a pure-logic tempo change detector with echo guard
+// and hold-down. Extracted so it can be tested without the Link C FFI.
 type TempoChangeDetector struct {
 	mu             sync.Mutex
 	lastTempo      float64
 	echoGuardUntil *time.Time
+	// Hold-down state: a changed reading is a candidate until it holds
+	// continuously for tempoHoldDown; only then is it reported.
+	candidate      float64
+	candidateSince time.Time
+	hasCandidate   bool
 }
 
 // NewTempoChangeDetector creates a new detector with the given initial tempo.
@@ -61,10 +74,12 @@ func (d *TempoChangeDetector) ArmEchoGuard(until time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.echoGuardUntil = &until
+	d.hasCandidate = false
 }
 
 // Check determines if a tempo reading is a reportable change.
-// Returns the BPM if change exceeds threshold and echo guard is not active, otherwise 0.
+// Returns the BPM if a change exceeds threshold, has held for tempoHoldDown,
+// and the echo guard is not active; otherwise 0.
 func (d *TempoChangeDetector) Check(bpm float64, now time.Time) (float64, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -80,11 +95,25 @@ func (d *TempoChangeDetector) Check(bpm float64, now time.Time) (float64, bool) 
 		d.echoGuardUntil = nil
 	}
 
-	if math.Abs(bpm-d.lastTempo) > tempoChangeThreshold {
-		d.lastTempo = bpm
-		return bpm, true
+	if math.Abs(bpm-d.lastTempo) <= tempoChangeThreshold {
+		// Settled at (or back to) the reported tempo: nothing pending.
+		d.hasCandidate = false
+		return 0, false
 	}
-	return 0, false
+
+	// Hold-down: the reading is a candidate until it holds for tempoHoldDown.
+	if !d.hasCandidate || math.Abs(bpm-d.candidate) > tempoChangeThreshold {
+		d.candidate = bpm
+		d.candidateSince = now
+		d.hasCandidate = true
+		return 0, false
+	}
+	if now.Sub(d.candidateSince) < tempoHoldDown {
+		return 0, false
+	}
+	d.lastTempo = bpm
+	d.hasCandidate = false
+	return bpm, true
 }
 
 // LastTempo returns the last known tempo.
@@ -102,6 +131,7 @@ func (d *TempoChangeDetector) SetLastTempo(bpm float64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.lastTempo = bpm
+	d.hasCandidate = false
 }
 
 // SpawnLinkPoller starts a polling goroutine shared by both stub and real implementations.

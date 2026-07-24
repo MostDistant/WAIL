@@ -9,9 +9,10 @@ import (
 func TestAboveThresholdEmitsChange(t *testing.T) {
 	d := NewTempoChangeDetector(120.0)
 	now := time.Now()
-	bpm, changed := d.Check(120.02, now)
+	d.Check(120.02, now) // candidate
+	bpm, changed := d.Check(120.02, now.Add(tempoHoldDown))
 	if !changed || bpm != 120.02 {
-		t.Fatal("expected change")
+		t.Fatal("expected change after hold-down")
 	}
 }
 
@@ -42,9 +43,10 @@ func TestEchoGuardExpiresAllowsDetection(t *testing.T) {
 	d := NewTempoChangeDetector(120.0)
 	now := time.Now()
 	d.ArmEchoGuard(now.Add(150 * time.Millisecond))
-	bpm, changed := d.Check(130.0, now.Add(151*time.Millisecond))
+	d.Check(130.0, now.Add(151*time.Millisecond)) // candidate after expiry
+	bpm, changed := d.Check(130.0, now.Add(151*time.Millisecond+tempoHoldDown))
 	if !changed || bpm != 130.0 {
-		t.Fatal("should detect after guard expires")
+		t.Fatal("should detect after guard expires and the value holds")
 	}
 }
 
@@ -52,8 +54,12 @@ func TestEchoGuardClearsAfterExpiry(t *testing.T) {
 	d := NewTempoChangeDetector(120.0)
 	now := time.Now()
 	d.ArmEchoGuard(now.Add(150 * time.Millisecond))
-	d.Check(130.0, now.Add(200*time.Millisecond))
-	bpm, changed := d.Check(140.0, now.Add(210*time.Millisecond))
+	t1 := now.Add(200 * time.Millisecond)
+	d.Check(130.0, t1)
+	d.Check(130.0, t1.Add(tempoHoldDown))
+	t2 := t1.Add(tempoHoldDown)
+	d.Check(140.0, t2)
+	bpm, changed := d.Check(140.0, t2.Add(tempoHoldDown))
 	if !changed || bpm != 140.0 {
 		t.Fatal("guard should be cleared, second change should work")
 	}
@@ -63,14 +69,17 @@ func TestLastTempoTracksAcrossChanges(t *testing.T) {
 	d := NewTempoChangeDetector(120.0)
 	now := time.Now()
 	d.Check(125.0, now)
+	d.Check(125.0, now.Add(tempoHoldDown))
 	if d.LastTempo() != 125.0 {
 		t.Fatal("expected 125.0")
 	}
-	d.Check(130.0, now)
+	t1 := now.Add(tempoHoldDown)
+	d.Check(130.0, t1)
+	d.Check(130.0, t1.Add(tempoHoldDown))
 	if d.LastTempo() != 130.0 {
 		t.Fatal("expected 130.0")
 	}
-	d.Check(130.005, now)
+	d.Check(130.005, t1.Add(2*tempoHoldDown))
 	if d.LastTempo() != 130.0 {
 		t.Fatal("below threshold should not update baseline")
 	}
@@ -80,7 +89,8 @@ func TestNaNBPMDoesNotPoisonDetector(t *testing.T) {
 	d := NewTempoChangeDetector(120.0)
 	now := time.Now()
 	d.SetLastTempo(math.NaN())
-	bpm, changed := d.Check(130.0, now)
+	d.Check(130.0, now)
+	bpm, changed := d.Check(130.0, now.Add(tempoHoldDown))
 	if !changed || bpm != 130.0 {
 		t.Fatal("NaN should not poison detector — must still detect changes")
 	}
