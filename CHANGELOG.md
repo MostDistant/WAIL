@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.11.0 (2026-07-24)
+
+### Features
+
+- room-sync observability + two-grid anchor simulations (#420)
+
 ## 3.10.1 (2026-07-24)
 
 ### Fixes
