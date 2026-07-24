@@ -38,7 +38,7 @@ type PeerInfo struct {
 	IsReceiving bool     `json:"is_receiving"`
 	// LabelOffset is the peer's interval-label verdict (ADR-0006 follow-up):
 	// 0 = labels agree with our room index; k = their audio silently plays
-	// k intervals off (negative = late). nil until a verdict finalizes.
+	// k intervals off (positive = late). nil until a verdict finalizes.
 	LabelOffset *int64 `json:"label_offset,omitempty"`
 }
 

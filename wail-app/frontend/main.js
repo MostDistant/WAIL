@@ -1099,7 +1099,9 @@ function renderPeerDetail(s) {
     let labelWarn = '';
     if (p.label_offset != null && p.label_offset !== 0) {
       const n = p.label_offset;
-      const dir = n < 0 ? 'late' : 'early';
+      // Frames labeled ahead of our room index (n > 0) are held one extra
+      // boundary by playout (release = label − D) → the audio plays LATE.
+      const dir = n > 0 ? 'late' : 'early';
       labelWarn = ` · <span class="label-offset-warn" title="This peer's interval labels are off by ${Math.abs(n)} — their audio plays ${Math.abs(n)} interval(s) ${dir}. They may be running an older WAIL or still aligning.">⏱ ${Math.abs(n)} interval${Math.abs(n) !== 1 ? 's' : ''} ${dir}</span>`;
     }
     return `<div class="health-row"><span>${escapeHtml(name)}</span><span>${rtt} · ${escapeHtml(state)}${labelWarn}</span></div>`;
