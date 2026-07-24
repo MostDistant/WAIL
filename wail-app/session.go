@@ -1085,6 +1085,7 @@ func sessionLoop(
 				delta(logWarn, "sink underrun: paced audio late past the cushion (audible dropout)", lastHealth.EmitSinkUnderrunEvents, health.EmitSinkUnderrunEvents)
 				delta(logWarn, "sink write rejected mid-stream (chunk lost — audible hole for listeners)", lastHealth.EmitSinkWriteRejected, health.EmitSinkWriteRejected)
 				delta(logWarn, "frames never arrived by playout retirement (played as silence)", lastHealth.EmitFramesMissingAtPlay, health.EmitFramesMissingAtPlay)
+				delta(logWarn, "frames dropped as too-late (sender labels behind our room clock — anchor mismatch)", lastHealth.EmitFramesTooLate, health.EmitFramesTooLate)
 				delta(logInfo, "frames concealed by Opus PLC (masked loss)", lastHealth.EmitFramesConcealed, health.EmitFramesConcealed)
 				// EmitIntervalsIncomplete is deliberately not logged: it fires once
 				// per interval in normal operation and never aligned with an audible

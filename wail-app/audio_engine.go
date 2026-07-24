@@ -66,6 +66,7 @@ type EngineHealth struct {
 	EmitSinkUnderrunEvents  uint64 `json:"emit_sink_underrun_events"`   // paced feed fell behind the playhead past the cushion (audible)
 	EmitSinkUnderrunFrames  uint64 `json:"emit_sink_underrun_frames"`   // frames skipped (played as silence) due to underrun
 	EmitFramesMissingAtPlay uint64 `json:"emit_frames_missing_at_play"` // frames still absent when their interval retired (played as silence)
+	EmitFramesTooLate       uint64 `json:"emit_frames_too_late"`        // frames dropped: sender labels already behind our playout (anchor offset mismatch)
 	EmitFramesConcealed     uint64 `json:"emit_frames_concealed"`       // missing frames masked by Opus PLC
 	EmitSinkWriteRejected   uint64 `json:"emit_sink_write_rejected"`    // sink refused a chunk mid-stream (queue full / listener left) — hole in delivered audio
 	WireDecodeFailures      uint64 `json:"wire_decode_failures"`        // WAIF wire-decode errors
