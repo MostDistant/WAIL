@@ -65,6 +65,15 @@ type emitSink interface {
 	Close()
 }
 
+// fifoFlusher is implemented by emitSinks that render arrival order (FIFO —
+// the CLAP recv plugin, ADR-0005) and therefore timed-release their queued
+// chunks: the emit loop calls Flush each tick with the current beat so
+// delivery time matches stamped time. Beat-stamped sinks (*abllink.Sink) don't
+// need it — their subscribers render at the stamp, not at arrival.
+type fifoFlusher interface {
+	Flush(nowBeat, leadBeats float64)
+}
+
 // Compile-time checks that the Link Audio adapters satisfy the transport seams.
 var (
 	_ captureSource = linkCaptureSource{}

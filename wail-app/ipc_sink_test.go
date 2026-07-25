@@ -50,8 +50,18 @@ func TestIPCEmitSinkFrames(t *testing.T) {
 
 	sink := newIPCEmitSink(pool, "peerZ", 5)
 
+	// A FIFO sink must NOT receive the chunk at write time (the feeder runs
+	// cushion-ahead of the playhead); it is released by Flush once its stamped
+	// beat is due.
 	samples := []int16{1, 2, 3, 4}
-	sink.WriteInterleaved(samples, nil, 0, 0, 2, 2, 48000)
+	sink.WriteInterleaved(samples, nil, 100.0, 0, 2, 2, 48000)
+	select {
+	case f := <-frames:
+		t.Fatalf("chunk delivered before its stamped beat: %x", f)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	sink.Flush(100.0, 0)
 	select {
 	case f := <-frames:
 		rp, ok := DecodeRemotePCM(f)
@@ -60,6 +70,24 @@ func TestIPCEmitSinkFrames(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for RemotePCM")
+	}
+
+	// A future-stamped chunk stays held through flushes that don't reach it.
+	sink.WriteInterleaved([]int16{9}, nil, 200.0, 0, 1, 2, 48000)
+	sink.Flush(150.0, 0)
+	select {
+	case f := <-frames:
+		t.Fatalf("future chunk released early: %x", f)
+	case <-time.After(150 * time.Millisecond):
+	}
+	sink.Flush(200.0, 0)
+	select {
+	case f := <-frames:
+		if rp, ok := DecodeRemotePCM(f); !ok || !slices.Equal(rp.Samples, []int16{9}) {
+			t.Fatalf("RemotePCM mismatch: ok=%v %+v", ok, rp)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for held RemotePCM")
 	}
 
 	sink.SetName("Zoe · vox")
