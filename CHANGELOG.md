@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.14.1 (2026-07-25)
+
+### Fixes
+
+- ship the Link Bridge plugins in installers and release packages (#453)
+
 ## 3.14.0 (2026-07-25)
 
 ### Features
