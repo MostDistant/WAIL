@@ -375,8 +375,6 @@ TEST(recv_phase_aligned_when_transport_rolling) {
    int glitches = 0;
    for (size_t j = start + 1; j < col.size(); j++) {
       if (col[j] - col[j - 1] != 1.0f / 32768.0f && ++glitches > 8) {
-         fprintf(stderr, "DEBUG glitch at j=%zu start=%zu: %.6f %.6f %.6f %.6f %.6f -> %.6f\n",
-                 j, start, col[j - 5], col[j - 4], col[j - 3], col[j - 2], col[j - 1], col[j]);
          ::wailtest::fail(__LINE__, "content not continuous after phase-aligned onset at frame " + std::to_string(j));
          break;
       }

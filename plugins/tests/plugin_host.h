@@ -144,6 +144,7 @@ struct RecvHost {
    std::vector<float> outL[kPorts], outR[kPorts];
 
    bool setup(const char *path, int ipcPort, double sampleRate, uint32_t block, std::string *err) {
+      sampleRate_ = sampleRate;
       if (!inst.load(path, "software.wail.recv", ipcPort, sampleRate, block, block, err))
          return false;
       for (int p = 0; p < kPorts; p++) {
@@ -192,7 +193,7 @@ struct RecvHost {
       p.out_events = discardOut_.get();
       auto st = inst.plugin->process(inst.plugin, &p);
       if (useTransport_)
-         songPosBeats_ += (double)p.frames_count * tempo_ / (60.0 * 48000.0);
+         songPosBeats_ += (double)p.frames_count * tempo_ / (60.0 * sampleRate_);
       return st;
    }
 
@@ -222,6 +223,7 @@ private:
    clap_trap::EmptyInputEvents emptyIn_;
    clap_trap::DiscardOutputEvents discardOut_;
    bool useTransport_ = false;
+   double sampleRate_ = 48000.0;
    double songPosBeats_ = 0, tempo_ = 120;
    clap_event_transport_t transport_{};
 };
