@@ -14,9 +14,18 @@ import (
 // cushion).
 
 func flushCollect(q *DueQueue, nowBeat, leadBeats float64) [][]int16 {
-	var got [][]int16
-	q.FlushDue(nowBeat, leadBeats, func(s []int16) { got = append(got, s) })
+	got, _ := flushCollectBeats(q, nowBeat, leadBeats)
 	return got
+}
+
+func flushCollectBeats(q *DueQueue, nowBeat, leadBeats float64) ([][]int16, []float64) {
+	var got [][]int16
+	var beats []float64
+	q.FlushDue(nowBeat, leadBeats, func(s []int16, beat float64) {
+		got = append(got, s)
+		beats = append(beats, beat)
+	})
+	return got, beats
 }
 
 func TestDueQueueHoldsChunkUntilStampedBeat(t *testing.T) {
@@ -70,6 +79,18 @@ func TestDueQueueLeadWindowIsBounded(t *testing.T) {
 	// Within the lead: released early by at most leadBeats.
 	if got := flushCollect(q, 99.75, 0.25); len(got) != 1 {
 		t.Fatalf("chunk not released inside the lead window")
+	}
+}
+
+func TestDueQueueReleaseCarriesStampedBeat(t *testing.T) {
+	// The sink converts each released chunk's beat into the plugin-facing
+	// play-at timestamp, so the beat must survive the queue intact.
+	q := &DueQueue{}
+	q.Push(100.25, []int16{1})
+	q.Push(100.5, []int16{2})
+	_, beats := flushCollectBeats(q, 100.5, 0)
+	if !slices.Equal(beats, []float64{100.25, 100.5}) {
+		t.Fatalf("beats = %v, want [100.25 100.5]", beats)
 	}
 }
 

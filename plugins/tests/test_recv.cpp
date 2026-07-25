@@ -4,6 +4,7 @@
 // notification, StreamGone handling, mono duplication, underrun silence, and
 // slot exhaustion.
 #include <chrono>
+#include <thread>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -67,7 +68,15 @@ struct RecvFixture {
    bool collect(const std::vector<size_t> &want, std::vector<std::vector<float>> &colL,
                 std::vector<std::vector<float>> &colR, int timeoutMs) {
       auto t0 = std::chrono::steady_clock::now();
+      // Pace process() to the block period like a real DAW's audio callback.
+      // Stamp-aligned playback derives its pad/skip from wall time; pumping
+      // faster than real time would race the ring head past the timeline.
+      auto next = t0;
       for (;;) {
+         next += std::chrono::microseconds((int64_t)((double)kBlock * 1000000.0 / kSampleRate));
+         std::this_thread::sleep_until(next);
+         if (std::chrono::steady_clock::now() - next > std::chrono::milliseconds(2))
+            next = std::chrono::steady_clock::now(); // fell behind: re-anchor, don't burst
          bool done = true;
          for (int p = 0; p < kPorts; p++)
             if (colL[p].size() < want[p]) done = false;
@@ -95,6 +104,8 @@ struct RecvFixture {
          wail_sleep_ms(1); // let the IPC thread drain the socket between blocks
       }
    }
+
+
 
 };
 
@@ -163,6 +174,152 @@ TEST(recv_pcm_routing_and_naming) {
    fx.plugin->on_main_thread(fx.plugin);
    CHECK(fx.portName(0) == "Alice");
    CHECK(fx.portName(1) == "WAIL 2"); // unassigned ports keep their default label
+}
+
+static int64_t monoMicrosNow() {
+   using namespace std::chrono;
+   return duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+// Pumps process() until port 0 produces its first non-silent block; returns
+// wall-clock ms until that onset (-1 on timeout) and leaves the onset block's
+// samples in fx.h.outL/outR[0].
+static double msToFirstAudio(RecvFixture &fx, int timeoutMs) {
+   auto t0 = std::chrono::steady_clock::now();
+   for (;;) {
+      fx.processBlock();
+      for (uint32_t i = 0; i < kBlock; i++) {
+         if (fx.h.outL[0][i] != 0.0f || fx.h.outR[0][i] != 0.0f)
+            return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                .count();
+      }
+      if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(timeoutMs))
+         return -1;
+      wail_sleep_ms(1);
+   }
+}
+
+// A chunk stamped in the future must play AT its stamp, not on arrival: the
+// plugin pads silence until the stamped instant. This is what decouples the
+// app's delivery lead from the playback offset (the ~20ms early bug).
+TEST(recv_aligned_future_stamp_plays_at_stamp_not_arrival) {
+   wailtest::IpcTestServer server;
+   int port = server.start();
+   CHECK(port > 0);
+   if (!port) return;
+   RecvFixture fx;
+   CHECK(fx.setup(port));
+   if (!fx.plugin) return;
+   CHECK(server.waitConnected(5000));
+
+   const int64_t leadUs = 150000; // 150ms in the future
+   const uint32_t frames = 8 * kBlock;
+   CHECK(server.sendFrame(wailtest::encodeRemotePCM("peerA", 1, 2, (uint32_t)kSampleRate,
+                                                    monoMicrosNow() + leadUs,
+                                                    stereoBlock(sampleA, 0, frames))));
+
+   // Single DAW-paced pump: detect onset and collect content in one loop so
+   // the ring head never races the timeline between phases.
+   std::vector<float> col;
+   double onsetMs = -1;
+   auto t0 = std::chrono::steady_clock::now();
+   auto next = t0;
+   while (col.size() < 4 * kBlock) {
+      next += std::chrono::microseconds((int64_t)((double)kBlock * 1000000.0 / kSampleRate));
+      // Sleep coarse, then spin the last stretch: sleep overshoot (~1ms) would
+      // systematically lag the pump cadence and force periodic alignment skips.
+      std::this_thread::sleep_until(next - std::chrono::milliseconds(2));
+      while (std::chrono::steady_clock::now() < next) {
+      }
+      if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(3000)) break;
+      fx.processBlock();
+      bool blockSilent = true;
+      for (uint32_t i = 0; i < kBlock; i++)
+         if (fx.h.outL[0][i] != 0.0f || fx.h.outR[0][i] != 0.0f) { blockSilent = false; break; }
+      if (onsetMs < 0) {
+         if (blockSilent) continue;
+         onsetMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      }
+      col.insert(col.end(), fx.h.outL[0].begin(), fx.h.outL[0].end());
+   }
+   CHECK(onsetMs >= 0);
+   // FIFO playback would start within a few ms; aligned playback waits ~150ms.
+   CHECK_MSG(onsetMs > 60, "played on arrival, not at the stamp (FIFO behavior)");
+   CHECK_MSG(onsetMs < 600, "onset too late — stamp not honored either");
+   CHECK(col.size() >= 4 * kBlock);
+
+   // Content after onset is the chunk (ramp increments by 1). The onset block
+   // leads with pad zeros — alignment working as designed — so continuity is
+   // checked from the first non-zero sample; sampleA never hits zero here, so
+   // zeros are unambiguously padding. A bounded number of small pad/skip
+   // glitches is the mechanism absorbing cadence jitter, not a failure.
+   size_t start = 0;
+   while (start < col.size() && col[start] == 0.0f) start++;
+   CHECK(start < col.size());
+   int glitches = 0;
+   for (size_t j = start + 1; j < col.size(); j++) {
+      if (col[j] - col[j - 1] != 1.0f / 32768.0f && ++glitches > 8) {
+         ::wailtest::fail(__LINE__, "content not continuous after aligned onset at frame " + std::to_string(j));
+         break;
+      }
+   }
+}
+
+// A chunk stamped in the past must not play late: the plugin skips to the
+// frame due *now* — late audio is dropped, never played off-grid.
+TEST(recv_aligned_late_stamp_skips_to_now) {
+   wailtest::IpcTestServer server;
+   int port = server.start();
+   CHECK(port > 0);
+   if (!port) return;
+   RecvFixture fx;
+   CHECK(fx.setup(port));
+   if (!fx.plugin) return;
+   CHECK(server.waitConnected(5000));
+
+   // 200ms chunk stamped 100ms in the past: playback must start ~100ms in.
+   const uint32_t frames = 9600;
+   CHECK(server.sendFrame(wailtest::encodeRemotePCM("peerA", 1, 2, (uint32_t)kSampleRate,
+                                                    monoMicrosNow() - 100000,
+                                                    stereoBlock(sampleA, 0, frames))));
+
+   double ms = msToFirstAudio(fx, 3000);
+   CHECK(ms >= 0);
+   CHECK_MSG(ms < 500, "late-stamped chunk should play immediately (skip, not wait)");
+
+   // First sample ≈ pattern[~100ms × 48 frames/ms] = sampleA(4800+) = -10200ish.
+   float first = -1;
+   for (uint32_t i = 0; i < kBlock; i++)
+      if (fx.h.outL[0][i] != 0.0f) {
+         first = fx.h.outL[0][i];
+         break;
+      }
+   CHECK(first != -1);
+   float wantFirst = (float)sampleA(4800) / 32768.0f;
+   float tol = (float)(3 * kBlock) / 32768.0f; // delivery + cadence slack
+   CHECK_MSG(first > wantFirst - tol && first < wantFirst + tol,
+             "did not skip to ~now: first sample offset wrong");
+}
+
+// Legacy apps send a small interval index in the stamp field: that must fall
+// back to FIFO playback, not align to a nonsense timestamp.
+TEST(recv_legacy_small_stamp_plays_fifo) {
+   wailtest::IpcTestServer server;
+   int port = server.start();
+   CHECK(port > 0);
+   if (!port) return;
+   RecvFixture fx;
+   CHECK(fx.setup(port));
+   if (!fx.plugin) return;
+   CHECK(server.waitConnected(5000));
+
+   for (uint32_t b = 0; b < 4; b++)
+      CHECK(server.sendFrame(wailtest::encodeRemotePCM("peerA", 1, 2, (uint32_t)kSampleRate, b,
+                                                       stereoBlock(sampleA, (uint64_t)b * kBlock, kBlock))));
+
+   double ms = msToFirstAudio(fx, 3000);
+   CHECK(ms >= 0);
+   CHECK_MSG(ms < 200, "legacy interval-index field must not engage alignment");
 }
 
 TEST(recv_multistream_and_gone) {

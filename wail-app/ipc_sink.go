@@ -47,12 +47,15 @@ func (s *ipcEmitSink) WriteInterleaved(samples []int16, _ *abllink.SessionState,
 
 // Flush releases every queued chunk whose stamped beat is due at nowBeat
 // (minus leadBeats of transport-jitter margin) to all connected recv plugins.
-func (s *ipcEmitSink) Flush(nowBeat, leadBeats float64) {
+// playAt converts a chunk's stamped beat into the plugin-facing monotonic
+// play-at timestamp (the engine's Link↔machine clock bridge) — the stamp a
+// transport-aware plugin renders against its host sample clock.
+func (s *ipcEmitSink) Flush(nowBeat, leadBeats float64, playAt func(beat float64) int64) {
 	if s.pool.IsEmpty() {
 		return
 	}
-	s.queue.FlushDue(nowBeat, leadBeats, func(samples []int16) {
-		s.pool.Broadcast(EncodeFrame(EncodeRemotePCM(s.peerID, s.streamID, byte(s.channels), s.rate, 0, samples)))
+	s.queue.FlushDue(nowBeat, leadBeats, func(samples []int16, beat float64) {
+		s.pool.Broadcast(EncodeFrame(EncodeRemotePCM(s.peerID, s.streamID, byte(s.channels), s.rate, playAt(beat), samples)))
 	})
 }
 

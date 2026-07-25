@@ -25,7 +25,10 @@ package abllink
 #cgo windows LDFLAGS: -liphlpapi -lws2_32 -lwinmm
 
 #include <stdlib.h>
+#include <stdint.h>
 #include "abl_link.h"
+
+int64_t wail_mono_micros();
 */
 import "C"
 
@@ -61,6 +64,13 @@ func (l *Link) IsEnabled() bool {
 // NumPeers returns the number of peers currently connected in the Link session.
 func (l *Link) NumPeers() uint64 {
 	return uint64(C.abl_link_num_peers(l.h))
+}
+
+// MonoMicros returns the machine monotonic clock in microseconds — the domain
+// shared with the CLAP plugins for stamp conversion (see wrap.cpp). Not the
+// Link session clock.
+func MonoMicros() int64 {
+	return int64(C.wail_mono_micros())
 }
 
 // ClockMicros returns the current Link clock time in microseconds.

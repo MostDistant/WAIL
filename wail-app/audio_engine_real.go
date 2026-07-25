@@ -1142,6 +1142,11 @@ func (e *linkAudioEngine) emitLoop() {
 		case <-t.C:
 			e.link.CaptureAppSessionState(ss)
 			clockMicros := e.link.ClockMicros()
+			// Bridge offset between the Link session timeline and the machine
+			// monotonic clock the plugins read. The session timeline is offset
+			// and filtered (converges across peers), so this is measured fresh
+			// every tick; per-tick drift is sub-µs.
+			monoD := clockMicros - abllink.MonoMicros()
 
 			e.mu.Lock()
 			cfg := e.cfg
@@ -1178,7 +1183,11 @@ func (e *linkAudioEngine) emitLoop() {
 				lastLocalIdx = localIdx
 				haveLast = true
 			}
-			e.topUpSinks(ss, tempo, bpi, localBeat)
+			// playAt converts a chunk's stamped Link beat into the monotonic-µs
+			// instant its first frame should play on this machine — the stamp a
+			// transport-aware recv plugin renders against its host sample clock.
+			playAt := func(beat float64) int64 { return ss.TimeAtBeat(beat, bpi) - monoD }
+			e.topUpSinks(ss, tempo, bpi, localBeat, playAt)
 			// The metronome runs on the local Link grid, independent of the
 			// labeler that gates onBoundary — it works before a room anchor.
 			if e.metronomeOn.Load() {
@@ -1279,7 +1288,7 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 // topUpSinks advances each stream's feeder to playhead+cushion, writing paced
 // chunks into its sink (multiple chunks per tick when catching up after a stall),
 // then releases due chunks to FIFO sinks (recv plugins) at the playhead.
-func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, tempo, bpi float64, localBeat float64) {
+func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, tempo, bpi float64, localBeat float64, playAt func(beat float64) int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	leadBeats := float64(ipcLeadMs()) * tempo / 60000 // 0 at non-positive tempo: release exactly at the beat
@@ -1316,7 +1325,7 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, tempo, bpi float6
 		// delivery time is play time on that path.
 		for _, sk := range st.sinks {
 			if f, ok := sk.(fifoFlusher); ok {
-				f.Flush(localBeat, leadBeats)
+				f.Flush(localBeat, leadBeats, playAt)
 			}
 		}
 	}

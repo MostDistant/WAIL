@@ -163,16 +163,21 @@ func DecodeRawPCM(payload []byte) (RawPCM, bool) {
 	}, true
 }
 
-// EncodeRemotePCM encodes an App → Recv block for one remote stream. intervalIndex
-// is advisory (ordering/debug); the plugin plays FIFO. Samples are int16 LE.
-func EncodeRemotePCM(peerID string, streamID uint16, channels byte, sampleRate uint32, intervalIndex int64, samples []int16) []byte {
+// EncodeRemotePCM encodes an App → Recv block for one remote stream.
+// playAtMicros is the machine-monotonic time (wail_mono_micros domain) at
+// which the first frame should play: the app converts each chunk's Link-beat
+// stamp into this domain (it can read both clocks; the plugin can't), and a
+// transport-aware plugin renders the chunk at that instant against its host
+// sample clock. Zero means "no stamp" — the plugin plays FIFO (old apps,
+// transport-stopped fallback). Samples are int16 LE.
+func EncodeRemotePCM(peerID string, streamID uint16, channels byte, sampleRate uint32, playAtMicros int64, samples []int16) []byte {
 	msg := make([]byte, 0, 1+1+len(peerID)+2+1+4+8+2*len(samples))
 	msg = append(msg, IPCTagRemotePCM)
 	msg = appendStr8(msg, peerID)
 	msg = binary.LittleEndian.AppendUint16(msg, streamID)
 	msg = append(msg, channels)
 	msg = binary.LittleEndian.AppendUint32(msg, sampleRate)
-	msg = binary.LittleEndian.AppendUint64(msg, uint64(intervalIndex))
+	msg = binary.LittleEndian.AppendUint64(msg, uint64(playAtMicros))
 	for _, s := range samples {
 		msg = binary.LittleEndian.AppendUint16(msg, uint16(s))
 	}
@@ -181,12 +186,12 @@ func EncodeRemotePCM(peerID string, streamID uint16, channels byte, sampleRate u
 
 // RemotePCM is a decoded App → Recv block.
 type RemotePCM struct {
-	PeerID        string
-	StreamID      uint16
-	Channels      byte
-	SampleRate    uint32
-	IntervalIndex int64
-	Samples       []int16
+	PeerID       string
+	StreamID     uint16
+	Channels     byte
+	SampleRate   uint32
+	PlayAtMicros int64
+	Samples      []int16
 }
 
 // DecodeRemotePCM decodes a RemotePCM message. ok is false on a malformed frame.
@@ -201,7 +206,7 @@ func DecodeRemotePCM(payload []byte) (RemotePCM, bool) {
 	streamID := binary.LittleEndian.Uint16(rest[0:2])
 	channels := rest[2]
 	sampleRate := binary.LittleEndian.Uint32(rest[3:7])
-	intervalIndex := int64(binary.LittleEndian.Uint64(rest[7:15]))
+	playAtMicros := int64(binary.LittleEndian.Uint64(rest[7:15]))
 	pcm := rest[15:]
 	if len(pcm)%2 != 0 {
 		return RemotePCM{}, false
@@ -215,7 +220,7 @@ func DecodeRemotePCM(payload []byte) (RemotePCM, bool) {
 		StreamID:      streamID,
 		Channels:      channels,
 		SampleRate:    sampleRate,
-		IntervalIndex: intervalIndex,
+		PlayAtMicros: playAtMicros,
 		Samples:       samples,
 	}, true
 }

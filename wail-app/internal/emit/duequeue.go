@@ -29,12 +29,14 @@ func (q *DueQueue) Push(beat float64, samples []int16) {
 }
 
 // FlushDue emits every pending chunk whose stamped beat is due at nowBeat
-// (beat <= nowBeat+leadBeats), in arrival order. leadBeats lets delivery run a
-// small constant ahead of the beat so socket jitter doesn't starve the sink.
-func (q *DueQueue) FlushDue(nowBeat, leadBeats float64, emit func(samples []int16)) {
+// (beat <= nowBeat+leadBeats), in arrival order, each with its stamped beat
+// (the sink converts it into the plugin-facing play-at timestamp). leadBeats
+// lets delivery run a small constant ahead of the beat so socket jitter
+// doesn't starve the sink.
+func (q *DueQueue) FlushDue(nowBeat, leadBeats float64, emit func(samples []int16, beat float64)) {
 	due := nowBeat + leadBeats
 	for q.head < len(q.chunks) && q.chunks[q.head].beat <= due {
-		emit(q.chunks[q.head].samples)
+		emit(q.chunks[q.head].samples, q.chunks[q.head].beat)
 		q.head++
 	}
 	// Reclaim the backing array once fully drained so a long-running stream
