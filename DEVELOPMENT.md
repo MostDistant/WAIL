@@ -75,6 +75,26 @@ sed -i 's/\binterface\b/iface/g' vendor/link/include/ableton/link_audio/Channels
 
 (The Windows CI jobs do this automatically; macOS/Linux don't need it.)
 
+### Debug room + offset analysis (latency hunting, no DAW needed)
+
+For measuring a peer's rhythmic phase offset against the room grid (the
+"GerenM felt 90ms off" class of problem):
+
+- **GUI**: press **Debug Room** on the join screen. It joins the shared
+  `wail-debug` room and arms all diagnostics: the WAIL Metronome broadcast
+  (a grid-rendered reference click), server-echo loopback, and peer log
+  sharing (the room collates everyone's logs into each client).
+- **Headless**: `-metronome-broadcast` (plus `-loopback` for self-echo).
+- **In-app readout (DAW-less)**: the Debug tab's *Stream offsets* section
+  shows each remote stream's measured phase offset vs the room grid in ms
+  (`internal/offset`, computed from labeled WAIF frames — exact, no envelope
+  matching). |offset| > 25ms is highlighted. A peer performing late because
+  their monitoring path is latent shows it directly.
+- **Probe**: `linkaudio-probe -offset-ref "WAIL Metronome"` cross-correlates
+  each channel's envelope against the reference metronome (best for
+  same-period rhythmic content), and `-offset-dump <dir>` writes per-channel
+  RMS envelopes as CSVs for offline analysis.
+
 ### Desktop App (dev mode)
 
 ```sh

@@ -88,6 +88,7 @@
         </details>
 
         <button type="submit" id="join-btn">Join Room</button>
+        <button type="button" id="debug-room-btn" class="debug-btn" title="Join the shared wail-debug room with the reference metronome, loopback, and peer log sharing armed">Debug Room</button>
       </form>
 
       <div id="join-error" class="error" style="display:none"></div>
@@ -258,6 +259,11 @@
         <div id="network-health" class="network-health">
           <span class="empty">No diagnostics yet</span>
         </div>
+      </section>
+
+      <section class="session-section" id="stream-offsets-section" style="display:none">
+        <h3 class="section-label">Stream offsets vs room grid (debug)</h3>
+        <div id="stream-offsets" class="network-health"></div>
       </section>
 
       <section class="session-section">

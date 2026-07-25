@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"sync"
@@ -563,6 +564,17 @@ func sessionLoop(
 				sentStreamNames = nil // new peer: re-broadcast even if unchanged
 				syncStreamNames()
 
+			case "LogBroadcast":
+				// Peer log sharing: fold a peer's log line into our log (and the
+				// GUI panel) with their name, so one client collates the room.
+				name := ev.From
+				peers.WithPeer(ev.From, func(p *PeerState) {
+					if p.DisplayName != nil {
+						name = *p.DisplayName
+					}
+				})
+				log.Printf("[%s] %s", name, ev.Message)
+
 			case "PeerLeft":
 				var name string
 				peers.WithPeer(ev.PeerID, func(p *PeerState) {
@@ -1112,6 +1124,10 @@ func sessionLoop(
 				}
 			}
 
+			// Engine health snapshot (also carries the debug-room stream offsets).
+			// Fetched before the emit so the diff log follows in the same tick.
+			health := audioEngine.Health()
+
 			emitter.Emit("status:update", StatusUpdate{
 				BPM: state.BPM, Beat: state.Beat, Phase: state.Phase,
 				LinkPeers: state.NumPeers, Peers: peerInfos, Slots: slotInfos,
@@ -1121,6 +1137,7 @@ func sessionLoop(
 				AudioBytesSent: audioBytesSent, AudioBytesRecv: audioBytesRecv,
 				AudioDCOpen: dcOpen, PluginConnected: true,
 				AlignState: alignStateStr, AlignErrorMs: alignErrMs, RelayRTTMs: relayRttMs,
+				StreamOffsets: health.StreamOffsets,
 				Recording: recorder != nil,
 				RecordingSizeBytes: func() uint64 {
 					if recorder != nil {
@@ -1136,9 +1153,11 @@ func sessionLoop(
 			mesh.Broadcast(NewAudioStatus(dcOpen, audioIntervalsSent, audioIntervalsReceived, true, audioStatusSeq))
 
 			// Engine health: log any counter that moved (each increment is a
-			// likely-audible event), then ship the snapshot with the network event.
-			health := audioEngine.Health()
-			if health != lastHealth {
+			// likely-audible event). StreamOffsets is a slice — compare the
+			// snapshot with it zeroed out (offsets are informational only).
+			hcNow, hcPrev := health, lastHealth
+			hcNow.StreamOffsets, hcPrev.StreamOffsets = nil, nil
+			if !reflect.DeepEqual(hcNow, hcPrev) {
 				delta := func(logf func(string, ...any), what string, prev, now uint64) {
 					if now > prev {
 						logf("[audio] %s +%d (total %d)", what, now-prev, now)

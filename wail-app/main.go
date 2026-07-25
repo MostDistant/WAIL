@@ -31,6 +31,7 @@ func main() {
 	wavFile := flag.String("wav", "", "WAV file to send (headless mode)")
 	testTone := flag.Bool("test-tone", false, "Send a synthetic test tone on stream 0 (headless mode; no DAW/WAV needed)")
 	loopback := flag.Bool("loopback", false, "Ask the relay to echo our own audio back; republished as a \"(loopback)\" Link Audio channel (headless mode)")
+	metronomeBroadcast := flag.Bool("metronome-broadcast", false, "Broadcast the WAIL Metronome click to the room as an audio stream (headless mode; debug reference)")
 	instance := flag.Int("instance", 0, "Instance number (separate data dir / identity)")
 	flag.Parse()
 
@@ -61,7 +62,7 @@ func main() {
 	log.Printf("App initialized — identity: %s", appBackend.identity)
 
 	if *headless {
-		runHeadless(appBackend, *room, *password, *bpmFlag, *name, *wavFile, *testTone, *loopback)
+		runHeadless(appBackend, *room, *password, *bpmFlag, *name, *wavFile, *testTone, *loopback, *metronomeBroadcast)
 		return
 	}
 
@@ -127,7 +128,7 @@ func main() {
 	}
 }
 
-func runHeadless(app *App, room, password string, bpm float64, name, wavFile string, testTone, loopback bool) {
+func runHeadless(app *App, room, password string, bpm float64, name, wavFile string, testTone, loopback, metronomeBroadcast bool) {
 	if room == "" {
 		log.Fatal("-room is required in headless mode")
 	}
@@ -173,6 +174,13 @@ func runHeadless(app *App, room, password string, bpm float64, name, wavFile str
 			log.Fatalf("Failed to enable loopback: %v", err)
 		}
 		log.Printf("Server-echo loopback enabled")
+	}
+
+	if metronomeBroadcast {
+		if err := app.SetMetronomeBroadcast(true); err != nil {
+			log.Fatalf("Failed to enable metronome broadcast: %v", err)
+		}
+		log.Printf("WAIL Metronome broadcast enabled")
 	}
 
 	// Block until signal

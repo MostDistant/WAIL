@@ -368,6 +368,30 @@ func (a *App) SetTelemetry(enabled bool) error {
 	return nil
 }
 
+// DebugRoom joins the shared "wail-debug" room with all diagnostics armed:
+// the WAIL Metronome broadcast (a grid-rendered reference click every peer
+// can measure against), server-echo loopback, and peer log sharing (the room
+// collates everyone's logs). Built for offset/latency hunts: have the other
+// peer press it too, then compare their content against their own metronome
+// (linkaudio-probe -offset-ref).
+func (a *App) DebugRoom(displayName string, linkAudioName *string) (*JoinResult, error) {
+	res, err := a.JoinRoom("wail-debug", nil, displayName, nil, nil, nil, nil, nil, nil, nil, nil, linkAudioName)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.SetMetronomeBroadcast(true); err != nil {
+		log.Printf("[app] debug room: metronome broadcast failed: %v", err)
+	}
+	if err := a.SetLoopback(true); err != nil {
+		log.Printf("[app] debug room: loopback failed: %v", err)
+	}
+	if err := a.SetLogSharing(true); err != nil {
+		log.Printf("[app] debug room: log sharing failed: %v", err)
+	}
+	log.Printf("[app] debug room joined: metronome broadcast + loopback + log sharing armed")
+	return res, nil
+}
+
 // SetLogSharing toggles WebSocket log broadcasting to peers.
 func (a *App) SetLogSharing(enabled bool) error {
 	if a.wsLog != nil {
