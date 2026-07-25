@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.14.0 (2026-07-25)
+
+### Features
+
+- Link Bridge Send — publish a DAW track as a Link Audio channel (ADR-0007) (#449)
+- Link Bridge Recv — 16-port room-stream receiver with stamp-aligned rendering (ADR-0007) (#451)
+
+### Fixes
+
+- stamp IPC capture ahead of the capture clock (send-side output latency) (#452)
+
 ## 3.13.0 (2026-07-25)
 
 ### Features
