@@ -127,8 +127,14 @@ static inline uint16_t wail_get_u16(const uint8_t *b) {
 static inline uint64_t wail_get_u64(const uint8_t *b) {
    uint64_t v;
    memcpy(&v, b, sizeof(v));
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+   // MSVC doesn't define __BYTE_ORDER__ — an undefined macro compares 0 == 0
+   // here, so the guard must test defined-ness first (Windows CI found this).
+#  if defined(_MSC_VER)
+   v = _byteswap_uint64(v);
+#  else
    v = __builtin_bswap64(v);
+#  endif
 #endif
    return v;
 }
