@@ -3,3 +3,4 @@
 wail-app/wail-app
 /build/
 .envrc
+debug-runs/
