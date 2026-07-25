@@ -49,7 +49,9 @@ class Wail < Formula
     # `wail-install-plugins` (below) copies them there on demand.
     system "cmake", "-S", "plugins", "-B", "build/plugins", "-DCMAKE_BUILD_TYPE=Release"
     system "cmake", "--build", "build/plugins"
-    lib.install Dir["build/plugins/*.clap"]
+    # Product bundles only: dev tools (transport-probe, linkbridge-spike) build
+    # alongside but must not be installed.
+    lib.install Dir["build/plugins/{wail-send,wail-recv,linkbridge-send,linkbridge-recv}.clap"]
     bin.install "scripts/wail-install-plugins.sh" => "wail-install-plugins"
   end
 

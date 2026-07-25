@@ -25,7 +25,8 @@ else
 fi
 
 # Accept both a Homebrew-style prefix (bundles under lib/) and a raw build dir
-# (bundles at the top level).
+# (bundles at the top level). Product bundles only — dev tools
+# (transport-probe, linkbridge-spike) are never installed.
 if [ -e "${PREFIX}/lib/wail-send.clap" ]; then
     SRC_DIR="${PREFIX}/lib"
 else
@@ -58,6 +59,8 @@ install_bundle() {
 
 install_bundle "${SRC_DIR}/wail-send.clap"
 install_bundle "${SRC_DIR}/wail-recv.clap"
+install_bundle "${SRC_DIR}/linkbridge-send.clap"
+install_bundle "${SRC_DIR}/linkbridge-recv.clap"
 
 echo ""
 echo "Done. Rescan plugins in your DAW to pick up the changes."
