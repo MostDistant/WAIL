@@ -45,6 +45,10 @@ add_wail_harness(wail-plugin-tests main.cpp test_send.cpp test_recv.cpp test_lin
 # E2E chain driver for scripts/plugin-e2e.sh (not a ctest: needs two live apps).
 add_wail_harness(wail-plugin-chain chain_main.cpp)
 
+# Mini-DAW system simulator (not a ctest: needs a live app + relay, see
+# scripts/minidaw-e2e.sh).
+add_wail_harness(minidaw minidaw_main.cpp)
+
 add_test(NAME wail-plugin-tests COMMAND wail-plugin-tests)
 # The plugins' IPC threads poll/sleep (reconnect backoff, recv timeouts), so a
 # failing test can take seconds to unwind; keep ctest patient.
