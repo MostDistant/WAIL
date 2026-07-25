@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.12.6 (2026-07-25)
+
+### Fixes
+
+- deliver paced chunks to CLAP recv plugins at their stamped beat (#438)
+
 ## 3.12.5 (2026-07-25)
 
 ### Fixes
