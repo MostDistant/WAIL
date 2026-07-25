@@ -46,7 +46,15 @@ const (
 	engineBitrateKbps  = 256 // quality-first: music at 48k stereo; ~34KB/s per stream
 	discoveryInterval  = 1 * time.Second
 	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
-	// emitCushionMs is how far ahead of the playhead each sink is kept fed —
+	// ipcLeadMs is how far ahead of its stamped beat a chunk may be *delivered*
+// to a recv plugin (FIFO sink): enough to cover emit-tick and socket jitter so
+// the plugin's ring never starves, but small enough to be inaudible next to
+// the interval offset. The plugin renders arrival order, so delivery lead IS
+// playback offset — this replaces the emit cushion on the plugin path, which
+// made all remote audio play ~cushion late.
+ipcLeadMs = 20
+
+// emitCushionMs is how far ahead of the playhead each sink is kept fed —
 	// stall tolerance for the emit loop. It stamps audio into the future, which
 	// some Link Audio receivers stall on (the VOID DAW-bridge plugin chokes on
 	// any feed-ahead), so the default was briefly 0 — floored to one ~5ms write
@@ -1086,7 +1094,7 @@ func (e *linkAudioEngine) emitLoop() {
 				lastLocalIdx = localIdx
 				haveLast = true
 			}
-			e.topUpSinks(ss, bpi, localBeat)
+			e.topUpSinks(ss, tempo, bpi, localBeat)
 			// The metronome runs on the local Link grid, independent of the
 			// labeler that gates onBoundary — it works before a room anchor.
 			if e.metronomeOn.Load() {
@@ -1185,10 +1193,15 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 }
 
 // topUpSinks advances each stream's feeder to playhead+cushion, writing paced
-// chunks into its sink (multiple chunks per tick when catching up after a stall).
-func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, bpi float64, localBeat float64) {
+// chunks into its sink (multiple chunks per tick when catching up after a stall),
+// then releases due chunks to FIFO sinks (recv plugins) at the playhead.
+func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, tempo, bpi float64, localBeat float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	leadBeats := ipcLeadMs * tempo / 60000 // 0 at non-positive tempo: release exactly at the beat
+	if leadBeats < 0 {
+		leadBeats = 0
+	}
 	for _, st := range e.emit {
 		if len(st.sinks) == 0 {
 			continue
@@ -1215,6 +1228,13 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, bpi float64, loca
 		ev, fr := st.feeder.Underruns()
 		st.sinkUnderrunEvents.Store(ev)
 		st.sinkUnderrunFrames.Store(fr)
+		// FIFO sinks (recv plugins) get their queued chunks as they come due —
+		// delivery time is play time on that path.
+		for _, sk := range st.sinks {
+			if f, ok := sk.(fifoFlusher); ok {
+				f.Flush(localBeat, leadBeats)
+			}
+		}
 	}
 }
 
