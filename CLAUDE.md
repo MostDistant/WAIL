@@ -184,6 +184,26 @@ Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOC
 
 `go test` is all in-process. To exercise the real Link Audio Sink/Source path + relay round trip end-to-end on one machine (no DAW), run `./scripts/tier2-e2e.sh` (local relay + WAV-sweep sender + receiver + `linkaudio-probe`; exit 0 = PASS). See DEVELOPMENT.md → "Tier 2 audio E2E". For the CLAP bridge path (ADR-0005), `./scripts/plugin-e2e.sh` does the equivalent through the plugins: clap-trap-hosted wail-send/wail-recv wired to two real headless apps over a local relay, sweep in, RMS/freq analysis out (exit 0 = PASS).
 
+### Two-machine debugging (pair-debug)
+
+When a bug needs **two real machines with DAWs** (e.g. sync/audio issues that only appear across networks), use `scripts/pair-debug.sh` — do NOT hand-roll ssh/scp/headless invocations; the harness already handles build, deploy, lifecycle, readiness, and log collection:
+
+```sh
+scripts/pair-debug.sh start [--relay prod|local] [--room X] [--bpm N] [--password PW] \
+                            [--local-test-tone] [--remote-test-tone] [--local-wav F] [--remote-wav F]
+scripts/pair-debug.sh logs     # stream both sides, [local]/[remote] prefixed; Ctrl-C stops watching only
+scripts/pair-debug.sh status   # room, relay, PID liveness both sides
+scripts/pair-debug.sh stop     # graceful SIGTERM + archive all logs to debug-runs/<ts>/
+```
+
+- Drives a headless WAIL locally (instance 90, name `studio`) and one on **andrews-laptop** (`100.105.127.32`, Tailscale SSH, instance 91, name `laptop`). Both join a fresh `debug-<ts>` room; each machine's DAW talks to its local WAIL via Link Audio.
+- Default relay is production (`wss://wail-relay.fly.dev`); `--relay local` spins up the studio relay and repoints both sides over Tailscale (use when isolating relay-vs-app).
+- `start` **gates on both sides logging a successful room join** and tears down loudly on failure — a green `READY` means the pair is actually connected.
+- `stop` archives `local|remote.stdout.log` + `local|remote.wail.log` into `debug-runs/<ts>/` (gitignored; `debug-runs/latest` symlink) — debug from those artifacts.
+- Safety: kills only recorded PIDs after cmdline verification (never `pkill`); instances 90/91 keep clear of any GUI WAIL. `start` refuses to run over an unstopped session without `--force`.
+- `--local-test-tone` / `--remote-test-tone` give a DAW-less sanity check (tone streams over the relay and is republished as a Link Audio channel on the far side).
+- Remote prereqs (already done for andrews-laptop): Remote Login + authorized key, `brew install opus opusfile`. Env overrides: `PAIR_REMOTE`, `PAIR_LOCAL_INSTANCE`, `PAIR_REMOTE_INSTANCE`, `PAIR_RELAY_PORT`, `PAIR_JOIN_TIMEOUT`.
+
 **Skip tests for docs-only changes.** If a PR only modifies `.md` files (or other non-code docs), do not run the test suite — building the audio path requires the Link SDK/cgo and is slow. Tests are not needed when no code paths change.
 
 ## Code Conventions
