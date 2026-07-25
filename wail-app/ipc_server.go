@@ -98,7 +98,9 @@ func (s *ipcServer) handleConn(ctx context.Context, conn net.Conn) {
 	case IPCRoleSend:
 		s.handleSend(ctx, conn)
 	case IPCRoleRecv:
-		s.handleRecv(ctx, conn)
+		s.handleRecv(ctx, conn, 1)
+	case IPCRoleRecvV2:
+		s.handleRecv(ctx, conn, 2)
 	default:
 		log.Printf("[ipc] unknown role byte 0x%02x", role[0])
 	}
@@ -157,19 +159,19 @@ func (s *ipcServer) handleSend(ctx context.Context, conn net.Conn) {
 	}
 }
 
-func (s *ipcServer) handleRecv(ctx context.Context, conn net.Conn) {
+func (s *ipcServer) handleRecv(ctx context.Context, conn net.Conn, version int) {
 	id := int(s.nextID.Add(1))
 	// Add before replaying names: a stream created in this window still reaches the
 	// new connection via Broadcast (a duplicate name is harmless); replaying first
 	// could miss it.
-	s.pool.Add(id, conn)
+	s.pool.Add(id, conn, version)
 	defer s.pool.Remove(id)
 	// Enqueue the name replay through the pool so it shares this conn's single writer
 	// goroutine with Broadcast (no concurrent writes to the same socket).
 	for _, f := range s.engine.StreamNameFrames() {
 		s.pool.SendTo(id, f)
 	}
-	log.Printf("[ipc] recv plugin connected (id %d)", id)
+	log.Printf("[ipc] recv plugin connected (id %d, wire v%d)", id, version)
 
 	rb := NewIPCRecvBuffer()
 	buf := make([]byte, 4096)

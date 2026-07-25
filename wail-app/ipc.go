@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -24,10 +25,14 @@ import (
 // past this is a protocol violation and the connection should be dropped.
 const maxIPCFrameSize = 16 << 20
 
-// IPC role bytes sent by a plugin as the first byte on connect.
+// IPC role bytes sent by a plugin as the first byte on connect. RecvV2 is the
+// same role with a versioned wire appetite: the app sends RemotePCM2 (beat
+// stamps) only to v2 connections. A new role byte (not a trailing version
+// byte) keeps negotiation deterministic — no deadline racing the metrics tick.
 const (
-	IPCRoleSend byte = 0x00
-	IPCRoleRecv byte = 0x01
+	IPCRoleSend   byte = 0x00
+	IPCRoleRecv   byte = 0x01
+	IPCRoleRecvV2 byte = 0x02
 )
 
 // IPC message tags. 0x10+ are the raw-PCM tags of the revived protocol; 0x06
@@ -38,6 +43,7 @@ const (
 	IPCTagStreamName byte = 0x12 // App → Recv: display name for a stream's output port
 	IPCTagStreamGone byte = 0x13 // App → Recv: a stream ended; free its port
 	IPCTagTrackName  byte = 0x14 // Send → App: DAW track name for a plugin stream
+	IPCTagRemotePCM2 byte = 0x15 // App → Recv: RemotePCM + Link beat stamp (v2 role)
 	IPCTagMetrics    byte = 0x06 // Plugin → App: cumulative drop counter
 )
 
@@ -184,13 +190,33 @@ func EncodeRemotePCM(peerID string, streamID uint16, channels byte, sampleRate u
 	return msg
 }
 
-// RemotePCM is a decoded App → Recv block.
+// EncodeRemotePCM2 encodes the v2 App → Recv block: everything RemotePCM
+// carries plus the chunk's Link beat (f64) for transport-phase alignment.
+// Header is 23 bytes: tag(1)+peerID(1+n)+streamID(2)+channels(1)+rate(4)
+// +playAtMicros(8)+beat(8).
+func EncodeRemotePCM2(peerID string, streamID uint16, channels byte, sampleRate uint32, playAtMicros int64, beat float64, samples []int16) []byte {
+	msg := make([]byte, 0, 1+1+len(peerID)+2+1+4+8+8+2*len(samples))
+	msg = append(msg, IPCTagRemotePCM2)
+	msg = appendStr8(msg, peerID)
+	msg = binary.LittleEndian.AppendUint16(msg, streamID)
+	msg = append(msg, channels)
+	msg = binary.LittleEndian.AppendUint32(msg, sampleRate)
+	msg = binary.LittleEndian.AppendUint64(msg, uint64(playAtMicros))
+	msg = binary.LittleEndian.AppendUint64(msg, math.Float64bits(beat))
+	for _, s := range samples {
+		msg = binary.LittleEndian.AppendUint16(msg, uint16(s))
+	}
+	return msg
+}
+
+// RemotePCM is a decoded App → Recv block. Beat is 0 for v1 frames (absent).
 type RemotePCM struct {
 	PeerID       string
 	StreamID     uint16
 	Channels     byte
 	SampleRate   uint32
 	PlayAtMicros int64
+	Beat         float64
 	Samples      []int16
 }
 
@@ -216,12 +242,45 @@ func DecodeRemotePCM(payload []byte) (RemotePCM, bool) {
 		samples[i] = int16(binary.LittleEndian.Uint16(pcm[2*i:]))
 	}
 	return RemotePCM{
-		PeerID:        peerID,
-		StreamID:      streamID,
-		Channels:      channels,
-		SampleRate:    sampleRate,
+		PeerID:       peerID,
+		StreamID:     streamID,
+		Channels:     channels,
+		SampleRate:   sampleRate,
 		PlayAtMicros: playAtMicros,
-		Samples:       samples,
+		Samples:      samples,
+	}, true
+}
+
+// DecodeRemotePCM2 decodes a v2 RemotePCM block. ok is false on a malformed frame.
+func DecodeRemotePCM2(payload []byte) (RemotePCM, bool) {
+	if len(payload) < 1 || payload[0] != IPCTagRemotePCM2 {
+		return RemotePCM{}, false
+	}
+	peerID, rest, ok := readStr8(payload[1:])
+	if !ok || len(rest) < 23 {
+		return RemotePCM{}, false
+	}
+	streamID := binary.LittleEndian.Uint16(rest[0:2])
+	channels := rest[2]
+	sampleRate := binary.LittleEndian.Uint32(rest[3:7])
+	playAtMicros := int64(binary.LittleEndian.Uint64(rest[7:15]))
+	beat := math.Float64frombits(binary.LittleEndian.Uint64(rest[15:23]))
+	pcm := rest[23:]
+	if len(pcm)%2 != 0 {
+		return RemotePCM{}, false
+	}
+	samples := make([]int16, len(pcm)/2)
+	for i := range samples {
+		samples[i] = int16(binary.LittleEndian.Uint16(pcm[2*i:]))
+	}
+	return RemotePCM{
+		PeerID:       peerID,
+		StreamID:     streamID,
+		Channels:     channels,
+		SampleRate:   sampleRate,
+		PlayAtMicros: playAtMicros,
+		Beat:         beat,
+		Samples:      samples,
 	}, true
 }
 
@@ -360,10 +419,12 @@ const ipcWriterQueue = 256
 const ipcWriteDeadline = 200 * time.Millisecond
 
 // ipcWriter serializes writes to one recv connection on its own goroutine, fed by a
-// bounded channel so producers never block on socket backpressure.
+// bounded channel so producers never block on socket backpressure. version is the
+// negotiated wire appetite (1 = RemotePCM, 2 = RemotePCM2 with beat stamps).
 type ipcWriter struct {
 	conn    net.Conn
 	ch      chan []byte
+	version int
 	dropped atomic.Uint64
 }
 
@@ -381,8 +442,8 @@ func NewIPCWriterPool() *IPCWriterPool {
 }
 
 // Add registers a recv connection and starts its writer goroutine.
-func (p *IPCWriterPool) Add(connID int, conn net.Conn) {
-	w := &ipcWriter{conn: conn, ch: make(chan []byte, ipcWriterQueue)}
+func (p *IPCWriterPool) Add(connID int, conn net.Conn, version int) {
+	w := &ipcWriter{conn: conn, ch: make(chan []byte, ipcWriterQueue), version: version}
 	p.mu.Lock()
 	p.writers[connID] = w
 	p.mu.Unlock()
@@ -439,6 +500,36 @@ func (p *IPCWriterPool) Broadcast(frame []byte) {
 			w.dropped.Add(1)
 		}
 	}
+}
+
+// BroadcastToVersion enqueues a frame only for connections at the given wire
+// version (RemotePCM2 frames must never reach a v1 plugin). Same drop semantics
+// as Broadcast.
+func (p *IPCWriterPool) BroadcastToVersion(version int, frame []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, w := range p.writers {
+		if w.version != version {
+			continue
+		}
+		select {
+		case w.ch <- frame:
+		default:
+			w.dropped.Add(1)
+		}
+	}
+}
+
+// HasVersion reports whether any connected recv plugin speaks the given wire version.
+func (p *IPCWriterPool) HasVersion(version int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, w := range p.writers {
+		if w.version == version {
+			return true
+		}
+	}
+	return false
 }
 
 // SendTo enqueues a frame to one connection's writer without blocking (drops on a

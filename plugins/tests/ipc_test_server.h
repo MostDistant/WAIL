@@ -306,6 +306,26 @@ inline std::vector<uint8_t> encodeRemotePCM(const std::string &peerID, uint16_t 
    return m;
 }
 
+// encodeRemotePCM2 mirrors EncodeRemotePCM2: v2 frame with the Link beat
+// stamp (f64) alongside the mono-µs play-at.
+inline std::vector<uint8_t> encodeRemotePCM2(const std::string &peerID, uint16_t streamID,
+                                             uint8_t channels, uint32_t sampleRate,
+                                             int64_t playAtMicros, double beat,
+                                             const std::vector<int16_t> &samples) {
+   std::vector<uint8_t> m;
+   m.push_back(WAIL_TAG_REMOTEPCM2);
+   putStr8(m, peerID);
+   putU16(m, streamID);
+   m.push_back(channels);
+   putU32(m, sampleRate);
+   putU64(m, (uint64_t)playAtMicros);
+   uint64_t beatBits;
+   memcpy(&beatBits, &beat, 8);
+   putU64(m, beatBits);
+   for (int16_t s : samples) putU16(m, (uint16_t)s);
+   return m;
+}
+
 // encodeStreamName mirrors EncodeStreamName: App → Recv port display name.
 inline std::vector<uint8_t> encodeStreamName(const std::string &peerID, uint16_t streamID,
                                              const std::string &name) {

@@ -55,7 +55,15 @@ func (s *ipcEmitSink) Flush(nowBeat, leadBeats float64, playAt func(beat float64
 		return
 	}
 	s.queue.FlushDue(nowBeat, leadBeats, func(samples []int16, beat float64) {
-		s.pool.Broadcast(EncodeFrame(EncodeRemotePCM(s.peerID, s.streamID, byte(s.channels), s.rate, playAt(beat), samples)))
+		ch, rate := byte(s.channels), s.rate
+		// Version-aware fan-out: transport-aware (v2) plugins get the beat stamp
+		// for phase alignment; legacy plugins get the v1 frame they understand.
+		if s.pool.HasVersion(2) {
+			s.pool.BroadcastToVersion(2, EncodeFrame(EncodeRemotePCM2(s.peerID, s.streamID, ch, rate, playAt(beat), beat, samples)))
+		}
+		if s.pool.HasVersion(1) {
+			s.pool.BroadcastToVersion(1, EncodeFrame(EncodeRemotePCM(s.peerID, s.streamID, ch, rate, playAt(beat), samples)))
+		}
 	})
 }
 

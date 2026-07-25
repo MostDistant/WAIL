@@ -147,7 +147,7 @@ TEST(recv_pcm_routing_and_naming) {
    CHECK(fx.setup(port));
    if (!fx.plugin) return;
    CHECK_MSG(server.waitConnected(5000), "plugin did not connect");
-   CHECK(server.role() == WAIL_IPC_ROLE_RECV);
+   CHECK(server.role() == WAIL_IPC_ROLE_RECV_V2); // v2 preferred against a current app
 
    CHECK(server.sendFrame(wailtest::encodeStreamName("peerA", 1, "Alice")));
    const uint32_t nblocks = 4;
@@ -320,6 +320,87 @@ TEST(recv_legacy_small_stamp_plays_fifo) {
    double ms = msToFirstAudio(fx, 3000);
    CHECK(ms >= 0);
    CHECK_MSG(ms < 200, "legacy interval-index field must not engage alignment");
+}
+
+// With a rolling transport, a v2 chunk is placed by *beat phase*, not by its
+// mono-µs stamp: the host's transport→sample mapping decides where on the DAW
+// grid the chunk lands (latency-compensated, sample-accurate).
+TEST(recv_phase_aligned_when_transport_rolling) {
+   wailtest::IpcTestServer server;
+   int port = server.start();
+   CHECK(port > 0);
+   if (!port) return;
+   RecvFixture fx;
+   CHECK(fx.setup(port));
+   if (!fx.plugin) return;
+   CHECK(server.waitConnected(5000));
+
+   // 120bpm, block starts at beat phase .75; chunk begins at beat phase .20 →
+   // it must wait 0.45 beats = 225ms. (Phase .25/.75 would be the exact ±0.5
+   // ambiguity boundary; real stamps are consistent, as here: the µs stamp
+   // agrees with the beat-derived wait.)
+   fx.h.setTransport(12.75, 120.0);
+   const uint32_t frames = 8 * kBlock;
+   CHECK(server.sendFrame(wailtest::encodeRemotePCM2("peerA", 1, 2, (uint32_t)kSampleRate,
+                                                     monoMicrosNow() + 225000, 100.20,
+                                                     stereoBlock(sampleA, 0, frames))));
+
+   std::vector<float> col;
+   double onsetMs = -1;
+   auto t0 = std::chrono::steady_clock::now();
+   auto next = t0;
+   while (col.size() < 4 * kBlock) {
+      next += std::chrono::microseconds((int64_t)((double)kBlock * 1000000.0 / kSampleRate));
+      std::this_thread::sleep_until(next - std::chrono::milliseconds(2));
+      while (std::chrono::steady_clock::now() < next) {
+      }
+      if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(3000)) break;
+      fx.processBlock();
+      bool blockSilent = true;
+      for (uint32_t i = 0; i < kBlock; i++)
+         if (fx.h.outL[0][i] != 0.0f || fx.h.outR[0][i] != 0.0f) { blockSilent = false; break; }
+      if (onsetMs < 0) {
+         if (blockSilent) continue;
+         onsetMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      }
+      col.insert(col.end(), fx.h.outL[0].begin(), fx.h.outL[0].end());
+   }
+   CHECK(onsetMs >= 0);
+   CHECK_MSG(onsetMs > 150, "did not wait for the phase point (played early)");
+   CHECK_MSG(onsetMs < 450, "waited too long past the phase point");
+   CHECK(col.size() >= 4 * kBlock);
+   size_t start = 0;
+   while (start < col.size() && col[start] == 0.0f) start++;
+   CHECK(start < col.size());
+   int glitches = 0;
+   for (size_t j = start + 1; j < col.size(); j++) {
+      if (col[j] - col[j - 1] != 1.0f / 32768.0f && ++glitches > 8) {
+         ::wailtest::fail(__LINE__, "content not continuous after phase-aligned onset at frame " + std::to_string(j));
+         break;
+      }
+   }
+   fx.h.clearTransport();
+}
+
+// Same chunk, no transport: the mono-µs stamp drives (fallback path), so a
+// chunk stamped "now" plays immediately even though its beat phase is future.
+TEST(recv_phase_falls_back_to_mono_without_transport) {
+   wailtest::IpcTestServer server;
+   int port = server.start();
+   CHECK(port > 0);
+   if (!port) return;
+   RecvFixture fx;
+   CHECK(fx.setup(port));
+   if (!fx.plugin) return;
+   CHECK(server.waitConnected(5000));
+
+   const uint32_t frames = 4 * kBlock;
+   CHECK(server.sendFrame(wailtest::encodeRemotePCM2("peerA", 1, 2, (uint32_t)kSampleRate,
+                                                     monoMicrosNow(), 100.25,
+                                                     stereoBlock(sampleA, 0, frames))));
+   double ms = msToFirstAudio(fx, 3000);
+   CHECK(ms >= 0);
+   CHECK_MSG(ms < 200, "without a transport the mono stamp must drive playback");
 }
 
 TEST(recv_multistream_and_gone) {

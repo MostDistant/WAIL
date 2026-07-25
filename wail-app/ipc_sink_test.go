@@ -44,7 +44,7 @@ func TestIPCEmitSinkFrames(t *testing.T) {
 	serverEnd, clientEnd := net.Pipe()
 	defer serverEnd.Close()
 	defer clientEnd.Close()
-	pool.Add(1, serverEnd)
+	pool.Add(1, serverEnd, 1)
 	defer pool.Remove(1) // stop the writer goroutine at test end
 	frames := pipeFrameReader(clientEnd)
 
@@ -106,6 +106,46 @@ func TestIPCEmitSinkFrames(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for StreamName")
+	}
+}
+
+func TestIPCEmitSinkFlushFanOutByVersion(t *testing.T) {
+	pool := NewIPCWriterPool()
+	srv1, cli1 := net.Pipe()
+	defer srv1.Close()
+	defer cli1.Close()
+	srv2, cli2 := net.Pipe()
+	defer srv2.Close()
+	defer cli2.Close()
+	pool.Add(1, srv1, 1) // legacy recv plugin
+	defer pool.Remove(1)
+	pool.Add(2, srv2, 2) // transport-aware recv plugin
+	defer pool.Remove(2)
+	frames1 := pipeFrameReader(cli1)
+	frames2 := pipeFrameReader(cli2)
+
+	sink := newIPCEmitSink(pool, "peerZ", 5)
+	sink.WriteInterleaved([]int16{1, 2, 3, 4}, nil, 100.0, 0, 2, 2, 48000)
+	playAt := func(beat float64) int64 { return int64(beat * 1e6) }
+	sink.Flush(100.0, 0, playAt)
+
+	select {
+	case f := <-frames1:
+		rp, ok := DecodeRemotePCM(f)
+		if !ok || rp.PlayAtMicros != 100_000_000 || rp.Beat != 0 {
+			t.Fatalf("v1 conn: bad v1 frame: ok=%v %+v", ok, rp)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("v1 conn: no frame")
+	}
+	select {
+	case f := <-frames2:
+		rp, ok := DecodeRemotePCM2(f)
+		if !ok || rp.PlayAtMicros != 100_000_000 || rp.Beat != 100.0 || !slices.Equal(rp.Samples, []int16{1, 2, 3, 4}) {
+			t.Fatalf("v2 conn: bad v2 frame: ok=%v %+v", ok, rp)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("v2 conn: no frame")
 	}
 }
 

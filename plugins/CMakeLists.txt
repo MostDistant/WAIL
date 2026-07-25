@@ -20,6 +20,9 @@ function(add_wail_plugin name src)
   add_library(${name} MODULE "${src}")
   target_include_directories(${name} PRIVATE "${CLAP_INCLUDE}" "${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(${name} PRIVATE Threads::Threads)
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(${name} PRIVATE m) # floor() in the align path
+  endif()
   if(MSVC)
     # MSVC has no C11 atomics by default (even current VS2022): /std:c11 alone
     # makes vcruntime_c11_stdatomic.h #error "C atomic support is not enabled".
