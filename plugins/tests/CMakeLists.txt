@@ -23,7 +23,7 @@ FetchContent_MakeAvailable(clap-trap)
 function(add_wail_harness name)
   add_executable(${name} ${ARGN})
   target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..") # wail_ipc.h
-  target_link_libraries(${name} PRIVATE clap-trap Threads::Threads)
+  target_link_libraries(${name} PRIVATE clap-trap Threads::Threads linkbridge-link)
   target_compile_features(${name} PRIVATE cxx_std_20)
   if(WIN32)
     target_link_libraries(${name} PRIVATE ws2_32)
@@ -34,8 +34,9 @@ function(add_wail_harness name)
     WAIL_SEND_CLAP_PATH="$<TARGET_FILE:wail-send>"
     WAIL_RECV_CLAP_PATH="$<TARGET_FILE:wail-recv>"
     WAIL_LINKBRIDGE_SPIKE_PATH="$<TARGET_FILE:linkbridge-spike>"
+    WAIL_LINKBRIDGE_SEND_PATH="$<TARGET_FILE:linkbridge-send>"
   )
-  add_dependencies(${name} wail-send wail-recv linkbridge-spike)
+  add_dependencies(${name} wail-send wail-recv linkbridge-spike linkbridge-send)
 endfunction()
 
 add_wail_harness(wail-plugin-tests main.cpp test_send.cpp test_recv.cpp test_linkbridge.cpp)
