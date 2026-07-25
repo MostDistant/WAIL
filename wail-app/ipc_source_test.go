@@ -70,6 +70,52 @@ func TestIPCCaptureSourceBeatAnchoring(t *testing.T) {
 	}
 }
 
+func TestIPCCaptureSourceStampIncludesOutputLatencyLead(t *testing.T) {
+	// The block being captured now reaches the DAW's DAC one output pipeline
+	// later — that DAC time is the audio's true grid time, so stamps run ahead
+	// of the capture clock by the lead (same fix as the Link Bridge stamp-ahead).
+	lb := NewLinkBridge(120, 4)
+	ss := abllink.NewSessionState()
+	defer ss.Close()
+	lb.Link().CaptureAppSessionState(ss)
+
+	src := &ipcCaptureSource{nowMicros: func() int64 { return 5_000_000 }, leadUs: 10_000}
+	src.Push([]int16{0, 0}, 1000, 2, 48000)
+	_, beat, ok, _ := src.PopMapped(ss, 4.0)
+	if !ok {
+		t.Fatal("expected block to map")
+	}
+	want := ss.BeatAtTime(5_000_000+10_000, 4.0)
+	if math.Abs(beat-want) > 1e-9 {
+		t.Fatalf("stamp beat = %f, want %f (10ms lead)", beat, want)
+	}
+}
+
+func TestResolveIPCSendLeadUs(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		set  bool
+		want int64
+	}{
+		{"unset uses default", "", false, 10_000},
+		{"valid override", "5", true, 5_000},
+		{"zero allowed", "0", true, 0},
+		{"above ceiling clamps", "500", true, 50_000},
+		{"unparseable falls back", "abc", true, 10_000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv("WAIL_IPC_SEND_LEAD_MS", tc.env)
+			}
+			if got := resolveIPCSendLeadUs(); got != tc.want {
+				t.Fatalf("resolveIPCSendLeadUs() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRawPCMToInt16(t *testing.T) {
 	// int16 payload passes through unchanged.
 	in16 := []int16{0, 100, -100, 32767, -32768}

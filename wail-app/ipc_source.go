@@ -4,7 +4,10 @@ package main
 
 import (
 	"encoding/binary"
+	"log"
 	"math"
+	"os"
+	"strconv"
 	"sync"
 
 	"github.com/nicholasgasior/wail/wail-app/internal/abllink"
@@ -37,6 +40,13 @@ type ipcRawBlock struct {
 // sync peer, so this maps onto the shared session timeline.
 type ipcCaptureSource struct {
 	nowMicros func() int64 // link.ClockMicros; injected so anchoring is testable
+	// leadUs stamps captured audio ahead of the capture clock: the block being
+	// captured now reaches the DAW's DAC one output pipeline later, and that
+	// DAC time is the audio's true grid time (same fix as the Link Bridge
+	// send stamp-ahead). Without it every IPC send peer sits ~output-latency
+	// early on the room grid. One constant per setup; the stream-offsets
+	// panel (#440) measures it in the field.
+	leadUs int64
 
 	mu      sync.Mutex
 	ring    []ipcRawBlock
@@ -50,8 +60,30 @@ type ipcCaptureSource struct {
 }
 
 func newIPCCaptureSource(link *abllink.Link) *ipcCaptureSource {
-	return &ipcCaptureSource{nowMicros: link.ClockMicros}
+	return &ipcCaptureSource{nowMicros: link.ClockMicros, leadUs: ipcSendLeadUs()}
 }
+
+// ipcSendLead* — the capture stamp-ahead. Default 10ms (typical callback→DAC
+// latency); WAIL_IPC_SEND_LEAD_MS overrides (clamped 0–50).
+const (
+	ipcSendLeadMsDefault = 10
+	ipcSendLeadMsMax     = 50
+)
+
+func resolveIPCSendLeadUs() int64 {
+	ms := ipcSendLeadMsDefault
+	src := "default"
+	if v := os.Getenv("WAIL_IPC_SEND_LEAD_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			ms = min(max(n, 0), ipcSendLeadMsMax)
+			src = "WAIL_IPC_SEND_LEAD_MS"
+		}
+	}
+	log.Printf("[audio] ipc capture stamp lead: %dms (%s)", ms, src)
+	return int64(ms) * 1000
+}
+
+var ipcSendLeadUs = sync.OnceValue(resolveIPCSendLeadUs)
 
 // Push enqueues one converted PCM block. On overflow it drops the oldest block and
 // bumps the drop counter — the resulting seq gap makes PopMapped's caller re-anchor
@@ -100,7 +132,7 @@ func (s *ipcCaptureSource) PopMapped(ss *abllink.SessionState, quantum float64) 
 	// reconnect that reset it). Drops don't need a re-anchor: beginFrame is
 	// absolute, so extrapolation stays correct across a gap.
 	if !s.haveAnchor || blk.beginFrame < s.anchorFrames {
-		s.anchorMicros = s.nowMicros()
+		s.anchorMicros = s.nowMicros() + s.leadUs
 		s.anchorFrames = blk.beginFrame
 		s.haveAnchor = true
 	}
@@ -112,7 +144,7 @@ func (s *ipcCaptureSource) PopMapped(ss *abllink.SessionState, quantum float64) 
 	// the current block when the reconstructed stamp jumps implausibly far
 	// into the future.
 	if stampMicros-s.nowMicros() > ipcStaleStampThresholdUs {
-		s.anchorMicros = s.nowMicros()
+		s.anchorMicros = s.nowMicros() + s.leadUs
 		s.anchorFrames = blk.beginFrame
 		stampMicros = s.anchorMicros
 	}

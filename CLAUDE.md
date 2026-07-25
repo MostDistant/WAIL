@@ -270,6 +270,7 @@ Releases are fully automated — no manual `knope` commands needed:
 - **Change the interval offset D**: `WAIL_INTERVAL_OFFSET` env var (default 1), read in `wail-app/session.go` and applied via `playout.New` in `audio_engine_real.go`
 - **Change the emit cushion**: `WAIL_EMIT_CUSHION_MS` env var or the Debug-tab slider (default 100, clamped 100–500), read in `wail-app/audio_engine_real.go`; it adds directly to a Link Audio subscriber's reported buffering
 - **Change the recv-plugin delivery lead**: `WAIL_IPC_LEAD_MS` env var (default 20, clamped 5–100), read once in `wail-app/audio_engine_real.go`; with stamp-aligned playback the lead is *delivery margin only* (decoupled from playback offset) — its floor is the DAW's block pull (~10ms at 128-sample buffers, ~18ms at 512), lower it only with small DAW buffers or the recv plugin starves
+- **Change the send-plugin capture stamp lead**: `WAIL_IPC_SEND_LEAD_MS` env var (default 10, clamped 0–50), read once in `wail-app/ipc_source.go`; stamps captured audio ahead of the capture clock because the block reaches the DAW's DAC one output pipeline later — without it every IPC send peer sits ~output-latency early on the room grid. Measure with the Debug tab's stream-offsets panel
 - **Modify wire format**: `wail-app/wire.go` (bump the flags/format)
 
 
