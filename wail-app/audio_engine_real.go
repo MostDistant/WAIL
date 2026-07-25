@@ -284,6 +284,12 @@ type emitStream struct {
 
 	feeder *emit.Feeder // cushion-ahead sink feeder (owned by the emit loop)
 
+	// shiftFrames is the codec lookahead (OPUS_GET_LOOKAHEAD) this stream's
+	// decoded audio is realigned by at read time (see shiftedInterval);
+	// shiftScratch backs the shifted view. Emit-loop-owned.
+	shiftFrames  int
+	shiftScratch []int16
+
 	// Previous WriteInterleaved result (emit-loop-owned). A refusal can mean
 	// "no listener" (constant while idle — not an event) or "queue full"; only
 	// the success→failure edge marks a hole in audio a listener was receiving.
@@ -916,6 +922,7 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			key:             key,
 			channels:        channels,
 			dec:             dec,
+			shiftFrames:     dec.Lookahead(),
 			reasm:           emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
 			sched:           playout.New(e.offsetD),
 			sinks:           sinks,
@@ -1267,7 +1274,7 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 				}
 			}
 			return emit.NewPacedReader(
-				func() []int16 { s, _, _, _ := reasm.Interval(nextIdx); return s },
+				func() []int16 { return st.shiftedInterval(nextIdx) },
 				channels, engineInternalRate, tempo, endBeat, totalFrames,
 			), nextIdx, start
 		}
@@ -1278,11 +1285,28 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 			}
 		} else {
 			st.feeder.SetCurrent(idx, emit.NewPacedReader(
-				func() []int16 { s, _, _, _ := reasm.Interval(idx); return s },
+				func() []int16 { return st.shiftedInterval(idx) },
 				st.channels, engineInternalRate, tempo, startBeat, totalFrames,
 			), makeNext)
 		}
 	}
+}
+
+// shiftedInterval returns the stream's interval PCM realigned by the codec
+// lookahead: the Opus codec delays every stream by OPUS_GET_LOOKAHEAD
+// (~6.5ms — the mini-DAW harness measured every transient landing late), so
+// the emit path reads the reassembly back shifted by that amount; the tail
+// pulls the next interval's head (silence until it arrives — play-partial
+// covers late frames). Scratch-backed; the PacedReader copies out per Next.
+func (st *emitStream) shiftedInterval(idx int64) []int16 {
+	s, _, _, ok := st.reasm.Interval(idx)
+	if !ok {
+		return nil
+	}
+	if len(st.shiftScratch) < len(s) {
+		st.shiftScratch = make([]int16, len(s))
+	}
+	return st.reasm.ShiftedPCM(st.shiftScratch[:len(s)], idx, idx+1, st.shiftFrames)
 }
 
 // topUpSinks advances each stream's feeder to playhead+cushion, writing paced

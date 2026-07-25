@@ -224,6 +224,7 @@ type IntervalDecoder struct {
 	samplesPerFrame int
 	out             []int16
 	plcOut          []int16 // separate scratch: a PLC window must survive the next real decode
+	lookahead       int
 }
 
 // NewIntervalDecoder creates a decoder for the given channels and rate.
@@ -238,8 +239,14 @@ func NewIntervalDecoder(channels, sampleRate int) (*IntervalDecoder, error) {
 		channels:        channels,
 		samplesPerFrame: spf,
 		out:             make([]int16, spf*channels),
+		lookahead:       opusEncoderLookahead(channels, sampleRate),
 	}, nil
 }
+
+// Lookahead returns the codec's algorithmic delay in samples per channel
+// (OPUS_GET_LOOKAHEAD): every decoded stream runs this many samples late.
+// The emit path realigns by reading the reassembly shifted by this amount.
+func (d *IntervalDecoder) Lookahead() int { return d.lookahead }
 
 // DecodeFrame decodes one WAIF frame's Opus payload to interleaved PCM. The
 // returned slice aliases an internal buffer and is only valid until the next

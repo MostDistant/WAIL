@@ -105,6 +105,80 @@ func TestIntervalCodecLoopback(t *testing.T) {
 	}
 }
 
+// A click placed at a known frame offset must come back at the SAME offset:
+// the codec's algorithmic delay (OPUS_GET_LOOKAHEAD) must be trimmed at
+// decode start, or every transient lands ~5-6ms late on the room grid
+// (measured end-to-end by the mini-DAW harness).
+func TestIntervalCodecPreservesClickPosition(t *testing.T) {
+	const (
+		sr        = 48000
+		channels  = 2
+		bpm       = 120.0
+		clickAt   = 10000 // frames
+		tolerance = 64    // frames
+	)
+	cfg := interval.Config{Bars: 1, Quantum: 1}
+	intervalFrames := cfg.IntervalSamples(sr, bpm)
+
+	pcm := make([]int16, intervalFrames*channels)
+	for i := 0; i < 480; i++ { // 10ms click at clickAt
+		pcm[(clickAt+i)*channels] = 12000
+		pcm[(clickAt+i)*channels+1] = 12000
+	}
+
+	enc, err := NewIntervalEncoder(channels, sr, 128)
+	if err != nil {
+		t.Fatalf("NewIntervalEncoder: %v", err)
+	}
+	frames, _, err := enc.EncodeInterval(pcm, 7, 1, 0, bpm, float64(cfg.Quantum), cfg.Bars)
+	if err != nil {
+		t.Fatalf("EncodeInterval: %v", err)
+	}
+
+	dec, err := NewIntervalDecoder(channels, sr)
+	if err != nil {
+		t.Fatalf("NewIntervalDecoder: %v", err)
+	}
+	reasm := emit.New(channels, samplesPerWaifFrame(sr))
+	for i, wire := range frames {
+		f, err := DecodeAudioFrameWire(wire)
+		if err != nil {
+			t.Fatalf("frame %d wire decode: %v", i, err)
+		}
+		samples, err := dec.DecodeFrame(f.OpusData)
+		if err != nil {
+			t.Fatalf("frame %d opus decode: %v", i, err)
+		}
+		reasm.Add(f.IntervalIndex, int(f.FrameNumber), samples, f.IsFinal, int(f.TotalFrames))
+	}
+	// Read through the codec-delay realignment the emit path uses
+	// (emit.Reassembler.ShiftedPCM with the decoder's lookahead).
+	src, _, _, ok := reasm.Interval(7)
+	if !ok {
+		t.Fatal("no interval reassembled")
+	}
+	out := reasm.ShiftedPCM(make([]int16, len(src)), 7, 8, dec.Lookahead())
+
+	pos := -1
+	for i := 0; i < len(out)/channels; i++ {
+		v := out[i*channels]
+		if v < 0 {
+			v = -v
+		}
+		if v > 500 {
+			pos = i
+			break
+		}
+	}
+	if pos < 0 {
+		t.Fatal("click not found in decoded interval")
+	}
+	if d := pos - clickAt; d < -tolerance || d > tolerance {
+		t.Fatalf("click at frame %d, want %d±%d (shifted %d frames = %.1fms — codec delay not trimmed)",
+			pos, clickAt, tolerance, d, float64(d)/float64(sr)*1000)
+	}
+}
+
 // TestIntervalCodecEmptyStillFinal ensures even an empty/near-empty interval
 // emits a final frame so receivers learn the total.
 func TestIntervalCodecEmptyStillFinal(t *testing.T) {
