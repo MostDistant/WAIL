@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(wail_plugins C)
+project(wail_plugins C CXX) # CXX: the Link Bridge plugins embed the Link SDK (ADR-0007)
 
 # Thin CLAP bridge plugins (ADR-0005). No external deps beyond the vendored CLAP
 # headers, libpthread (POSIX) / ws2_32 (Windows), and the system sockets — the WAIL
@@ -50,6 +50,50 @@ endfunction()
 
 add_wail_plugin(wail-send wail_send.c)
 add_wail_plugin(wail-recv wail_recv.c)
+
+# Link Bridge plugins (ADR-0007): the Link SDK (C++17 + asio) compiled into the
+# CLAP bundle itself — each plugin instance is its own LAN Link peer. Mirrors
+# the include paths and platform defines of the app's cgo build (see
+# wail-app/internal/abllink/abllink.go). Windows/MinGW additionally needs the
+# `interface` param rename in the vendored Channels.hpp, same as the app build.
+set(LINK_SDK "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/link")
+if(NOT EXISTS "${LINK_SDK}/extensions/abl_link/src/abl_link.cpp")
+  message(FATAL_ERROR "Link SDK not found at ${LINK_SDK}. Run: git submodule update --init --recursive vendor/link")
+endif()
+function(add_linkbridge_plugin name)
+  add_library(${name} MODULE ${ARGN})
+  target_include_directories(${name} PRIVATE
+    "${CLAP_INCLUDE}" "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${LINK_SDK}/extensions/abl_link/include"
+    "${LINK_SDK}/extensions/abl_link/src"
+    "${LINK_SDK}/include"
+    "${LINK_SDK}/modules/asio-standalone/asio/include")
+  target_compile_features(${name} PRIVATE cxx_std_17)
+  set_target_properties(${name} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+  target_link_libraries(${name} PRIVATE Threads::Threads)
+  if(WIN32)
+    target_compile_definitions(${name} PRIVATE LINK_PLATFORM_WINDOWS=1 NOMINMAX)
+    target_link_libraries(${name} PRIVATE ws2_32 winmm iphlpapi)
+    set_target_properties(${name} PROPERTIES PREFIX "" SUFFIX ".clap")
+  elseif(APPLE)
+    target_compile_definitions(${name} PRIVATE LINK_PLATFORM_MACOSX=1 LINK_PLATFORM_UNIX=1)
+    set_target_properties(${name} PROPERTIES
+      BUNDLE TRUE
+      BUNDLE_EXTENSION "clap"
+      OUTPUT_NAME "${name}"
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
+      MACOSX_BUNDLE_BUNDLE_NAME "${name}"
+      MACOSX_BUNDLE_GUI_IDENTIFIER "software.linkbridge.${name}"
+      MACOSX_BUNDLE_BUNDLE_VERSION "0.1.0"
+      MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0")
+  else()
+    target_compile_definitions(${name} PRIVATE LINK_PLATFORM_LINUX=1 LINK_PLATFORM_UNIX=1)
+    target_link_libraries(${name} PRIVATE m atomic)
+    set_target_properties(${name} PROPERTIES PREFIX "" SUFFIX ".clap")
+  endif()
+endfunction()
+
+add_linkbridge_plugin(linkbridge-spike linkbridge_spike.c linkbridge_link.cpp) # dev spike (gate 1), not shipped
 
 # DAW-less integration tests (clap-trap host + IPC test double). Off by default:
 # enabling fetches clap-trap over the network at configure time.

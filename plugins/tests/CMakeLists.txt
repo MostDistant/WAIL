@@ -33,11 +33,12 @@ function(add_wail_harness name)
   target_compile_definitions(${name} PRIVATE
     WAIL_SEND_CLAP_PATH="$<TARGET_FILE:wail-send>"
     WAIL_RECV_CLAP_PATH="$<TARGET_FILE:wail-recv>"
+    WAIL_LINKBRIDGE_SPIKE_PATH="$<TARGET_FILE:linkbridge-spike>"
   )
-  add_dependencies(${name} wail-send wail-recv)
+  add_dependencies(${name} wail-send wail-recv linkbridge-spike)
 endfunction()
 
-add_wail_harness(wail-plugin-tests main.cpp test_send.cpp test_recv.cpp)
+add_wail_harness(wail-plugin-tests main.cpp test_send.cpp test_recv.cpp test_linkbridge.cpp)
 
 # E2E chain driver for scripts/plugin-e2e.sh (not a ctest: needs two live apps).
 add_wail_harness(wail-plugin-chain chain_main.cpp)
