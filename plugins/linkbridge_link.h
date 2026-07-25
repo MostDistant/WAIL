@@ -72,10 +72,13 @@ typedef struct {
    size_t        num_channels;
    uint32_t      sample_rate;
    uint64_t      count;             // publisher's buffer counter (gap detection)
-   double        session_beat_time; // buffer begin on the session timeline
+   double        session_beat_time; // buffer begin on the publisher's beat timeline
    double        tempo;
+   double        begin_beat;        // buffer begin mapped onto OUR session state
+                                    // at the given quantum; 0 = unmappable
+                                    // (cross-session buffer) — skip it
 } lb_source_buffer;
-bool lb_source_pop(lb_source *s, lb_source_buffer *out);
+bool lb_source_pop(lb_source *s, lb_source_buffer *out, double quantum);
 
 #ifdef __cplusplus
 }

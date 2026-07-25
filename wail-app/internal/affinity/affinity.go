@@ -18,6 +18,17 @@ type Key struct {
 	Stream   uint16
 }
 
+// RoomChannelPrefix marks a Link Audio channel as room-published (ADR-0007):
+// remote streams one interval late, and the room metronome. Bridge receivers
+// filter on it; raw LAN channels (e.g. a Link Bridge Send instance) never
+// carry it.
+const RoomChannelPrefix = "WAIL · "
+
+// FormatRoomChannelName builds the published channel name for room content.
+func FormatRoomChannelName(peerName, streamName string) string {
+	return RoomChannelPrefix + FormatName(peerName, streamName)
+}
+
 // FormatName builds a channel display name from peer and stream names. Missing
 // parts degrade gracefully so the LAN never sees an empty or " · " name.
 func FormatName(peerName, streamName string) string {

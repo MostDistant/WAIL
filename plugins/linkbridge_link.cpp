@@ -160,12 +160,14 @@ struct lb_chunk {
   uint64_t count;
   double session_beat_time;
   double tempo;
+  abl_link_audio_session_id session_id; // begin-beats mapping checks it vs ours
 };
 
 } // namespace
 
 struct lb_source {
   abl_link_audio_source h;
+  abl_link link;
   std::atomic<uint32_t> data_head{0}, data_tail{0}; // frame counters
   std::atomic<uint32_t> chunk_head{0}, chunk_tail{0};
   std::vector<int16_t> data = std::vector<int16_t>(kRingFrames * 2);
@@ -210,12 +212,14 @@ static void lb_source_cb(const abl_link_audio_source_buffer *buf, void *context)
   c.count = buf->info.count;
   c.session_beat_time = buf->info.session_beat_time;
   c.tempo = buf->info.tempo;
+  c.session_id = buf->info.session_id;
   s->data_tail.store(tail + (uint32_t)nf, std::memory_order_release);
   s->chunk_tail.store(ct + 1, std::memory_order_release);
 }
 
 lb_source *lb_source_create(lb_link *l, uint64_t channel_id_u64) {
   lb_source *s = new lb_source{};
+  s->link = l->h;
   abl_link_audio_channel_id id;
   memcpy(id.bytes, &channel_id_u64, 8);
   s->h = abl_link_audio_source_create(l->h, id, lb_source_cb, s);
@@ -228,11 +232,28 @@ void lb_source_destroy(lb_source *s) {
   delete s;
 }
 
-bool lb_source_pop(lb_source *s, lb_source_buffer *out) {
+bool lb_source_pop(lb_source *s, lb_source_buffer *out, double quantum) {
   uint32_t ch = s->chunk_head.load(std::memory_order_relaxed);
   uint32_t ct = s->chunk_tail.load(std::memory_order_acquire);
   if (ch == ct) return false;
   const lb_chunk &c = s->chunks[ch % kRingChunks];
+  // Map the buffer's begin onto our session state (cross-session buffers
+  // don't map — begin_beat 0 tells the consumer to skip them).
+  double beginBeat = 0;
+  {
+    abl_link_session_state ss = abl_link_create_session_state();
+    abl_link_capture_audio_session_state(s->link, ss);
+    abl_link_audio_source_buffer_info info;
+    info.num_channels = c.num_channels;
+    info.num_frames = c.num_frames;
+    info.sample_rate = c.sample_rate;
+    info.count = c.count;
+    info.session_beat_time = c.session_beat_time;
+    info.tempo = c.tempo;
+    info.session_id = c.session_id;
+    abl_link_audio_source_buffer_info_begin_beats(&info, ss, quantum, &beginBeat);
+    abl_link_destroy_session_state(ss);
+  }
   s->pop_buf.resize(c.num_frames * 2);
   for (size_t i = 0; i < c.num_frames; i++) {
     uint32_t idx = (c.frame_start + i) % kRingFrames;
@@ -248,5 +269,6 @@ bool lb_source_pop(lb_source *s, lb_source_buffer *out) {
   out->count = c.count;
   out->session_beat_time = c.session_beat_time;
   out->tempo = c.tempo;
+  out->begin_beat = beginBeat;
   return true;
 }
