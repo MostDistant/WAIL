@@ -23,7 +23,6 @@
 #include "clap/clap.h"
 #include "linkbridge_link.h"
 
-#define LB_SEND_LOG "/tmp/linkbridge-send.log"
 #define LB_QUANTUM 4.0 // phase lens for buffer stamps (beats; beat values are absolute)
 // Stamp-ahead: the block being committed now reaches the sender's DAC one
 // output pipeline later — that IS the audio's correct session-grid play time,
@@ -129,7 +128,7 @@ static bool CLAP_ABI lbs_activate(const clap_plugin_t *plugin, double sr, uint32
    (void)minf;
    (void)maxf;
    lb_send *self = plugin->plugin_data;
-   self->log = fopen(LB_SEND_LOG, "a");
+   { char lp[512]; lb_temp_log_path("linkbridge-send.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
    self->rate_ok = (sr == 48000.0);
    self->link = lb_create(120.0);
    lb_enable(self->link, true);

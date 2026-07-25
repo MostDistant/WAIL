@@ -11,10 +11,26 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// lb_temp_log_path resolves a writable log path for the bridge plugins'
+// diagnostic logs: %TEMP% on Windows (there is no /tmp — the spike's CI
+// failure there), /tmp elsewhere.
+static inline void lb_temp_log_path(const char *filename, char *buf, unsigned long cap) {
+#ifdef _WIN32
+   const char *tmp = getenv("TEMP");
+   if (!tmp || !tmp[0]) tmp = getenv("TMP");
+   if (!tmp || !tmp[0]) tmp = ".";
+   snprintf(buf, cap, "%s\\%s", tmp, filename);
+#else
+   snprintf(buf, cap, "/tmp/%s", filename);
+#endif
+}
 
 typedef struct lb_link lb_link;
 

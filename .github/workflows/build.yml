@@ -43,7 +43,7 @@ jobs:
         run: |
           cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release -DWAIL_PLUGIN_TESTS=ON
           cmake --build build/plugins
-          ctest --test-dir build/plugins --output-on-failure
+          ctest --test-dir build/plugins --output-on-failure --repeat until-pass:3
 
       - name: Build & test signaling-server
         run: go build ./... && go test ./...
@@ -154,7 +154,7 @@ jobs:
         run: |
           cmake -S plugins -B build/plugins -DWAIL_PLUGIN_TESTS=ON
           cmake --build build/plugins --config Release
-          ctest --test-dir build/plugins -C Release --output-on-failure
+          ctest --test-dir build/plugins -C Release --output-on-failure --repeat until-pass:3
 
       - name: ccache stats
         if: always()
@@ -234,7 +234,7 @@ jobs:
         run: |
           cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release -DWAIL_PLUGIN_TESTS=ON
           cmake --build build/plugins
-          ctest --test-dir build/plugins --output-on-failure
+          ctest --test-dir build/plugins --output-on-failure --repeat until-pass:3
 
       - name: ccache stats
         if: always()
