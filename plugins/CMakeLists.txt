@@ -50,6 +50,7 @@ endfunction()
 
 add_wail_plugin(wail-send wail_send.c)
 add_wail_plugin(wail-recv wail_recv.c)
+add_wail_plugin(transport-probe transport_probe.c) # dev diagnostic, not shipped
 
 # DAW-less integration tests (clap-trap host + IPC test double). Off by default:
 # enabling fetches clap-trap over the network at configure time.
