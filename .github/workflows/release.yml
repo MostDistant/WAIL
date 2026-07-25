@@ -215,8 +215,11 @@ jobs:
           cmake -S plugins -B build/plugins
           cmake --build build/plugins --config Release
           mkdir -p dist/lib
-          find build/plugins -maxdepth 2 -name '*.clap' -exec cp -R {} dist/lib/ \;
-          test -e dist/lib/wail-send.clap && test -e dist/lib/wail-recv.clap
+          # Product bundles only — dev tools (transport-probe, linkbridge-spike) are
+          # built but never shipped.
+          for b in wail-send wail-recv linkbridge-send linkbridge-recv; do
+            cp -R "build/plugins/${b}.clap" dist/lib/
+          done
 
       - uses: actions/upload-artifact@v7
         with:
@@ -320,8 +323,11 @@ jobs:
           cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
           cmake --build build/plugins
           mkdir -p dist/lib
-          find build/plugins -maxdepth 2 -name '*.clap' -exec cp -R {} dist/lib/ \;
-          test -e dist/lib/wail-send.clap && test -e dist/lib/wail-recv.clap
+          # Product bundles only — dev tools (transport-probe, linkbridge-spike) are
+          # built but never shipped.
+          for b in wail-send wail-recv linkbridge-send linkbridge-recv; do
+            cp -R "build/plugins/${b}.clap" dist/lib/
+          done
 
       - uses: actions/upload-artifact@v7
         with:
