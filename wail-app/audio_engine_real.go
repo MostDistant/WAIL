@@ -906,7 +906,7 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			return
 		}
 		label := streamLabel(streamName, f.StreamID)
-		sinkName := affinity.FormatName(displayName, label)
+		sinkName := affinity.FormatRoomChannelName(displayName, label)
 		// Publish to Link Audio always; also to any connected CLAP Recv plugins.
 		sinks := []emitSink{e.link.NewSink(sinkName, engineInternalRate*2)}
 		if e.recvPool != nil {
@@ -929,7 +929,7 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 	} else if st.lastDisplayName != displayName || st.lastStreamName != streamName {
 		// Name became known / changed: rename the existing channel in place, don't
 		// re-mint it (affinity preserves the channel). All sinks share the name.
-		newName := affinity.FormatName(displayName, streamLabel(streamName, f.StreamID))
+		newName := affinity.FormatRoomChannelName(displayName, streamLabel(streamName, f.StreamID))
 		for _, sk := range st.sinks {
 			sk.SetName(newName)
 		}

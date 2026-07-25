@@ -25,6 +25,13 @@
 
 #define LB_SEND_LOG "/tmp/linkbridge-send.log"
 #define LB_QUANTUM 4.0 // phase lens for buffer stamps (beats; beat values are absolute)
+// Stamp-ahead: the block being committed now reaches the sender's DAC one
+// output pipeline later — that IS the audio's correct session-grid play time,
+// so stamps run ahead of the callback clock. It doubles as the receiver's
+// delivery margin (network + drain cadence). 10ms approximates the typical
+// callback→DAC latency; the residual error is one constant, field-measurable
+// per setup (same class as the recv path's output-path constant).
+#define LBS_STAMP_AHEAD_US 10000
 
 typedef struct {
    clap_plugin_t      plugin;
@@ -96,11 +103,10 @@ static clap_process_status CLAP_ABI lbs_process(const clap_plugin_t *plugin, con
    if (!in->data32 || !in->data32[0])
       return CLAP_PROCESS_CONTINUE;
 
-   // Stamp the block with the session beat at commit time (the constant
-   // output-path offset caveat of the recv path applies equally here —
-   // field-measurable, one number; tradeoffs.md).
+   // Stamp the block with the session beat at its *play* time (stamp-ahead —
+   // see LBS_STAMP_AHEAD_US).
    lb_state *st = lb_capture(self->link);
-   double beat = lb_beat_at_time(st, lb_clock_micros(self->link), LB_QUANTUM);
+   double beat = lb_beat_at_time(st, lb_clock_micros(self->link) + LBS_STAMP_AHEAD_US, LB_QUANTUM);
    bool ok = lb_sink_commit(self->sink, st, beat, LB_QUANTUM,
                             in->data32[0], in->channel_count > 1 ? in->data32[1] : NULL, n, 48000);
    lb_release(st);

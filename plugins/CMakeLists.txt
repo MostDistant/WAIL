@@ -108,6 +108,7 @@ endfunction()
 
 add_linkbridge_plugin(linkbridge-spike linkbridge_spike.c) # dev spike (gate 1), not shipped
 add_linkbridge_plugin(linkbridge-send linkbridge_send.c)
+add_linkbridge_plugin(linkbridge-recv linkbridge_recv.c)
 
 # DAW-less integration tests (clap-trap host + IPC test double). Off by default:
 # enabling fetches clap-trap over the network at configure time.
