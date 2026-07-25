@@ -47,13 +47,6 @@ const (
 	engineBitrateKbps  = 256 // quality-first: music at 48k stereo; ~34KB/s per stream
 	discoveryInterval  = 1 * time.Second
 	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
-	// ipcLeadMs is how far ahead of its stamped beat a chunk may be *delivered*
-// to a recv plugin (FIFO sink): enough to cover emit-tick and socket jitter so
-// the plugin's ring never starves, but small enough to be inaudible next to
-// the interval offset. The plugin renders arrival order, so delivery lead IS
-// playback offset — this replaces the emit cushion on the plugin path, which
-// made all remote audio play ~cushion late.
-ipcLeadMs = 20
 
 // emitCushionMs is how far ahead of the playhead each sink is kept fed —
 	// stall tolerance for the emit loop. It stamps audio into the future, which
@@ -154,6 +147,44 @@ const (
 	cushionMinMs = 100
 	cushionMaxMs = 500
 )
+
+// ipcLeadMs* — how far ahead of its stamped beat a chunk may be *delivered* to
+// a recv plugin (FIFO sink): enough to cover emit-tick and socket jitter so the
+// plugin's ring never starves, but no more, because the plugin renders arrival
+// order — delivery lead IS playback offset (this replaced the emit cushion on
+// the plugin path, which made all remote audio play ~cushion late).
+//
+// The floor is set by the DAW's pull: process() takes a whole block per call
+// and pads silence when the ring holds less, so the lead must cover ~DAW block
+// + app chunk + jitter — ≈10ms at 128-sample buffers, ≈18ms at 512. The 20ms
+// default is safe through 512-sample blocks; WAIL_IPC_LEAD_MS lets a small-
+// buffer setup tighten it (per listener: each side's local app feeds its own
+// plugin). The clamp floor keeps experiments out of the guaranteed-crackle
+// zone. Sample-accurate alignment regardless of block size requires the plugin
+// to render against the host transport instead of FIFO — the proper fix.
+const (
+	ipcLeadMsDefault = 20
+	ipcLeadMsMin     = 5   // one emit tick — below this even 128-sample-block DAWs starve
+	ipcLeadMsMax     = 100 // the old cushion-sized offset; no setup should want more
+)
+
+// resolveIPCLeadMs reads WAIL_IPC_LEAD_MS (clamped) or returns the default.
+func resolveIPCLeadMs() int {
+	ms := ipcLeadMsDefault
+	src := "default"
+	if v := os.Getenv("WAIL_IPC_LEAD_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			ms = min(max(n, ipcLeadMsMin), ipcLeadMsMax)
+			src = "WAIL_IPC_LEAD_MS"
+		}
+	}
+	log.Printf("[audio] ipc delivery lead: %dms (%s)", ms, src)
+	return ms
+}
+
+// ipcLeadMs resolves the lead once (first emit tick) — the env var is process
+// configuration, and per-tick resolution would spam the log line above.
+var ipcLeadMs = sync.OnceValue(resolveIPCLeadMs)
 
 func clampCushionMs(ms int) int   { return min(max(ms, cushionMinMs), cushionMaxMs) }
 func cushionFramesFor(ms int) int { return engineInternalRate * ms / 1000 }
@@ -1251,7 +1282,7 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, tempo, bpi float64, localBeat float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	leadBeats := ipcLeadMs * tempo / 60000 // 0 at non-positive tempo: release exactly at the beat
+	leadBeats := float64(ipcLeadMs()) * tempo / 60000 // 0 at non-positive tempo: release exactly at the beat
 	if leadBeats < 0 {
 		leadBeats = 0
 	}

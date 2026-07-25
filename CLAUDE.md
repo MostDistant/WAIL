@@ -269,6 +269,7 @@ Releases are fully automated — no manual `knope` commands needed:
 - **Change Opus bitrate**: `engineBitrateKbps` in `wail-app/audio_engine_real.go` (passed to `NewIntervalEncoder` in `interval_codec.go`)
 - **Change the interval offset D**: `WAIL_INTERVAL_OFFSET` env var (default 1), read in `wail-app/session.go` and applied via `playout.New` in `audio_engine_real.go`
 - **Change the emit cushion**: `WAIL_EMIT_CUSHION_MS` env var or the Debug-tab slider (default 100, clamped 100–500), read in `wail-app/audio_engine_real.go`; it adds directly to a Link Audio subscriber's reported buffering
+- **Change the recv-plugin delivery lead**: `WAIL_IPC_LEAD_MS` env var (default 20, clamped 5–100), read once in `wail-app/audio_engine_real.go`; on the FIFO plugin path the lead IS the playback offset, and its floor is the DAW's block pull (~10ms at 128-sample buffers, ~18ms at 512) — lower it only with small DAW buffers or the recv plugin crackles
 - **Modify wire format**: `wail-app/wire.go` (bump the flags/format)
 
 
