@@ -22,10 +22,12 @@
 #define RECV_ANCHORS 512      // power of two; > max in-flight chunks (0.68s / 5ms = 136)
 // Stamps below this are a legacy app's interval index, not a timestamp: the
 // app stamps chunks with machine-monotonic µs (wail_mono_micros), which is
-// uptime-scaled — 1e9 µs ≈ 16.7 min of uptime. An old app always fails this
-// threshold and gets FIFO playback; a new app on a freshly-booted machine
-// degrades to FIFO for the first minutes, never to wrong alignment.
-#define RECV_STAMP_MIN_US 1000000000LL
+// uptime-scaled. The threshold is 1 second of uptime — no app+DAW+room can
+// deliver audio within 1s of boot, and a legacy interval index can't reach
+// 1e6 (23 days of continuous room). It was originally 1e9 µs ≈ 16.7 min of
+// uptime, which silently forced FIFO on every fresh-booted machine (CI
+// runners caught it; a reboot-and-jam user hits the same).
+#define RECV_STAMP_MIN_US 1000000LL
 
 // recv_anchor maps one ring frame to the monotonic-µs instant it should play
 // (the app's Link-beat→mono conversion). IPC thread pushes one per stamped
