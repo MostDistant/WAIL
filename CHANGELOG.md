@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.13.0 (2026-07-25)
+
+### Features
+
+- debug room + in-app stream offset analysis for latency hunting (#440)
+- WAIL_IPC_LEAD_MS env knob for recv-plugin delivery lead (#442)
+- transport-phase alignment for the CLAP recv plugin (closes #444) (#446)
+- Link Bridge spike — Link SDK inside a CLAP plugin (ADR-0007 gate 1) (#448)
+
 ## 3.12.6 (2026-07-25)
 
 ### Fixes
