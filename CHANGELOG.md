@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.12.5 (2026-07-25)
+
+### Fixes
+
+- plugin stale-ring poisoned capture beat anchor after WAIL outage (#437)
+
 ## 3.12.4 (2026-07-24)
 
 ### Fixes
