@@ -81,6 +81,9 @@ type EngineHealth struct {
 	EmitSinkWriteRejected   uint64 `json:"emit_sink_write_rejected"`    // sink refused a chunk mid-stream (queue full / listener left) — hole in delivered audio
 	WireDecodeFailures      uint64 `json:"wire_decode_failures"`        // WAIF wire-decode errors
 	OpusDecodeFailures      uint64 `json:"opus_decode_failures"`        // Opus decode errors
+	// StreamOffsets is the debug-room per-stream phase-offset readout vs the
+	// room grid (internal/offset), computed on demand by Health.
+	StreamOffsets []StreamOffset `json:"stream_offsets,omitempty"`
 	// EmitCushionMs is the current effective emit feed-ahead (config, not a
 	// counter): it rides the snapshot so the UI can show/initialise the cushion
 	// control. Not a HEALTH_FIELDS row.

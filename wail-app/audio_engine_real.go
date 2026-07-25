@@ -25,6 +25,7 @@ import (
 	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 	"github.com/nicholasgasior/wail/wail-app/internal/lanloss"
 	"github.com/nicholasgasior/wail/wail-app/internal/metronome"
+	"github.com/nicholasgasior/wail/wail-app/internal/offset"
 	"github.com/nicholasgasior/wail/wail-app/internal/pace"
 	"github.com/nicholasgasior/wail/wail-app/internal/playout"
 )
@@ -259,6 +260,11 @@ type emitStream struct {
 	// index (ADR-0006 follow-up): a persistent nonzero verdict means the
 	// peer's audio plays that many intervals late/early, silently.
 	labelTrack emit.LabelOffsetTracker
+
+	// offsetTrk accumulates per-frame RMS at absolute room-frame positions
+	// (debug-room analysis: this stream's rhythmic phase offset vs the room
+	// grid, internal/offset). Created on first decoded frame.
+	offsetTrk *offset.Tracker
 
 	// Observability (ADR-0003 / pillar 8). Atomic so Health() on another
 	// goroutine reads them race-free: decodeFailures/framesConcealed are bumped
@@ -954,6 +960,32 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		}
 		return
 	}
+	// Debug-room offset analysis: frame energy at its absolute room-frame
+	// position. Cheap (one channel's sum of squares per 20ms frame).
+	if st.offsetTrk == nil {
+		st.offsetTrk = offset.NewTracker(4000)
+	}
+	{
+		ch := int(f.Channels)
+		if ch < 1 {
+			ch = 1
+		}
+		var ss float64
+		nf := len(pcm) / ch
+		for i := 0; i < nf; i++ {
+			v := float64(pcm[i*ch])
+			ss += v * v
+		}
+		rms := 0.0
+		if nf > 0 {
+			rms = math.Sqrt(ss / float64(nf))
+		}
+		fpi := int64(FramesPerInterval(e.tempoBPM, e.cfg))
+		if fpi <= 0 {
+			fpi = 1
+		}
+		st.offsetTrk.Add(f.IntervalIndex*fpi+int64(f.FrameNumber), rms)
+	}
 	if !st.haveSeq || !seqLess(f.FrameSeq, st.expectSeq) {
 		st.haveSeq = true
 		st.expectSeq = f.FrameSeq + 1
@@ -1026,6 +1058,27 @@ func (e *linkAudioEngine) Health() EngineHealth {
 	}
 	h.WireDecodeFailures = e.wireDecodeFailures.Load()
 	h.EmitCushionMs = cushionMsFromFrames(e.cushionFrames)
+	// Debug-room stream offsets: each stream's measured rhythmic phase offset
+	// vs the room grid (internal/offset). Only computed for streams with
+	// enough buffered frames to judge; absent otherwise.
+	beatMs := 0.0
+	if e.tempoBPM > 0 {
+		beatMs = 60000 / e.tempoBPM
+	}
+	if beatMs > 0 {
+		for _, st := range e.emit {
+			if st.offsetTrk == nil || st.offsetTrk.Len() < 400 {
+				continue
+			}
+			if ms, ok := st.offsetTrk.Offset(20, beatMs); ok {
+				h.StreamOffsets = append(h.StreamOffsets, StreamOffset{
+					Name: affinity.FormatName(st.lastDisplayName, st.lastStreamName),
+					Ms:   ms,
+				})
+			}
+		}
+		sort.Slice(h.StreamOffsets, func(i, j int) bool { return h.StreamOffsets[i].Name < h.StreamOffsets[j].Name })
+	}
 	return h
 }
 

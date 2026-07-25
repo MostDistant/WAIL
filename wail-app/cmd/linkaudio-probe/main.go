@@ -18,6 +18,7 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -43,14 +44,22 @@ type chanState struct {
 	// BPI-lens beat the buffer begins at, floored to its interval). Only
 	// populated when -bpi is set; used by the tier2 interval-placement E2E.
 	gridFrames map[int64]int
+
+	// offset analysis (when -offset-ref is set): ring of per-buffer RMS
+	// envelopes for cross-correlation against the reference channel.
+	rmsRing  []float64
+	tempoBPM float64
 }
 
 func main() {
 	peerName := flag.String("name", "wail-probe", "Link Audio peer name for this probe")
 	match := flag.String("match", "", "only subscribe to channels whose \"peer · name\" contains this substring (case-insensitive); empty = all")
 	bpi := flag.Float64("bpi", 0, "if >0, also report the shared-grid interval index of received audio (beat mapped at this beats-per-interval lens; must match the room's BPI)")
+	offsetRef := flag.String("offset-ref", "", "if set, report per-channel onset phase offset in ms vs the channel whose name contains this substring (e.g. \"WAIL Metronome\")")
+	offsetDump := flag.String("offset-dump", "", "if set (and -offset-ref), write ref+channel RMS envelopes as CSVs to this directory on exit")
 	flag.Parse()
 	matchLower := strings.ToLower(*match)
+	offsetRefLower := strings.ToLower(*offsetRef)
 
 	l := abllink.New(120)
 	l.SetPeerName(*peerName)
@@ -59,7 +68,7 @@ func main() {
 	defer l.Close()
 
 	var ss *abllink.SessionState
-	if *bpi > 0 {
+	if *bpi > 0 || *offsetRef != "" {
 		ss = abllink.NewSessionState()
 	}
 
@@ -80,6 +89,9 @@ func main() {
 		select {
 		case <-sigCh:
 			log.Printf("stopping")
+			if *offsetDump != "" {
+				dumpEnvelopes(subs, *offsetDump)
+			}
 			for _, st := range subs {
 				st.src.Close()
 			}
@@ -156,11 +168,24 @@ func main() {
 						prev = s
 						first = false
 					}
+
+					// Offset analysis: keep the per-buffer RMS envelope ring
+					// for cross-correlation (see reportOffsets).
+					if *offsetRef != "" && buf.NumFrames > 0 {
+						st.tempoBPM = buf.TempoBPM
+						st.rmsRing = appendPhase(st.rmsRing, chanBufRMS(buf), 4096)
+					}
 				}
 			}
 
 			if !report {
 				continue
+			}
+
+			// Offset analysis report (every 15s): per-channel onset phase vs the
+			// reference channel's (e.g. the WAIL Metronome, grid-rendered).
+			if *offsetRef != "" && tick%(reportEvery*15) == 0 {
+				reportOffsets(subs, offsetRefLower)
 			}
 
 			for _, st := range subs {
@@ -194,4 +219,195 @@ func main() {
 			}
 		}
 	}
+}
+
+// --- Offset analysis helpers ---
+
+// chanBufRMS computes the RMS of one buffer's channel 0.
+func chanBufRMS(buf abllink.CaptureBuffer) float64 {
+	ch := buf.NumChannels
+	if ch < 1 {
+		ch = 1
+	}
+	if buf.NumFrames == 0 {
+		return 0
+	}
+	var s float64
+	for i := 0; i < buf.NumFrames; i++ {
+		idx := i * ch
+		if idx >= len(buf.Samples) {
+			break
+		}
+		v := float64(buf.Samples[idx])
+		s += v * v
+	}
+	return math.Sqrt(s / float64(buf.NumFrames))
+}
+
+// appendPhase appends v to a bounded ring.
+func appendPhase(hist []float64, v float64, max int) []float64 {
+	hist = append(hist, v)
+	if len(hist) > max {
+		hist = hist[len(hist)-max:]
+	}
+	return hist
+}
+
+func medianHist(h []float64) float64 {
+	if len(h) == 0 {
+		return 0
+	}
+	cp := make([]float64, len(h))
+	copy(cp, h)
+	sort.Float64s(cp)
+	return cp[len(cp)/2]
+}
+
+// reportOffsets cross-correlates each channel's RMS envelope against the
+// reference channel's (the grid-rendered metronome) and reports the peak lag
+// in milliseconds. Pattern-agnostic and robust: any periodic content (clicks,
+// patterns) locks to its phase offset; fixed DAW-chain latency shows directly
+// while grid/network effects cancel through the shared path.
+func reportOffsets(subs map[abllink.ChannelID]*chanState, refLower string) {
+	var ref *chanState
+	for _, st := range subs {
+		if strings.Contains(strings.ToLower(st.peer+" · "+st.name), refLower) {
+			ref = st
+			break
+		}
+	}
+	if ref == nil || len(ref.rmsRing) < 400 {
+		return
+	}
+	for _, st := range subs {
+		if st == ref || len(st.rmsRing) < 400 {
+			continue
+		}
+		lagMs, strength := xcorrPeak(ref.rmsRing, st.rmsRing)
+		top := xcorrTop(ref.rmsRing, st.rmsRing, 3)
+		log.Printf("[offset] %q · %q: %+.0f ms vs %q · %q (peak %.2f; top3 %v)",
+			st.peer, st.name, lagMs, ref.peer, ref.name, strength, top)
+	}
+}
+
+// xcorrTop returns the top-n (lagMs, strength) correlation peaks for
+// inspecting alias structure.
+func xcorrTop(a, b []float64, nTop int) [][2]float64 {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	if n > 2000 {
+		n = 2000
+	}
+	a = a[len(a)-n:]
+	b = b[len(b)-n:]
+	var ma, mb float64
+	for i := 0; i < n; i++ {
+		ma += a[i]
+		mb += b[i]
+	}
+	ma /= float64(n)
+	mb /= float64(n)
+	const bufMs = 128.0 / 48.0
+	maxLag := int(math.Round(250.0 / bufMs))
+	type peak struct{ s, lag float64 }
+	var peaks []peak
+	for lag := -maxLag; lag <= maxLag; lag++ {
+		var sum float64
+		for i := 0; i < n; i++ {
+			j := i + lag
+			if j < 0 || j >= n {
+				continue
+			}
+			sum += (a[i] - ma) * (b[j] - mb)
+		}
+		peaks = append(peaks, peak{sum, float64(lag)})
+	}
+	sort.Slice(peaks, func(i, j int) bool { return peaks[i].s > peaks[j].s })
+	out := make([][2]float64, 0, nTop)
+	for i := 0; i < nTop && i < len(peaks); i++ {
+		out = append(out, [2]float64{peaks[i].lag * bufMs, peaks[i].s})
+	}
+	return out
+}
+
+// xcorrPeak returns the lag (in ms) at which the cross-correlation of
+// envelopes a (reference) and b peaks, plus a rough normalized strength.
+// Positive lag = b is LATE relative to a. Envelopes are per received Link
+// Audio buffer (~128 frames @ 48kHz = 2.667ms steps).
+func xcorrPeak(a, b []float64) (float64, float64) {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	if n > 2000 {
+		n = 2000
+	}
+	a = a[len(a)-n:]
+	b = b[len(b)-n:]
+	var ma, mb float64
+	for i := 0; i < n; i++ {
+		ma += a[i]
+		mb += b[i]
+	}
+	ma /= float64(n)
+	mb /= float64(n)
+	const bufMs = 128.0 / 48.0
+	maxLag := int(math.Round(250.0 / bufMs))
+	best, bestLag, zero := 0.0, 0, 0.0
+	for lag := -maxLag; lag <= maxLag; lag++ {
+		var sum float64
+		for i := 0; i < n; i++ {
+			j := i + lag
+			if j < 0 || j >= n {
+				continue
+			}
+			sum += (a[i] - ma) * (b[j] - mb)
+		}
+		if lag == 0 {
+			zero = sum
+		}
+		if sum > best {
+			best, bestLag = sum, lag
+		}
+	}
+	strength := 0.0
+	if zero != 0 {
+		strength = best / math.Abs(zero)
+	}
+	return float64(bestLag) * bufMs, strength
+}
+
+// dumpEnvelopes writes each channel's RMS envelope ring to <dir>/<peer>-<name>.csv
+// (one value per line, ~2.6ms per step) for offline cross-correlation.
+func dumpEnvelopes(subs map[abllink.ChannelID]*chanState, dir string) {
+	for _, st := range subs {
+		if len(st.rmsRing) == 0 {
+			continue
+		}
+		name := fmt.Sprintf("%s/%s-%s.csv", dir, sanitizeName(st.peer), sanitizeName(st.name))
+		f, err := os.Create(name)
+		if err != nil {
+			log.Printf("[offset-dump] %v", err)
+			continue
+		}
+		for _, v := range st.rmsRing {
+			fmt.Fprintf(f, "%.1f\n", v)
+		}
+		f.Close()
+		log.Printf("[offset-dump] wrote %s (%d samples)", name, len(st.rmsRing))
+	}
+}
+
+func sanitizeName(s string) string {
+	out := make([]rune, 0, len(s))
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			out = append(out, r)
+		} else {
+			out = append(out, '_')
+		}
+	}
+	return string(out)
 }

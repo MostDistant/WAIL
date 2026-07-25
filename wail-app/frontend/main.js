@@ -754,6 +754,30 @@ joinForm.addEventListener('submit', async (e) => {
   }
 });
 
+// --- Debug Room ---
+// One button: join the shared wail-debug room with the reference metronome,
+// loopback, and peer log sharing armed (see App.DebugRoom).
+document.getElementById('debug-room-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('debug-room-btn');
+  joinError.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Connecting...';
+  try {
+    const result = await invoke('debug_room', {
+      displayName: getDisplayName(),
+      linkAudioName: getLinkAudioName(),
+    });
+    saveSettings();
+    showSession(result.room);
+    setupListeners();
+  } catch (err) {
+    showError(joinError, err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Debug Room';
+  }
+});
+
 // --- Disconnect ---
 disconnectBtn.addEventListener('click', async () => {
   try {
@@ -974,6 +998,28 @@ function renderHealth(health) {
   }).join('');
 }
 
+// Debug-room stream offsets (status.stream_offsets): each remote stream's
+// measured rhythmic phase offset vs the room grid. |offset| > 25ms is
+// highlighted — that stream's content is audibly off-grid.
+function renderStreamOffsets(update) {
+  const section = document.getElementById('stream-offsets-section');
+  const el = document.getElementById('stream-offsets');
+  if (!section || !el) return;
+  const offs = (update && update.stream_offsets) || [];
+  if (offs.length === 0) {
+    section.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  section.style.display = '';
+  el.innerHTML = offs.map(o => {
+    const ms = Math.round(o.ms);
+    const cls = Math.abs(ms) > 25 ? 'health-bad' : '';
+    const sign = ms > 0 ? '+' : '';
+    return `<div class="health-row"><span>${o.name}</span><span class="${cls}">${sign}${ms} ms</span></div>`;
+  }).join('');
+}
+
 // Unified peers tree (Session tab): a "you" node carrying your sends —
 // enabled capture channels and in-app senders (test tone / WAV), names
 // click-to-rename — above the remote peer nodes with their channels nested
@@ -1138,6 +1184,7 @@ async function setupListeners() {
     });
     if (statusSnapshots.length > STATS_WINDOW_SIZE) statusSnapshots.shift();
     renderStatus(s);
+    renderStreamOffsets(s);
     seedClock(s);
   }));
 
