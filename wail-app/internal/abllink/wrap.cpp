@@ -19,6 +19,37 @@
 #define NOMINMAX
 #include <winsock2.h>
 #include <windows.h>
+#else
+#include <time.h>
 #endif
 
 #include "abl_link.cpp"
+
+// wail_mono_micros is the machine monotonic clock WAIL shares with the CLAP
+// plugins (wail_mono_micros in wail_ipc.h — same libc calls, same domain by
+// construction). The app converts Link-timeline chunk stamps into this domain
+// so a plugin can render them against its host sample clock. It deliberately
+// does NOT use Link's clock: the session timeline is offset and filtered
+// (converges across peers), while this must match what the plugin can read.
+extern "C" int64_t wail_mono_micros() {
+#if defined(_WIN32)
+  static const long long freq = [] {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return f.QuadPart;
+  }();
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  return (int64_t)(now.QuadPart / (freq / 1000000.0));
+#elif defined(__APPLE__)
+  // CLOCK_MONOTONIC_RAW == mach_absolute_time == std::steady_clock == Link's
+  // host-time base. Plain CLOCK_MONOTONIC excludes sleep time on macOS.
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+  return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+#endif
+}

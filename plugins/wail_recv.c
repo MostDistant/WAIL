@@ -18,6 +18,23 @@
 #define RECV_SLOTS 16
 #define RECV_RING_FRAMES 32768 // power of two; ~0.68s stereo jitter buffer @ 48k
 #define RECV_CHANNELS 2
+#define RECV_ANCHORS 512      // power of two; > max in-flight chunks (0.68s / 5ms = 136)
+// Stamps below this are a legacy app's interval index, not a timestamp: the
+// app stamps chunks with machine-monotonic µs (wail_mono_micros), which is
+// uptime-scaled — 1e9 µs ≈ 16.7 min of uptime. An old app always fails this
+// threshold and gets FIFO playback; a new app on a freshly-booted machine
+// degrades to FIFO for the first minutes, never to wrong alignment.
+#define RECV_STAMP_MIN_US 1000000000LL
+
+// recv_anchor maps one ring frame to the monotonic-µs instant it should play
+// (the app's Link-beat→mono conversion). IPC thread pushes one per stamped
+// chunk; the audio thread extrapolates the frame due *now* from the latest
+// anchor — aligning playback to the shared timeline instead of arrival order
+// (the Link Audio receiver contract: render buffer timing against local audio).
+typedef struct {
+   int64_t  micros;
+   uint32_t frame;
+} recv_anchor;
 
 // recv_ring is an SPSC float ring (IPC thread produces, audio thread consumes).
 // head/tail are monotonic frame counters; index = frame % RECV_RING_FRAMES.
@@ -32,6 +49,15 @@ typedef struct {
    char         peer_id[64];
    uint16_t     stream_id;
    recv_ring    ring;
+
+   // Alignment state (SPSC like the ring: IPC writes anchors, audio reads).
+   recv_anchor      anchors[RECV_ANCHORS];
+   _Atomic uint32_t ar_head; // audio consumes
+   _Atomic uint32_t ar_tail; // IPC writes
+   recv_anchor      last;    // audio-side copy of the latest consumed anchor
+   bool             has_last;
+   _Atomic uint32_t rate;    // chunk sample rate (engine rate; 0 → 48000)
+   _Atomic uint64_t align_dropped; // frames skipped as late (alignment drops)
 } recv_slot;
 
 typedef struct {
@@ -135,15 +161,31 @@ static void handle_remote_pcm(wail_recv *self, const uint8_t *p, uint32_t len) {
    uint16_t sid = wail_get_u16(p + off);
    off += 2;
    int channels = p[off++];
-   off += 4; // sampleRate (unused: rings are engine-rate; host resample deferred)
-   off += 8; // intervalIndex (advisory)
+   uint32_t rate = wail_get_u32(p + off);
+   off += 4;
+   int64_t micros = (int64_t)wail_get_u64(p + off);
+   off += 8;
    if (channels < 1) return;
    uint32_t nbytes = len - (uint32_t)off;
    uint32_t nsamples = nbytes / 2;
    uint32_t nframes = nsamples / (uint32_t)channels;
    int slot = find_or_assign(self, pid, sid);
    if (slot < 0) return; // pool exhausted
-   recv_ring_push(&self->slots[slot].ring, p + off, nframes, channels);
+   recv_slot *s = &self->slots[slot];
+   // Data first, then the anchor: the anchor's release store publishes both
+   // (the audio thread's acquire on ar_tail orders the data-ring writes too).
+   uint32_t frameStart = atomic_load_explicit(&s->ring.tail, memory_order_relaxed);
+   recv_ring_push(&s->ring, p + off, nframes, channels);
+   atomic_store_explicit(&s->rate, rate, memory_order_relaxed);
+   if (micros >= RECV_STAMP_MIN_US) {
+      uint32_t at = atomic_load_explicit(&s->ar_tail, memory_order_relaxed);
+      uint32_t ah = atomic_load_explicit(&s->ar_head, memory_order_acquire);
+      if (at - ah == RECV_ANCHORS) // defensive: drop the oldest (stale anyway)
+         atomic_store_explicit(&s->ar_head, ah + 1, memory_order_release);
+      s->anchors[at % RECV_ANCHORS].micros = micros;
+      s->anchors[at % RECV_ANCHORS].frame = frameStart;
+      atomic_store_explicit(&s->ar_tail, at + 1, memory_order_release);
+   }
 }
 
 static void handle_stream_name(wail_recv *self, const uint8_t *p, uint32_t len) {
@@ -218,6 +260,8 @@ static void *recv_ipc_thread(void *arg) {
    uint8_t *rbuf = NULL;
    size_t rlen = 0, rcap = 0;
    uint8_t chunk[8192];
+   int idleTicks = 0;
+   uint64_t lastReported = 0;
 
    while (atomic_load_explicit(&self->running, memory_order_acquire)) {
       if (sock == WAIL_INVALID_SOCK) {
@@ -243,6 +287,26 @@ static void *recv_ipc_thread(void *arg) {
       ssize_t n = recv(sock, chunk, sizeof(chunk), 0);
 #endif
       if (n < 0 && wail_sock_timed_out()) {
+         // ~1s idle tick: report cumulative alignment drops so the app can
+         // surface stamp-mode health (DecodeMetrics on the Go side).
+         if (++idleTicks >= 4) {
+            idleTicks = 0;
+            uint64_t total = 0;
+            for (int i = 0; i < RECV_SLOTS; i++)
+               total += atomic_load_explicit(&self->slots[i].align_dropped, memory_order_relaxed);
+            if (total != lastReported) {
+               lastReported = total;
+               uint8_t m[13], *mp = m;
+               size_t mo = 0;
+               wail_put_u32(mp, &mo, 9);
+               mp[mo++] = WAIL_TAG_METRICS;
+               wail_put_u64(mp, &mo, total);
+               if (wail_sock_write_all(sock, m, (int)mo) != 0) {
+                  wail_sock_close(sock);
+                  sock = WAIL_INVALID_SOCK;
+               }
+            }
+         }
          continue; // idle tick: re-check running, keep the connection
       }
       if (n <= 0) {
@@ -286,9 +350,77 @@ static void *recv_ipc_thread(void *arg) {
 
 // --- audio ---
 
+// recv_align adjusts one slot's ring head against the stamped timeline and
+// returns how many leading output frames must be silence this block. err>0
+// (head ahead of the frame due now — we're early, e.g. delivery lead): pad
+// that many frames, decoupling delivery lead from playback offset. err<0
+// (frames due in the past): skip them — late audio is dropped, not played
+// late. Anchor math is wrap-safe via uint32 frame counters (24h wrap at 48k).
+static uint32_t recv_align(recv_slot *s, uint32_t n, int64_t nowUs) {
+   uint32_t ah = atomic_load_explicit(&s->ar_head, memory_order_relaxed);
+   uint32_t at = atomic_load_explicit(&s->ar_tail, memory_order_acquire);
+   uint32_t head = atomic_load_explicit(&s->ring.head, memory_order_relaxed);
+
+   // Consume anchors the head has fully passed (keep the one in force).
+   while (at - ah > 1 && (int32_t)(s->anchors[(ah + 1) % RECV_ANCHORS].frame - head) <= 0) {
+      s->last = s->anchors[ah % RECV_ANCHORS];
+      s->has_last = true;
+      ah++;
+   }
+   atomic_store_explicit(&s->ar_head, ah, memory_order_release);
+
+   // Pick the extrapolation anchor: newest stamp not in the future, else the
+   // oldest pending (backward extrapolation pads a not-yet-due chunk), else
+   // the last consumed one (keeps continuity across anchor-less stretches).
+   recv_anchor a;
+   bool have = false;
+   for (uint32_t i = at; i > ah; i--) {
+      if (s->anchors[(i - 1) % RECV_ANCHORS].micros <= nowUs) {
+         a = s->anchors[(i - 1) % RECV_ANCHORS];
+         have = true;
+         break;
+      }
+   }
+   if (!have && ah != at) {
+      a = s->anchors[ah % RECV_ANCHORS];
+      have = true;
+   }
+   if (!have) {
+      if (!s->has_last) return 0; // no stamp ever: FIFO
+      a = s->last;
+   }
+
+   uint32_t rate = atomic_load_explicit(&s->rate, memory_order_relaxed);
+   if (rate == 0) rate = 48000;
+   int64_t target = (int64_t)a.frame + (nowUs - a.micros) * (int64_t)rate / 1000000;
+   int32_t err = (int32_t)(head - (uint32_t)target);
+   // Deadband: |err| below this plays straight. Cadence jitter between the
+   // host audio clock and the mono clock sits here (ppm-level drift ≈ sub-
+   // frame per block); correcting it would click every block, and a sub-ms
+   // wander is inaudible. Only genuine offset (delivery lead, late chunks)
+   // crosses the band, and corrections return to the edge, not to zero.
+   const int32_t band = 32; // ~0.67ms at 48k
+   if (err > band) {
+      uint32_t pad = (uint32_t)(err - band);
+      return pad < n ? pad : n;
+   }
+   if (err < -band) {
+      uint32_t tail = atomic_load_explicit(&s->ring.tail, memory_order_acquire);
+      uint32_t avail = tail - head;
+      uint32_t skip = (uint32_t)(-err - band);
+      if (skip > avail) skip = avail;
+      if (skip > 0) {
+         atomic_store_explicit(&s->ring.head, head + skip, memory_order_release);
+         atomic_fetch_add_explicit(&s->align_dropped, skip, memory_order_relaxed);
+      }
+   }
+   return 0;
+}
+
 static clap_process_status CLAP_ABI recv_process(const clap_plugin_t *plugin, const clap_process_t *p) {
    wail_recv *self = plugin->plugin_data;
    uint32_t n = p->frames_count;
+   int64_t nowUs = wail_mono_micros(); // one clock read per block (vDSO)
    for (uint32_t port = 0; port < p->audio_outputs_count && port < RECV_SLOTS; port++) {
       clap_audio_buffer_t *out = &p->audio_outputs[port];
       if (!out->data32) continue;
@@ -296,7 +428,13 @@ static clap_process_status CLAP_ABI recv_process(const clap_plugin_t *plugin, co
       float *outR = out->channel_count > 1 ? out->data32[1] : NULL;
       recv_slot *s = &self->slots[port];
       if (atomic_load_explicit(&s->assigned, memory_order_acquire)) {
-         recv_ring_pop(&s->ring, outL, outR, n);
+         uint32_t pad = recv_align(s, n, nowUs);
+         uint32_t i;
+         for (i = 0; i < pad; i++) {
+            if (outL) outL[i] = 0.0f;
+            if (outR) outR[i] = 0.0f;
+         }
+         recv_ring_pop(&s->ring, outL ? outL + pad : NULL, outR ? outR + pad : NULL, n - pad);
       } else {
          for (uint32_t i = 0; i < n; i++) {
             if (outL) outL[i] = 0.0f;

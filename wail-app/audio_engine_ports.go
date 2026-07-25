@@ -71,7 +71,7 @@ type emitSink interface {
 // delivery time matches stamped time. Beat-stamped sinks (*abllink.Sink) don't
 // need it — their subscribers render at the stamp, not at arrival.
 type fifoFlusher interface {
-	Flush(nowBeat, leadBeats float64)
+	Flush(nowBeat, leadBeats float64, playAt func(beat float64) int64)
 }
 
 // Compile-time checks that the Link Audio adapters satisfy the transport seams.

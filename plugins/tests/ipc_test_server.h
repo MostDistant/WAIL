@@ -289,9 +289,11 @@ inline void putStr8(std::vector<uint8_t> &b, const std::string &s) {
 }
 
 // encodeRemotePCM mirrors EncodeRemotePCM: App → Recv PCM for one remote stream.
+// playAtMicros is the monotonic-µs instant the first frame should play (0 or a
+// small value = legacy/unstamped → FIFO playback).
 inline std::vector<uint8_t> encodeRemotePCM(const std::string &peerID, uint16_t streamID,
                                             uint8_t channels, uint32_t sampleRate,
-                                            int64_t intervalIndex,
+                                            int64_t playAtMicros,
                                             const std::vector<int16_t> &samples) {
    std::vector<uint8_t> m;
    m.push_back(WAIL_TAG_REMOTEPCM);
@@ -299,7 +301,7 @@ inline std::vector<uint8_t> encodeRemotePCM(const std::string &peerID, uint16_t 
    putU16(m, streamID);
    m.push_back(channels);
    putU32(m, sampleRate);
-   putU64(m, (uint64_t)intervalIndex);
+   putU64(m, (uint64_t)playAtMicros);
    for (int16_t s : samples) putU16(m, (uint16_t)s);
    return m;
 }

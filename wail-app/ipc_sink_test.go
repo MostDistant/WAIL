@@ -61,12 +61,19 @@ func TestIPCEmitSinkFrames(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	sink.Flush(100.0, 0)
+	// The mapper converts the chunk's stamped beat to the plugin-facing
+	// monotonic play-at µs (the engine's clock bridge); the wire frame must
+	// carry exactly that stamp.
+	playAt := func(beat float64) int64 { return int64(beat * 1e6) }
+	sink.Flush(100.0, 0, playAt)
 	select {
 	case f := <-frames:
 		rp, ok := DecodeRemotePCM(f)
 		if !ok || rp.PeerID != "peerZ" || rp.StreamID != 5 || !slices.Equal(rp.Samples, samples) {
 			t.Fatalf("RemotePCM mismatch: ok=%v %+v", ok, rp)
+		}
+		if rp.PlayAtMicros != 100_000_000 {
+			t.Fatalf("PlayAtMicros = %d, want 100000000 (mapper applied to beat 100)", rp.PlayAtMicros)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for RemotePCM")
@@ -74,13 +81,13 @@ func TestIPCEmitSinkFrames(t *testing.T) {
 
 	// A future-stamped chunk stays held through flushes that don't reach it.
 	sink.WriteInterleaved([]int16{9}, nil, 200.0, 0, 1, 2, 48000)
-	sink.Flush(150.0, 0)
+	sink.Flush(150.0, 0, playAt)
 	select {
 	case f := <-frames:
 		t.Fatalf("future chunk released early: %x", f)
 	case <-time.After(150 * time.Millisecond):
 	}
-	sink.Flush(200.0, 0)
+	sink.Flush(200.0, 0, playAt)
 	select {
 	case f := <-frames:
 		if rp, ok := DecodeRemotePCM(f); !ok || !slices.Equal(rp.Samples, []int16{9}) {

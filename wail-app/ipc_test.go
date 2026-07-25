@@ -60,13 +60,15 @@ func TestRawPCMRoundTrip(t *testing.T) {
 
 func TestRemotePCMRoundTrip(t *testing.T) {
 	samples := []int16{0, 1, -1, 32767, -32768, 12345, -12345}
-	msg := EncodeRemotePCM("peer-XY", 7, 2, 48000, -42, samples)
+	// The 8-byte field is the monotonic-µs time the first frame should play
+	// (machine clock shared with the plugin), so large positive values.
+	msg := EncodeRemotePCM("peer-XY", 7, 2, 48000, 1_759_000_123_456, samples)
 	got, ok := DecodeRemotePCM(msg)
 	if !ok {
 		t.Fatal("DecodeRemotePCM: ok=false")
 	}
 	if got.PeerID != "peer-XY" || got.StreamID != 7 || got.Channels != 2 ||
-		got.SampleRate != 48000 || got.IntervalIndex != -42 {
+		got.SampleRate != 48000 || got.PlayAtMicros != 1_759_000_123_456 {
 		t.Fatalf("header mismatch: %+v", got)
 	}
 	if !slices.Equal(got.Samples, samples) {

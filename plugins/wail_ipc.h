@@ -119,6 +119,15 @@ static inline void wail_put_u64(uint8_t *b, size_t *off, uint64_t v) {
 static inline uint16_t wail_get_u16(const uint8_t *b) {
    return (uint16_t)b[0] | ((uint16_t)b[1] << 8);
 }
+static inline uint64_t wail_get_u64(const uint8_t *b) {
+   uint64_t v;
+   memcpy(&v, b, sizeof(v));
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+   v = __builtin_bswap64(v);
+#endif
+   return v;
+}
+
 static inline uint32_t wail_get_u32(const uint8_t *b) {
    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
 }
@@ -175,6 +184,32 @@ static inline int wail_sock_timed_out(void) {
    return WSAGetLastError() == WSAETIMEDOUT;
 #else
    return errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+}
+
+// wail_mono_micros is the machine monotonic clock the app stamps RemotePCM
+// chunks with (wail_mono_micros in abllink/wrap.cpp — same libc calls, same
+// domain by construction). The app bridges Link-timeline beats into this
+// domain; the plugin renders stamped chunks against it. clock_gettime is a
+// vDSO read on Linux/macOS (no syscall), safe on the audio thread.
+static inline int64_t wail_mono_micros(void) {
+#if defined(_WIN32)
+   static LARGE_INTEGER wail_qpc_freq;
+   if (wail_qpc_freq.QuadPart == 0) QueryPerformanceFrequency(&wail_qpc_freq);
+   LARGE_INTEGER now;
+   QueryPerformanceCounter(&now);
+   return (int64_t)(now.QuadPart / (wail_qpc_freq.QuadPart / 1000000.0));
+#elif defined(__APPLE__)
+   // CLOCK_MONOTONIC_RAW == mach_absolute_time == std::steady_clock == Link's
+   // host-time base. Plain CLOCK_MONOTONIC excludes sleep time on macOS and
+   // would silently diverge from all of those (measured: hours on a laptop).
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+   return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+#else
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 #endif
 }
 
