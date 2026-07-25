@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.14.2 (2026-07-25)
+
+### Fixes
+
+- Windows plugin build + CI-flaky timing tests (#455)
+
 ## 3.14.1 (2026-07-25)
 
 ### Fixes
