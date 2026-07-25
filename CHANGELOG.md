@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.14.3 (2026-07-25)
+
+### Fixes
+
+- realign decoded audio by the Opus codec lookahead + mini-DAW harness (#457)
+
 ## 3.14.2 (2026-07-25)
 
 ### Fixes
