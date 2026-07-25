@@ -50,6 +50,7 @@ endfunction()
 
 add_wail_plugin(wail-send wail_send.c)
 add_wail_plugin(wail-recv wail_recv.c)
+add_wail_plugin(transport-probe transport_probe.c) # dev diagnostic, not shipped
 
 # Link Bridge plugins (ADR-0007): the Link SDK (C++17 + asio) compiled into the
 # CLAP bundle itself — each plugin instance is its own LAN Link peer. Mirrors
