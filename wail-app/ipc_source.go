@@ -73,6 +73,19 @@ func (s *ipcCaptureSource) Push(samples []int16, beginFrame uint64, channels int
 	s.ring = append(s.ring, blk)
 }
 
+// ipcStaleStampThresholdUs bounds how far a reconstructed stamp may lie in
+// the FUTURE before the anchor is re-armed. Stamps should sit at or behind
+// the pop instant (capture → IPC → drain); a stamp seconds ahead means the
+// anchor was armed on a stale re-sent block — wail_send.c preserves and
+// re-sends the send ring through a WAIL outage, so the first blocks after a
+// reconnect can be arbitrarily old. Extrapolating from such an anchor stamps
+// all subsequent audio by the outage duration (field finding: an 11-minute
+// outage put both peers' capture +82/+83 intervals ahead, frozen for the
+// session). 2s: far above any backlog, far below any plausible outage.
+const ipcStaleStampThresholdUs = 2_000_000
+
+// PopMapped drains the oldest block from the ring. ok is false when the ring is empty.
+// Call from a single drain goroutine.
 func (s *ipcCaptureSource) PopMapped(ss *abllink.SessionState, quantum float64) (captureBuffer, float64, bool, bool) {
 	s.mu.Lock()
 	if len(s.ring) == 0 {
@@ -94,6 +107,14 @@ func (s *ipcCaptureSource) PopMapped(ss *abllink.SessionState, quantum float64) 
 	stampMicros := s.anchorMicros
 	if blk.sampleRate > 0 {
 		stampMicros += int64(blk.beginFrame-s.anchorFrames) * 1_000_000 / int64(blk.sampleRate)
+	}
+	// Stale-ring guard (see ipcStaleStampThresholdUs): re-arm the anchor on
+	// the current block when the reconstructed stamp jumps implausibly far
+	// into the future.
+	if stampMicros-s.nowMicros() > ipcStaleStampThresholdUs {
+		s.anchorMicros = s.nowMicros()
+		s.anchorFrames = blk.beginFrame
+		stampMicros = s.anchorMicros
 	}
 	s.mu.Unlock()
 

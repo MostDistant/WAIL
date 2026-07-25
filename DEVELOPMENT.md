@@ -145,8 +145,10 @@ Two modes (`TIER2_MODE`):
   correlated (absolute grid indices are per-peer — ADR-0003): the sender logs a
   `(room, content-seconds)` marker per boundary (`[wav-sender] boundary room=…
   content=…s`), the receiver's `>>> INTERVAL` log marks which room interval
-  started playing when, and every received second is asserted
-  `captureRoom == playingRoom − D`.
+  started playing when, and each receiver interval's **majority-vote capture
+  room** (per-second tone classification voting by content range; skewed or
+  mixed-tone seconds lose the vote, so no edge margins are needed) is asserted
+  `== playingRoom − D`.
 - **`sweep`** — the original rising log sweep: a PASS means non-silent,
   **lossless** audio whose estimated frequency **climbs with the sweep** (proof
   it's intact and in order).

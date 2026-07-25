@@ -93,3 +93,52 @@ func TestRawPCMToInt16(t *testing.T) {
 		t.Fatalf("float32 conversion = %v, want %v", got, want)
 	}
 }
+
+func TestIPCCaptureSourceStaleRingReanchors(t *testing.T) {
+	lb := NewLinkBridge(120, 4)
+	ss := abllink.NewSessionState()
+	defer ss.Close()
+	lb.Link().CaptureAppSessionState(ss)
+
+	// The plugin's send ring sat blocked through an 11-minute WAIL outage
+	// (wail_send.c re-sends the stale slots on reconnect). The stale slots
+	// (begin_frame ≈ 0) flush first and arm the anchor...
+	var nowUs int64 = 100_000_000
+	src := &ipcCaptureSource{nowMicros: func() int64 { return nowUs }}
+	src.Push([]int16{0, 0}, 0, 2, 48000)     // stale slot 1 (11 min old)
+	src.Push([]int16{0, 0}, 48000, 2, 48000) // stale slot 2
+	if _, _, ok, _ := src.PopMapped(ss, 4.0); !ok {
+		t.Fatal("stale slot 1 must map")
+	}
+	_, beat2, ok2, _ := src.PopMapped(ss, 4.0)
+	if !ok2 {
+		t.Fatal("stale slot 2 must map")
+	}
+
+	// ...then the CURRENT block arrives, 31.7M frames (11 min) later. The
+	// anchor must re-arm on the implausible forward jump; extrapolating from
+	// the stale anchor would stamp this 660s in the future (+82 intervals —
+	// the field bug), frozen for the session.
+	nowUs += 10_000_000 // 10s of playback since the outage
+	src.Push([]int16{0, 0}, 31_700_000, 2, 48000)
+	_, beat, ok, _ := src.PopMapped(ss, 4.0)
+	if !ok {
+		t.Fatal("current block must map")
+	}
+	// Re-armed: the stamp advanced from the stale slot's 101s to 110s of
+	// real time (18 beats). Poisoned: it would jump ~1319 beats (660s).
+	if d := beat - beat2; math.Abs(d-18.0) > 1.0 {
+		t.Fatalf("stamp jump from stale ring = %.1f beats, want ~18 (re-armed) — poisoned anchor would give ~1319", d)
+	}
+
+	// And a small forward skew (≤ the threshold) must NOT re-arm: normal
+	// backlog/jitter keeps the established anchor.
+	src.Push([]int16{0, 0}, 31_700_000+48000, 2, 48000)
+	_, beat3, ok3, _ := src.PopMapped(ss, 4.0)
+	if !ok3 {
+		t.Fatal("follow-up block must map")
+	}
+	if d := beat3 - beat; math.Abs(d-2.0) > 1e-6 {
+		t.Fatalf("beat advance after re-arm = %f, want 2.0 (anchor kept)", d)
+	}
+}

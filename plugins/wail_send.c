@@ -192,6 +192,14 @@ static void *send_ipc_thread(void *arg) {
          }
          // (Re)sent on every (re)connect: the app registers this stream fresh.
          atomic_store_explicit(&self->name_dirty, true, memory_order_release);
+         // Flush stale ring slots held through the outage: re-sending them
+         // would arm the app's beat anchor with old frame counters and stamp
+         // all subsequent audio by the outage duration (field finding: an
+         // 11-minute outage put capture +82 intervals ahead). The slots are
+         // ~40ms of old audio at most — never worth a poisoned anchor.
+         atomic_store_explicit(&self->head,
+                               atomic_load_explicit(&self->tail, memory_order_acquire),
+                               memory_order_release);
       }
       if (atomic_exchange_explicit(&self->name_dirty, false, memory_order_acq_rel)) {
          if (send_track_name_frame(self, sock) != 0) {
