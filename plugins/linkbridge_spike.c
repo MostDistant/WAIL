@@ -69,6 +69,7 @@ static bool CLAP_ABI spike_activate(const clap_plugin_t *plugin, double sr, uint
    self->log = fopen(SPIKE_LOG, "a");
    self->link = lb_create(120.0);
    lb_enable(self->link, true);
+   lb_enable_audio(self->link, true);
    spike_log(self, "=== spike activated: host=\"%s %s\" sr=%.0f — Link peer enabled ===",
              self->host && self->host->name ? self->host->name : "?",
              self->host && self->host->version ? self->host->version : "?", sr);

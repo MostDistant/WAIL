@@ -61,23 +61,37 @@ set(LINK_SDK "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/link")
 if(NOT EXISTS "${LINK_SDK}/extensions/abl_link/src/abl_link.cpp")
   message(FATAL_ERROR "Link SDK not found at ${LINK_SDK}. Run: git submodule update --init --recursive vendor/link")
 endif()
+# linkbridge-link: the C-facing Link session/audio API (linkbridge_link.h),
+# shared by the bridge plugins AND the test harness (which subscribes to the
+# send plugin's channel in-process). Link SDK/platform link deps are PUBLIC so
+# consumers inherit them.
+add_library(linkbridge-link STATIC linkbridge_link.cpp linkbridge_link.h)
+target_include_directories(linkbridge-link PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" PRIVATE
+  "${LINK_SDK}/extensions/abl_link/include"
+  "${LINK_SDK}/extensions/abl_link/src"
+  "${LINK_SDK}/include"
+  "${LINK_SDK}/modules/asio-standalone/asio/include")
+target_compile_features(linkbridge-link PUBLIC cxx_std_17)
+set_target_properties(linkbridge-link PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(linkbridge-link PUBLIC Threads::Threads)
+if(WIN32)
+  target_compile_definitions(linkbridge-link PRIVATE LINK_PLATFORM_WINDOWS=1 NOMINMAX)
+  target_link_libraries(linkbridge-link PUBLIC ws2_32 winmm iphlpapi)
+elseif(APPLE)
+  target_compile_definitions(linkbridge-link PRIVATE LINK_PLATFORM_MACOSX=1 LINK_PLATFORM_UNIX=1)
+else()
+  target_compile_definitions(linkbridge-link PRIVATE LINK_PLATFORM_LINUX=1 LINK_PLATFORM_UNIX=1)
+  target_link_libraries(linkbridge-link PUBLIC m atomic)
+endif()
+
 function(add_linkbridge_plugin name)
   add_library(${name} MODULE ${ARGN})
-  target_include_directories(${name} PRIVATE
-    "${CLAP_INCLUDE}" "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${LINK_SDK}/extensions/abl_link/include"
-    "${LINK_SDK}/extensions/abl_link/src"
-    "${LINK_SDK}/include"
-    "${LINK_SDK}/modules/asio-standalone/asio/include")
-  target_compile_features(${name} PRIVATE cxx_std_17)
+  target_include_directories(${name} PRIVATE "${CLAP_INCLUDE}" "${CMAKE_CURRENT_SOURCE_DIR}")
   set_target_properties(${name} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
-  target_link_libraries(${name} PRIVATE Threads::Threads)
+  target_link_libraries(${name} PRIVATE linkbridge-link)
   if(WIN32)
-    target_compile_definitions(${name} PRIVATE LINK_PLATFORM_WINDOWS=1 NOMINMAX)
-    target_link_libraries(${name} PRIVATE ws2_32 winmm iphlpapi)
     set_target_properties(${name} PROPERTIES PREFIX "" SUFFIX ".clap")
   elseif(APPLE)
-    target_compile_definitions(${name} PRIVATE LINK_PLATFORM_MACOSX=1 LINK_PLATFORM_UNIX=1)
     set_target_properties(${name} PROPERTIES
       BUNDLE TRUE
       BUNDLE_EXTENSION "clap"
@@ -88,13 +102,12 @@ function(add_linkbridge_plugin name)
       MACOSX_BUNDLE_BUNDLE_VERSION "0.1.0"
       MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0")
   else()
-    target_compile_definitions(${name} PRIVATE LINK_PLATFORM_LINUX=1 LINK_PLATFORM_UNIX=1)
-    target_link_libraries(${name} PRIVATE m atomic)
     set_target_properties(${name} PROPERTIES PREFIX "" SUFFIX ".clap")
   endif()
 endfunction()
 
-add_linkbridge_plugin(linkbridge-spike linkbridge_spike.c linkbridge_link.cpp) # dev spike (gate 1), not shipped
+add_linkbridge_plugin(linkbridge-spike linkbridge_spike.c) # dev spike (gate 1), not shipped
+add_linkbridge_plugin(linkbridge-send linkbridge_send.c)
 
 # DAW-less integration tests (clap-trap host + IPC test double). Off by default:
 # enabling fetches clap-trap over the network at configure time.

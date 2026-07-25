@@ -5,10 +5,12 @@
 // prove the bundle loads, activates, enables Link, and processes without
 // crashing.
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
 
+#include "linkbridge_link.h"
 #include "plugin_host.h"
 #include "test_framework.h"
 
@@ -68,4 +70,109 @@ TEST(linkbridge_spike_hosts_and_logs) {
       }
       CHECK_MSG(strstr(tail, "peers=0") == nullptr, "expected peers>0 with a second peer on the LAN");
    }
+}
+
+// Pub/sub roundtrip (Link Bridge Send): host the send plugin via clap-trap,
+// feed a 440Hz sine, and a second Link peer in this process subscribes to the
+// published channel and measures what arrives — the whole Link Audio send
+// path, no DAW, no WAIL app.
+TEST(linkbridge_send_pubsub_roundtrip) {
+   wailtest::ClapInstance inst;
+   std::string err;
+   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SEND_PATH, "software.linkbridge.send", 0, 48000.0, 256, 256, &err),
+             err.c_str());
+   if (!inst.plugin) return;
+
+   // Subscriber side: our own Link peer in the test process.
+   lb_link *sub = lb_create(120.0);
+   lb_enable(sub, true);
+   lb_enable_audio(sub, true);
+
+   const uint32_t kBlock = 256;
+   std::vector<float> inL(kBlock), inR(kBlock), outL(kBlock), outR(kBlock);
+   float *inCh[2] = {inL.data(), inR.data()};
+   float *outCh[2] = {outL.data(), outR.data()};
+   clap_audio_buffer_t inBuf{}, outBuf{};
+   inBuf.channel_count = 2;
+   inBuf.data32 = inCh;
+   outBuf.channel_count = 2;
+   outBuf.data32 = outCh;
+
+   auto pump = [&]() {
+      static uint64_t frame = 0;
+      for (uint32_t i = 0; i < kBlock; i++) {
+         float v = 0.5f * sinf(2.0f * 3.14159265f * 440.0f * (float)(frame + i) / 48000.0f);
+         inL[i] = v;
+         inR[i] = v;
+      }
+      frame += kBlock;
+      clap_process_t p{};
+      p.steady_time = -1;
+      p.frames_count = kBlock;
+      p.audio_inputs_count = 1;
+      p.audio_inputs = &inBuf;
+      p.audio_outputs_count = 1;
+      p.audio_outputs = &outBuf;
+      inst.plugin->process(inst.plugin, &p);
+   };
+
+   // Wait for the channel to appear, pumping the plugin meanwhile.
+   uint64_t chanId = 0;
+   {
+      auto t0 = std::chrono::steady_clock::now();
+      while (!chanId && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10)) {
+         pump();
+         lb_channel_info chans[LB_MAX_CHANNELS];
+         size_t n = lb_channels(sub, chans, LB_MAX_CHANNELS);
+         for (size_t i = 0; i < n; i++)
+            if (std::string(chans[i].name).find("Link Bridge Send") != std::string::npos)
+               chanId = chans[i].id_u64;
+         wail_sleep_ms(20);
+      }
+   }
+   CHECK_MSG(chanId != 0, "Link Bridge Send channel never appeared on the LAN");
+   if (!chanId) {
+      inst.teardown();
+      lb_destroy(sub);
+      return;
+   }
+
+   lb_source *src = lb_source_create(sub, chanId);
+
+   // Collect ~1.5s of audio.
+   std::vector<int16_t> got;
+   {
+      auto t0 = std::chrono::steady_clock::now();
+      lb_source_buffer b;
+      while (got.size() < 48000 * 3 / 2 &&
+             std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10)) {
+         pump();
+         while (lb_source_pop(src, &b))
+            got.insert(got.end(), b.samples, b.samples + b.num_frames * 2);
+         wail_sleep_ms(5);
+      }
+   }
+   CHECK_MSG(got.size() >= 48000,
+             "received too little audio (" + std::to_string(got.size()) + " frames-pairs)");
+
+   // Measure: RMS and zero-crossing frequency on the left channel.
+   if (got.size() >= 48000) {
+      double sq = 0;
+      int crossings = 0;
+      size_t frames = got.size() / 2;
+      for (size_t i = 0; i < frames; i++) {
+         double l = got[2 * i] / 32768.0;
+         sq += l * l;
+         if (i > 0 && ((got[2 * i - 2] < 0) != (got[2 * i] < 0))) crossings++;
+      }
+      double rms = sqrt(sq / frames);
+      double seconds = (double)frames / 48000.0;
+      double freq = crossings / 2.0 / seconds;
+      CHECK_MSG(rms > 0.1, "received audio too quiet (rms=" + std::to_string(rms) + ") — send path broken");
+      CHECK_MSG(freq > 380 && freq < 500, "frequency off: got " + std::to_string(freq) + " Hz, want ~440");
+   }
+
+   lb_source_destroy(src);
+   inst.teardown();
+   lb_destroy(sub);
 }
