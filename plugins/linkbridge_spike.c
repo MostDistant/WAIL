@@ -18,7 +18,6 @@
 #include "clap/clap.h"
 #include "linkbridge_link.h"
 
-#define SPIKE_LOG "/tmp/linkbridge-spike.log"
 
 typedef struct {
    clap_plugin_t      plugin;
@@ -66,7 +65,7 @@ static bool CLAP_ABI spike_activate(const clap_plugin_t *plugin, double sr, uint
    (void)minf;
    (void)maxf;
    spike *self = plugin->plugin_data;
-   self->log = fopen(SPIKE_LOG, "a");
+   { char lp[512]; lb_temp_log_path("linkbridge-spike.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
    self->link = lb_create(120.0);
    lb_enable(self->link, true);
    lb_enable_audio(self->link, true);

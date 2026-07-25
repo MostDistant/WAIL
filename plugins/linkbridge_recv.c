@@ -36,7 +36,6 @@
 #define LBR_RING_FRAMES 32768 // power of two; ~0.68s stereo @48k
 #define LBR_ANCHORS 512
 #define LBR_QUANTUM 4.0
-#define LBR_LOG "/tmp/linkbridge-recv.log"
 #define LBR_NAME_PREFIX "WAIL "         // filter: room-published channels
 #define LBR_NAME_PREFIX_DOT "WAIL · "   // stripped for port display names
 #define LBR_GONE_POLLS 6                // ~3s of discovery misses → slot freed
@@ -364,7 +363,7 @@ static bool CLAP_ABI lbr_activate(const clap_plugin_t *plugin, double sr, uint32
    (void)minf;
    (void)maxf;
    lbr_recv *self = plugin->plugin_data;
-   self->log = fopen(LBR_LOG, "a");
+   { char lp[512]; lb_temp_log_path("linkbridge-recv.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
    self->rate_ok = (sr == 48000.0);
    self->link = lb_create(120.0);
    lb_enable(self->link, true);
