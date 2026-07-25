@@ -158,17 +158,42 @@ struct RecvHost {
       return true;
    }
 
+   // setTransport makes processBlock report a rolling transport (beats
+   // timeline + tempo) that auto-advances one block per call, like a real
+   // host. clearTransport reverts to no-transport (mono-clock fallback).
+   void setTransport(double songPosBeats, double tempo) {
+      useTransport_ = true;
+      songPosBeats_ = songPosBeats;
+      tempo_ = tempo;
+      transport_.header.size = sizeof(transport_);
+      transport_.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+      transport_.header.type = CLAP_EVENT_TRANSPORT;
+   }
+   void clearTransport() { useTransport_ = false; }
+
    clap_process_status processBlock() {
       clap_process_t p{};
       p.steady_time = -1;
       p.frames_count = (uint32_t)outL[0].size();
-      p.transport = nullptr; // recv never reads it
+      if (useTransport_) {
+         transport_.flags = CLAP_TRANSPORT_IS_PLAYING | CLAP_TRANSPORT_HAS_BEATS_TIMELINE |
+                            CLAP_TRANSPORT_HAS_TEMPO;
+         // clap_beattime is fixed-point beats × 2^31 — scale, don't assign raw.
+         transport_.song_pos_beats = (clap_beattime)llround(songPosBeats_ * (double)CLAP_BEATTIME_FACTOR);
+         transport_.tempo = tempo_;
+         p.transport = &transport_;
+      } else {
+         p.transport = nullptr;
+      }
       p.audio_inputs_count = 0;
       p.audio_outputs_count = kPorts;
       p.audio_outputs = outs_;
       p.in_events = emptyIn_.get();
       p.out_events = discardOut_.get();
-      return inst.plugin->process(inst.plugin, &p);
+      auto st = inst.plugin->process(inst.plugin, &p);
+      if (useTransport_)
+         songPosBeats_ += (double)p.frames_count * tempo_ / (60.0 * 48000.0);
+      return st;
    }
 
    std::string portName(uint32_t idx) {
@@ -196,6 +221,9 @@ private:
    clap_audio_buffer_t outs_[kPorts];
    clap_trap::EmptyInputEvents emptyIn_;
    clap_trap::DiscardOutputEvents discardOut_;
+   bool useTransport_ = false;
+   double songPosBeats_ = 0, tempo_ = 120;
+   clap_event_transport_t transport_{};
 };
 
 } // namespace wailtest

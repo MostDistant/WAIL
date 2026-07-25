@@ -58,6 +58,31 @@ func TestRawPCMRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRemotePCM2RoundTrip(t *testing.T) {
+	// v2 carries the Link beat alongside the mono-µs stamp: a transport-aware
+	// plugin aligns fractional beat phase against the host transport (exact,
+	// latency-compensated); the µs stamp remains for the stopped-transport
+	// fallback.
+	samples := []int16{0, 1, -1, 32767, -32768}
+	msg := EncodeRemotePCM2("peer-XY", 7, 2, 48000, 1_759_000_123_456, 452.25, samples)
+	got, ok := DecodeRemotePCM2(msg)
+	if !ok {
+		t.Fatal("DecodeRemotePCM2: ok=false")
+	}
+	if got.PeerID != "peer-XY" || got.StreamID != 7 || got.Channels != 2 ||
+		got.SampleRate != 48000 || got.PlayAtMicros != 1_759_000_123_456 || got.Beat != 452.25 {
+		t.Fatalf("header mismatch: %+v", got)
+	}
+	if !slices.Equal(got.Samples, samples) {
+		t.Fatalf("samples mismatch: %v", got.Samples)
+	}
+	// Payload layout: 25 bytes fixed overhead (tag, peerID len, streamID,
+	// channels, rate, µs, beat) + peerID + samples.
+	if want := 25 + len("peer-XY") + 2*len(samples); len(msg) != want {
+		t.Fatalf("payload length = %d, want %d", len(msg), want)
+	}
+}
+
 func TestRemotePCMRoundTrip(t *testing.T) {
 	samples := []int16{0, 1, -1, 32767, -32768, 12345, -12345}
 	// The 8-byte field is the monotonic-µs time the first frame should play

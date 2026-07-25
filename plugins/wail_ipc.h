@@ -82,6 +82,10 @@ static inline void wail_mutex_destroy(wail_mutex *m) { pthread_mutex_destroy(m);
 // Role bytes (first byte a plugin writes on connect).
 #define WAIL_IPC_ROLE_SEND 0x00
 #define WAIL_IPC_ROLE_RECV 0x01
+// Recv v2: same role, but the app may send RemotePCM2 (beat stamps for
+// transport-phase alignment). A distinct role byte keeps negotiation
+// deterministic; an old app rejects it and the plugin falls back to v1.
+#define WAIL_IPC_ROLE_RECV_V2 0x02
 
 // Message tags.
 #define WAIL_TAG_RAWPCM 0x10
@@ -89,6 +93,7 @@ static inline void wail_mutex_destroy(wail_mutex *m) { pthread_mutex_destroy(m);
 #define WAIL_TAG_STREAMNAME 0x12
 #define WAIL_TAG_STREAMGONE 0x13
 #define WAIL_TAG_TRACKNAME 0x14 // Send → App: DAW track name (clap.track-info)
+#define WAIL_TAG_REMOTEPCM2 0x15 // App → Recv: RemotePCM + Link beat stamp (f64)
 #define WAIL_TAG_METRICS 0x06
 
 // RawPCM flag bits.
