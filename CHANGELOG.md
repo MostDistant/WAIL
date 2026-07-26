@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.15.0 (2026-07-26)
+
+### Features
+
+- peer log sharing pump + wail-logtail CLI + -log-sharing headless flag (#459)
+
+### Fixes
+
+- slew health — wedge fixes, honest logs, and an inaudible 0.05% cruise clamp (#461)
+
 ## 3.14.3 (2026-07-25)
 
 ### Fixes
