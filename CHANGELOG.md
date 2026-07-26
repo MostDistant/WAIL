@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.17.1 (2026-07-26)
+
+### Fixes
+
+- stop counting join-time setup as sink underruns (#473)
+
 ## 3.17.0 (2026-07-26)
 
 ### Features
