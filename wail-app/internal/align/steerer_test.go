@@ -560,6 +560,45 @@ func TestVPNTeleportReplay(t *testing.T) {
 	}
 }
 
+// TestSlewSettleHysteresis: the slew fires past 10ms but settles only under
+// 5ms — in between it holds the nudge so episodes settle DEEP instead of
+// stopping at the deadband edge and re-firing ~40s later (ss3 field pattern:
+// settle at −9.1ms, skew walks it back out in under a minute).
+func TestSlewSettleHysteresis(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_100_000)
+	observe(s, now)
+	s.Tick(16, now.Add(6*time.Second)) // sighting
+	s.Tick(16, now.Add(7*time.Second)) // fires at 120.06
+	if len(f.tempos) != 1 {
+		t.Fatalf("precondition: slew active, tempos=%v", f.tempos)
+	}
+	f.state.BPM = lastTempo(f)
+	// δ closes to 7ms (same sign, inside the fire deadband but outside the
+	// settle band): the nudge HOLDS — no restore.
+	f.timeAtBeat = 14_007_000
+	s.Tick(16, now.Add(8*time.Second))
+	if got := lastTempo(f); !approxEq(got, 120*(1+interval.SlewMaxFraction)) {
+		t.Fatalf("tempo in the hysteresis zone = %v, want the nudge held (120.06)", got)
+	}
+	// δ closes under 5ms: restore.
+	f.timeAtBeat = 14_003_000
+	s.Tick(16, now.Add(9*time.Second))
+	if got := lastTempo(f); got != 120 {
+		t.Fatalf("tempo under the settle band = %v, want 120 (restored)", got)
+	}
+	// Re-fire, then δ flips sign in the zone: restore (the nudge overshot).
+	f.timeAtBeat = 14_100_000
+	s.Tick(16, now.Add(10*time.Second))
+	s.Tick(16, now.Add(11*time.Second))
+	f.state.BPM = lastTempo(f)
+	f.timeAtBeat = 13_993_000 // δ=−7ms
+	s.Tick(16, now.Add(12*time.Second))
+	if got := lastTempo(f); got != 120 {
+		t.Fatalf("tempo after sign flip = %v, want 120 (restored, not held)", got)
+	}
+}
+
 func TestRejoinRearmsEntry(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_000_000)
