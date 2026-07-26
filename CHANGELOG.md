@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.15.1 (2026-07-26)
+
+### Fixes
+
+- stage Windows CLAP plugins from the multi-config build path (#462)
+
 ## 3.15.0 (2026-07-26)
 
 ### Features
