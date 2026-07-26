@@ -67,6 +67,8 @@ type envelope struct {
 	Payload     json.RawMessage `json:"payload,omitempty"`
 	Level       string          `json:"level,omitempty"`
 	Message     string          `json:"message,omitempty"`
+	Peers       []string        `json:"peers,omitempty"`
+	PeerNames   map[string]string `json:"peer_display_names,omitempty"`
 }
 
 type logPayload struct {
@@ -153,6 +155,15 @@ func tail(server, room, password, name, version string, events bool, sig chan os
 				fmt.Printf("%s [%s/%s] %s\n", ts, p.From, level, p.Message)
 			} else if events {
 				fmt.Printf("%s [event] sync %s: %s\n", ts, p.Type, strings.TrimSpace(string(m.Payload)))
+			}
+		case "join_ok":
+			// Print who's already here — join events only fire for later arrivals.
+			for _, p := range m.Peers {
+				name := m.PeerNames[p]
+				if name == "" {
+					name = p
+				}
+				fmt.Printf("%s [room] · %s already in room\n", ts, name)
 			}
 		case "peer_joined":
 			fmt.Printf("%s [room] + %s joined\n", ts, display(m))
