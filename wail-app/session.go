@@ -52,7 +52,7 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetMetronome", "SetMetronomeBroadcast", "SetCushionMs", "SetInterval", "SetGridAlign", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetMetronome", "SetMetronomeBroadcast", "SetCushionMs", "SetIntervalOffset", "SetInterval", "SetGridAlign", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
@@ -62,7 +62,7 @@ type SessionCommand struct {
 	Enabled     bool    // SetCaptureEnabled, SetCaptureDump, SetLoopback, SetMetronome, SetMetronomeBroadcast
 	Bars        uint32  // SetInterval
 	Quantum     float64 // SetInterval
-	Value       int     // SetCushionMs
+	Value       int     // SetCushionMs, SetIntervalOffset
 }
 
 // SessionHandle represents a running session.
@@ -552,6 +552,9 @@ func sessionLoop(
 			case "SetCushionMs":
 				eff := audioEngine.SetCushionMs(cmd.Value)
 				logInfo("[audio] emit cushion set to %dms", eff)
+			case "SetIntervalOffset":
+				eff := audioEngine.SetIntervalOffset(cmd.Value)
+				logInfo("[audio] interval offset D set to %d", eff)
 			case "SetGridAlign":
 				// ADR-0006 toggle: the steerer owns disable-restore (committed
 				// tempo if mid-slew) and enable re-arms entry conformance.

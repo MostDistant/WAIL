@@ -54,6 +54,9 @@ type AudioEngine interface {
 	// Link Audio channel — a click on every beat (accented on bar downbeats) on
 	// the local Link grid, for aligning against the DAW's own metronome.
 	SetMetronome(enabled bool)
+	// SetIntervalOffset live-adjusts the receive playout offset D for all
+	// streams (the NINJAM latency/reliability knob); returns the effective D.
+	SetIntervalOffset(d int) int
 	// SetCushionMs live-adjusts the emit feed-ahead depth (ms) for all streams
 	// and the metronome; returns the effective clamped value.
 	SetCushionMs(ms int) int

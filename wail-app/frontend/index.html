@@ -251,6 +251,10 @@
           <label for="cushion-slider">Emit cushion <span id="cushion-value">100 ms</span></label>
           <input type="range" id="cushion-slider" min="100" max="500" step="5" value="100">
         </div>
+        <div class="cushion-control" title="The NINJAM delay: how many intervals remote audio is held before it plays. Default 1 — each peer hears what you played one interval ago. Raise it on lossy WAN paths (more slack for late frames), lower it for tighter turn-taking. Applies to intervals released after the change.">
+          <label for="offset-slider">Interval offset D <span id="offset-value">1</span></label>
+          <input type="range" id="offset-slider" min="0" max="4" step="1" value="1">
+        </div>
       </section>
 
       <!-- Local audio-path health counters (each increment ≈ one audible-risk event) -->

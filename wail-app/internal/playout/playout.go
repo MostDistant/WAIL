@@ -60,6 +60,15 @@ func New(offsetD int) *Scheduler {
 // Offset returns the configured interval offset D.
 func (s *Scheduler) Offset() int64 { return s.offsetD }
 
+// SetOffset live-adjusts D (clamped ≥ 0); future releases use the new value
+// (the interval in flight keeps playing — D is a release-time decision).
+func (s *Scheduler) SetOffset(d int64) {
+	if d < 0 {
+		d = 0
+	}
+	s.offsetD = d
+}
+
 // Playing returns the index currently being played and whether playout has begun.
 func (s *Scheduler) Playing() (int64, bool) { return s.playing, s.hasPlaying }
 
