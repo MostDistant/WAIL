@@ -21,7 +21,6 @@ const settingsForm = document.getElementById('settings-form');
 const settingsDisplayNameInput = document.getElementById('settings-display-name');
 const settingsLinkAudioNameInput = document.getElementById('settings-link-audio-name');
 const settingsTelemetryCheckbox = document.getElementById('settings-telemetry');
-const settingsLogSharingCheckbox = document.getElementById('settings-log-sharing');
 const settingsRememberCheckbox = document.getElementById('settings-remember');
 const chatInput = document.getElementById('chat-input');
 const chatSendBtn = document.getElementById('chat-send-btn');
@@ -287,7 +286,6 @@ const DISPLAY_NAME_KEY = 'wail-display-name';
 const LINK_AUDIO_NAME_KEY = 'wail-link-audio-name';
 const DEFAULT_LINK_AUDIO_NAME = 'WAIL';
 const TELEMETRY_KEY = 'wail-telemetry';
-const LOG_SHARING_KEY = 'wail-log-sharing';
 const REMEMBER_KEY = 'wail-remember';
 
 function getDisplayName() {
@@ -313,18 +311,6 @@ function getTelemetryEnabled() {
 
 function saveTelemetryEnabled(enabled) {
   localStorage.setItem(TELEMETRY_KEY, enabled ? 'true' : 'false');
-}
-
-function getLogSharingEnabled() {
-  // Default ON (unset key): a room that can see each other's logs debugs
-  // itself — one client (or the wail-logtail CLI) collates the whole room.
-  // An explicit opt-out persists.
-  const val = localStorage.getItem(LOG_SHARING_KEY);
-  return val !== 'false';
-}
-
-function saveLogSharingEnabled(enabled) {
-  localStorage.setItem(LOG_SHARING_KEY, enabled ? 'true' : 'false');
 }
 
 function getRememberEnabled() {
@@ -564,7 +550,6 @@ document.getElementById('browse-recording-dir').addEventListener('click', async 
 
 // Sync telemetry, log sharing, and remember-settings state on load
 invoke('set_telemetry', { enabled: getTelemetryEnabled() }).catch(() => {});
-invoke('set_log_sharing', { enabled: getLogSharingEnabled() }).catch(() => {});
 invoke('set_remember_enabled', { enabled: getRememberEnabled() }).catch(() => {});
 
 // Populate default recording dir on load
@@ -578,7 +563,6 @@ function openSettings() {
   settingsDisplayNameInput.value = getDisplayName();
   settingsLinkAudioNameInput.value = getLinkAudioName();
   settingsTelemetryCheckbox.checked = getTelemetryEnabled();
-  settingsLogSharingCheckbox.checked = getLogSharingEnabled();
   settingsRememberCheckbox.checked = getRememberEnabled();
   settingsPanel.style.display = 'flex';
 }
@@ -615,10 +599,6 @@ settingsForm.addEventListener('submit', (e) => {
   const telemetryEnabled = settingsTelemetryCheckbox.checked;
   saveTelemetryEnabled(telemetryEnabled);
   invoke('set_telemetry', { enabled: telemetryEnabled }).catch(() => {});
-  // Save log sharing setting
-  const logSharingEnabled = settingsLogSharingCheckbox.checked;
-  saveLogSharingEnabled(logSharingEnabled);
-  invoke('set_log_sharing', { enabled: logSharingEnabled }).catch(() => {});
   // Save remember setting
   const rememberEnabled = settingsRememberCheckbox.checked;
   saveRememberEnabled(rememberEnabled);
