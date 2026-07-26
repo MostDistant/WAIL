@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.17.0 (2026-07-26)
+
+### Features
+
+- make peer log sharing unconditional (#471)
+
 ## 3.16.0 (2026-07-26)
 
 ### Features
