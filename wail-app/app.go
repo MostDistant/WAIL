@@ -206,6 +206,7 @@ func (a *App) JoinRoom(
 		Recording:      recording,
 		StreamCount:    actualStreamCount,
 		IPCPort:        uint16(9191 + a.instance),
+		LogSource:      a.logSource(),
 		CaptureRestore: a.captureEnabled,
 		OnCaptureEnabledChanged: func(keys []CaptureChannelKey) {
 			a.mu.Lock()
@@ -390,6 +391,15 @@ func (a *App) DebugRoom(displayName string, linkAudioName *string) (*JoinResult,
 	}
 	log.Printf("[app] debug room joined: metronome broadcast + loopback + log sharing armed")
 	return res, nil
+}
+
+// logSource returns the session's log entry source when the writer exists
+// (nil otherwise) — the session pumps it to the room as LogBroadcast.
+func (a *App) logSource() <-chan WsLogEntry {
+	if a.wsLog == nil {
+		return nil
+	}
+	return a.wsLog.Subscribe()
 }
 
 // SetLogSharing toggles WebSocket log broadcasting to peers.
