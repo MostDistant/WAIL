@@ -28,6 +28,10 @@ type AudioEngine interface {
 	// regardless of when in the interval it runs, unlike SetRoomAnchor's
 	// sample align; overrides it whenever grid alignment is active.
 	AlignRoomLabel(roomIndex, localIndex int64)
+	// OnGridSnap re-anchors emit feeders after an entry-conformance grid
+	// snap: the snap moved the playhead, not the audio — the jumped frames
+	// skip silently, never counting as underruns.
+	OnGridSnap(deltaUs int64)
 	// RoomIndex maps a local interval index to the shared room index via the
 	// labeler aligned by SetRoomAnchor; ok is false until an anchor has arrived.
 	// The session uses it for boundary logging and to tag in-app-sender frames,

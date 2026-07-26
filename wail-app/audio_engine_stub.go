@@ -16,6 +16,7 @@ func (s *stubAudioEngine) Stop()                                                
 func (s *stubAudioEngine) HandleRemoteAudio(_, _, _ string, _ []byte)            {}
 func (s *stubAudioEngine) SetRoomAnchor(_ int64, _ float64, _ uint32, _ float64) {}
 func (s *stubAudioEngine) AlignRoomLabel(_, _ int64)                             {}
+func (s *stubAudioEngine) OnGridSnap(_ int64)                                    {}
 func (s *stubAudioEngine) RoomIndex(_ int64) (int64, bool)                       { return 0, false }
 func (s *stubAudioEngine) CaptureChannels() []CaptureChannelInfo                 { return nil }
 func (s *stubAudioEngine) SetCaptureEnabled(_ string, _ bool)                    {}
