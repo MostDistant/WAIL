@@ -316,8 +316,11 @@ function saveTelemetryEnabled(enabled) {
 }
 
 function getLogSharingEnabled() {
+  // Default ON (unset key): a room that can see each other's logs debugs
+  // itself — one client (or the wail-logtail CLI) collates the whole room.
+  // An explicit opt-out persists.
   const val = localStorage.getItem(LOG_SHARING_KEY);
-  return val === 'true';
+  return val !== 'false';
 }
 
 function saveLogSharingEnabled(enabled) {
