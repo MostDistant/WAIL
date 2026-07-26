@@ -32,6 +32,7 @@ func main() {
 	testTone := flag.Bool("test-tone", false, "Send a synthetic test tone on stream 0 (headless mode; no DAW/WAV needed)")
 	loopback := flag.Bool("loopback", false, "Ask the relay to echo our own audio back; republished as a \"(loopback)\" Link Audio channel (headless mode)")
 	metronomeBroadcast := flag.Bool("metronome-broadcast", false, "Broadcast the WAIL Metronome click to the room as an audio stream (headless mode; debug reference)")
+	logSharing := flag.Bool("log-sharing", false, "Share this instance's logs with room peers (headless mode; debug room arm)")
 	instance := flag.Int("instance", 0, "Instance number (separate data dir / identity)")
 	flag.Parse()
 
@@ -54,6 +55,10 @@ func main() {
 		log.SetOutput(combined)
 		appBackend.fileLog = fileWriter
 		appBackend.wsLog = wsLogWriter
+	}
+
+	if *logSharing && appBackend.wsLog != nil {
+		appBackend.wsLog.SetEnabled(true)
 	}
 
 	// After log setup so the status line reaches wail.log, not just stdout.

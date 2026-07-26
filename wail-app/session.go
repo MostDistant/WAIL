@@ -44,6 +44,10 @@ type SessionConfig struct {
 	// IPCPort is the loopback-TCP port the CLAP plugin bridge listens on
 	// (ADR-0005); 9191 + app instance. 0 means the default instance's 9191.
 	IPCPort uint16
+	// LogSource, when set, is pumped to the room as LogBroadcast messages
+	// (peer log sharing, #440). Entries flow only when the writer is armed
+	// (debug room / -log-sharing / GUI toggle).
+	LogSource <-chan WsLogEntry
 }
 
 // SessionCommand represents commands from the UI to the session.
@@ -144,6 +148,21 @@ func sessionLoop(
 
 	// Connect to signaling server
 	mesh, syncRx, audioRx, err := connectMesh(ctx, config, peerID)
+	if err == nil && config.LogSource != nil {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case entry, ok := <-config.LogSource:
+					if !ok {
+						return
+					}
+					mesh.SendLog(entry.Level, entry.Target, entry.Message, entry.TimestampUs)
+				}
+			}
+		}()
+	}
 	if err != nil {
 		return fmt.Errorf("signaling connect: %w", err)
 	}
