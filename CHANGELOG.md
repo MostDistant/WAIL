@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.18.0 (2026-07-26)
+
+### Features
+
+- interval offset D slider, slew settle hysteresis, tradeoffs close-outs (#475)
+
 ## 3.17.1 (2026-07-26)
 
 ### Fixes
