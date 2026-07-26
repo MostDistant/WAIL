@@ -148,7 +148,7 @@ func TestSlewTempo(t *testing.T) {
 	if !active || target <= 120 {
 		t.Fatalf("late: = (%.3f, %v), want >120, true", target, active)
 	}
-	// 1s late on an 8s period = 12.5% > cap → clamped to 0.3%.
+	// 1s late on an 8s period = 12.5% > cap → clamped to 0.05%.
 	if !approxEq(target, 120*(1+SlewMaxFraction)) {
 		t.Fatalf("clamp: = %.6f, want %.6f", target, 120*(1+SlewMaxFraction))
 	}
@@ -157,11 +157,19 @@ func TestSlewTempo(t *testing.T) {
 	if !active || !approxEq(target, 120*(1-SlewMaxFraction)) {
 		t.Fatalf("early: = (%.6f, %v), want %.6f, true", target, active, 120*(1-SlewMaxFraction))
 	}
-	// Just past the deadband the nudge is proportional, not clamped:
-	// 16ms on an 8s period = 0.2% < 0.3% cap.
-	target, _ = SlewTempo(120, 16_000, period)
-	if !approxEq(target, 120*1.002) {
-		t.Fatalf("proportional: = %.6f, want %.6f", target, 120*1.002)
+	// The field case (2026-07-25): a recurring 12ms skew δ on an 8s period
+	// nudged at 0.15% (2.6 cents — audible on sustained material). At the
+	// cruise clamp it must come out at 0.05% (0.86 cents — below JND).
+	target, active = SlewTempo(120, 12_000, period)
+	if !active || !approxEq(target, 120*(1+SlewMaxFraction)) {
+		t.Fatalf("skew δ: = (%.6f, %v), want %.6f, true", target, active, 120*(1+SlewMaxFraction))
+	}
+	// The proportional (unclamped) window only exists on very long periods
+	// (δ/period < 0.05% with |δ| > 10ms deadband → period > 20s): 12ms on a
+	// 32s period (8 bars at 60 BPM) = 0.0375% < cap.
+	target, _ = SlewTempo(120, 12_000, 32_000_000)
+	if !approxEq(target, 120*1.000375) {
+		t.Fatalf("proportional: = %.6f, want %.6f", target, 120*1.000375)
 	}
 	// Defensive: bad inputs never slew.
 	if _, active := SlewTempo(0, 100_000, period); active {
