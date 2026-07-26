@@ -146,7 +146,8 @@ func TestSlewGatedAfterTempoCommit(t *testing.T) {
 	if len(f.tempos) != 0 {
 		t.Fatalf("slew fired inside the 3s tempo gate: %v", f.tempos)
 	}
-	s.Tick(16, now.Add(4*time.Second))
+	s.Tick(16, now.Add(4*time.Second)) // first sighting past the gate
+	s.Tick(16, now.Add(5*time.Second)) // persists → act
 	if len(f.tempos) != 1 || !approxEq(f.tempos[0], 120*(1+interval.SlewMaxFraction)) {
 		t.Fatalf("tempos = %v, want [120.06] (clamped slew)", f.tempos)
 	}
@@ -163,7 +164,8 @@ func TestSlewGatedAfterSnap(t *testing.T) {
 	if len(f.tempos) != 0 {
 		t.Fatalf("slew fired inside the 5s post-snap settle: %v", f.tempos)
 	}
-	s.Tick(16, now.Add(6*time.Second))
+	s.Tick(16, now.Add(6*time.Second)) // first sighting after settle
+	s.Tick(16, now.Add(7*time.Second)) // persists → act
 	if len(f.tempos) != 1 || !approxEq(f.tempos[0], 120*(1+interval.SlewMaxFraction)) {
 		t.Fatalf("tempos = %v, want [120.06] after settle", f.tempos)
 	}
@@ -173,7 +175,8 @@ func TestSlewSettleRestoresRoomTempo(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_100_000)
 	observe(s, now)
-	s.Tick(16, now.Add(6*time.Second)) // slew active
+	s.Tick(16, now.Add(6*time.Second)) // sighting
+	s.Tick(16, now.Add(7*time.Second)) // slew active
 	if len(f.tempos) != 1 {
 		t.Fatalf("tempos = %v, want slew active", f.tempos)
 	}
@@ -182,7 +185,7 @@ func TestSlewSettleRestoresRoomTempo(t *testing.T) {
 		t.Fatalf("CurrentBPM = %v after slew nudge, want 120 (committed tempo untouched)", got)
 	}
 	f.timeAtBeat = 14_000_000 // drift closed
-	s.Tick(16, now.Add(7*time.Second))
+	s.Tick(16, now.Add(8*time.Second))
 	if got := lastTempo(f); got != 120 {
 		t.Fatalf("settled tempo = %v, want 120 (exact room tempo restored)", got)
 	}
@@ -192,16 +195,19 @@ func TestSlewNudgeDoesNotArmTempoGate(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_100_000)
 	observe(s, now)
-	s.Tick(16, now.Add(6*time.Second)) // slew → 120.06 (clamped)
+	s.Tick(16, now.Add(6*time.Second)) // sighting
+	s.Tick(16, now.Add(7*time.Second)) // slew → 120.06 (clamped)
 	if len(f.tempos) != 1 {
 		t.Fatalf("tempos = %v, want slew active", f.tempos)
 	}
 	// The slew's own SetTempo must not arm the 3s gate against itself:
-	// a changed δ one second later still steers. (Opposite-sign δ: post
-	// cruise-clamp every active same-sign δ maps to the same target, which
-	// can't prove a second nudge fired.)
+	// a changed δ still steers. (Opposite-sign δ: post cruise-clamp every
+	// active same-sign δ maps to the same target, which can't prove a second
+	// nudge fired. The flip restarts persistence — the nudge lands on the
+	// second confirming tick.)
 	f.timeAtBeat = 13_985_000 // δ=−15ms → target 119.94 ≠ current slew target
-	s.Tick(16, now.Add(7*time.Second))
+	s.Tick(16, now.Add(8*time.Second)) // flip sighting
+	s.Tick(16, now.Add(9*time.Second)) // confirmed → retarget
 	if len(f.tempos) != 2 || !approxEq(f.tempos[1], 120*(1-interval.SlewMaxFraction)) {
 		t.Fatalf("tempos = %v, want a second nudge — the slew gated itself", f.tempos)
 	}
@@ -233,7 +239,8 @@ func TestSlewHoldsOffWhenSessionTempoDiverges(t *testing.T) {
 	}
 	// Session returns to the anchor tempo: the slew may run.
 	f.state.BPM = 120
-	s.Tick(16, now.Add(11*time.Second))
+	s.Tick(16, now.Add(11*time.Second)) // sighting
+	s.Tick(16, now.Add(12*time.Second)) // persists → act
 	if len(f.tempos) != 1 {
 		t.Fatalf("slew did not resume after tempo agreement: %v", f.tempos)
 	}
@@ -243,14 +250,16 @@ func TestSlewHoldsOffWhenDraggedFromOwnTarget(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_100_000)
 	observe(s, now)
-	s.Tick(16, now.Add(6*time.Second)) // slew active: target 120.06 (clamped)
+	s.Tick(16, now.Add(6*time.Second)) // sighting
+	s.Tick(16, now.Add(7*time.Second)) // slew active: target 120.06 (clamped)
 	if len(f.tempos) != 1 {
 		t.Fatalf("tempos = %v, want slew active", f.tempos)
 	}
 	// The session sits at the slew's own target: keep steering (no gate).
 	f.state.BPM = lastTempo(f)
 	f.timeAtBeat = 13_985_000 // δ=−15ms → different nudge (opposite sign)
-	s.Tick(16, now.Add(7*time.Second))
+	s.Tick(16, now.Add(8*time.Second)) // flip sighting
+	s.Tick(16, now.Add(9*time.Second))  // confirmed → retarget
 	if len(f.tempos) != 2 {
 		t.Fatalf("slew gated itself at its own target: %v", f.tempos)
 	}
@@ -291,8 +300,9 @@ func TestDisableMidSlewRestores(t *testing.T) {
 	now := time.Now()
 	s, f, emits := newSteerer(14_100_000)
 	observe(s, now)
-	s.Tick(16, now.Add(6*time.Second)) // slew active at 120.36
-	s.SetEnabled(false, 16, now.Add(7*time.Second))
+	s.Tick(16, now.Add(6*time.Second)) // sighting
+	s.Tick(16, now.Add(7*time.Second)) // slew active at 120.06 (clamped)
+	s.SetEnabled(false, 16, now.Add(8*time.Second))
 	if got := lastTempo(f); got != 120 {
 		t.Fatalf("disable restore tempo = %v, want 120 (committed tempo)", got)
 	}
@@ -314,7 +324,8 @@ func TestTempoCommitMidSlewClearsSlewTarget(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_100_000)
 	observe(s, now)
-	s.Tick(16, now.Add(6*time.Second)) // slew active
+	s.Tick(16, now.Add(6*time.Second)) // sighting
+	s.Tick(16, now.Add(7*time.Second)) // slew active
 	if s.slewTarget == 0 {
 		t.Fatal("precondition: slew should be active")
 	}
@@ -324,7 +335,7 @@ func TestTempoCommitMidSlewClearsSlewTarget(t *testing.T) {
 	// same-rate gate then blocked the slew FOREVER — the session at the new
 	// room tempo never matched the stale target, so drift correction
 	// silently died for the rest of the session.
-	s.NoteTempoCommitted(121, now.Add(6*time.Second))
+	s.NoteTempoCommitted(121, now.Add(8*time.Second))
 	if s.slewTarget != 0 {
 		t.Fatalf("slewTarget = %v after tempo commit, want 0 — a commit cancels the in-flight slew", s.slewTarget)
 	}
@@ -336,8 +347,9 @@ func TestTempoCommitMidSlewClearsSlewTarget(t *testing.T) {
 	// Anchor boundary chosen so the same local boundary (14.1s, offset 2s)
 	// wraps to δ=+100ms at the new period.
 	anchor := int64(math.Round((16.1 - 2*period - 0.1) * 1e6))
-	s.OnAnchor(anchor, 1, 121, 16, now.Add(6*time.Second))
-	s.Tick(16, now.Add(10*time.Second)) // past the 3s tempo gate
+	s.OnAnchor(anchor, 1, 121, 16, now.Add(8*time.Second))
+	s.Tick(16, now.Add(11*time.Second)) // past the 3s tempo gate: sighting
+	s.Tick(16, now.Add(12*time.Second)) // persists → act
 	if len(f.tempos) != 2 {
 		t.Fatalf("slew did not steer against the new room grid after a mid-slew commit (wedged): tempos=%v", f.tempos)
 	}
@@ -347,7 +359,8 @@ func TestRejoinMidSlewClearsSlewTarget(t *testing.T) {
 	now := time.Now()
 	s, _, _ := newSteerer(14_100_000)
 	observe(s, now)
-	s.Tick(16, now.Add(6*time.Second)) // slew active
+	s.Tick(16, now.Add(6*time.Second)) // sighting
+	s.Tick(16, now.Add(7*time.Second)) // slew active
 	if s.slewTarget == 0 {
 		t.Fatal("precondition: slew should be active")
 	}
@@ -394,6 +407,139 @@ func TestCruiseAbsorbsClockSkew(t *testing.T) {
 	}
 	if delta, _ := s.measureDelta(16); delta > 11_000 {
 		t.Fatalf("final δ=%dµs, want bounded near the 10ms deadband", delta)
+	}
+}
+
+// TestSlewRequiresPersistence: δ must hold outside the deadband in the same
+// direction for two consecutive ticks before the slew acts (field finding,
+// 2026-07-26 Australia VPN: teleporting offset estimates produced one-tick
+// δ spikes in alternating directions; chasing each one flapped the tempo
+// 89.955↔90.045 every two seconds).
+func TestSlewRequiresPersistence(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_100_000)
+	observe(s, now)
+	s.Tick(16, now.Add(6*time.Second)) // δ=+100ms, first sighting
+	if len(f.tempos) != 0 {
+		t.Fatalf("slew acted on a single-tick δ: %v", f.tempos)
+	}
+	s.Tick(16, now.Add(7*time.Second)) // persists → act
+	if len(f.tempos) != 1 {
+		t.Fatalf("slew did not act on persistent δ: %v", f.tempos)
+	}
+}
+
+func TestSlewIgnoresSingleTickSpike(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_000_000) // aligned
+	observe(s, now)
+	f.timeAtBeat = 14_100_000 // one-tick spike
+	s.Tick(16, now.Add(6*time.Second))
+	f.timeAtBeat = 14_000_000 // gone next tick
+	s.Tick(16, now.Add(7*time.Second))
+	s.Tick(16, now.Add(8*time.Second))
+	if len(f.tempos) != 0 {
+		t.Fatalf("slew chased a one-tick spike: %v", f.tempos)
+	}
+}
+
+func TestSlewNoFlapOnSignFlip(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_100_000)
+	observe(s, now)
+	s.Tick(16, now.Add(6*time.Second))
+	s.Tick(16, now.Add(7*time.Second)) // active at 120.06
+	if len(f.tempos) != 1 {
+		t.Fatalf("precondition: slew active, tempos=%v", f.tempos)
+	}
+	f.state.BPM = lastTempo(f)
+	// A single opposite-sign tick must NOT retarget (no tempo flap).
+	f.timeAtBeat = 13_900_000 // δ=−100ms for one tick
+	s.Tick(16, now.Add(8*time.Second))
+	if len(f.tempos) != 1 {
+		t.Fatalf("tempo flapped on a one-tick sign flip: %v", f.tempos)
+	}
+	// If the flip persists, the slew retargets on the second tick.
+	s.Tick(16, now.Add(9*time.Second))
+	if len(f.tempos) != 2 || !approxEq(f.tempos[1], 120*(1-interval.SlewMaxFraction)) {
+		t.Fatalf("slew did not retarget on a persistent flip: %v", f.tempos)
+	}
+}
+
+func TestSlewSettleStaysImmediate(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_100_000)
+	observe(s, now)
+	s.Tick(16, now.Add(6*time.Second))
+	s.Tick(16, now.Add(7*time.Second)) // active
+	f.state.BPM = lastTempo(f)
+	f.timeAtBeat = 14_000_000 // δ closed
+	s.Tick(16, now.Add(8*time.Second)) // restore must not wait for persistence
+	if got := lastTempo(f); got != 120 {
+		t.Fatalf("settled tempo = %v, want 120 (immediate restore)", got)
+	}
+}
+
+// TestVPNTeleportReplay is the 2026-07-26 ss3 field replay, end to end
+// through OnServerPong + Tick: over a jittery high-RTT path (Australia VPN),
+// new min-RTT pongs teleported the offset candidate +70ms every ~8s while
+// clean samples pulled it back. Pre-fix the estimate jumped to each
+// teleport and the slew chased every jump — tempo flapped 89.955↔90.045
+// every two seconds and the grid random-walked ±70ms (audible ~100ms flam).
+// With the slew-capped estimate + persistence, teleports become ≤1.5ms
+// ripples: δ never leaves the deadband and the tempo never moves.
+func TestVPNTeleportReplay(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_000_000) // aligned at offset 2s
+	observe(s, now)                   // 3 bootstrap pongs
+	// Drive past the 8-sample bootstrap with clean pongs (offset 2s, RTT
+	// near the bootstrap's 100ms so the 1.5× gate accepts them).
+	for i := 0; i < 6; i++ {
+		f.state.TimestampUs += 2_000_000
+		s.OnServerPong(f.state.TimestampUs+2_000_000, 120_000, 16, now)
+	}
+	flaps := 0
+	lastSign := 0
+	tick := func(step int) {
+		s.Tick(16, now.Add(time.Duration(20+step)*time.Second))
+		if n := len(f.tempos); n > 0 {
+			sign := 1
+			if f.tempos[n-1] < 120 {
+				sign = -1
+			}
+			if lastSign != 0 && sign != lastSign {
+				flaps++
+			}
+			lastSign = sign
+		}
+	}
+	step := 0
+	for round := 0; round < 6; round++ {
+		// Teleport: a "new minimum" pong whose candidate jumps +70ms. Ticks
+		// run BETWEEN pongs in reality (1Hz vs 2s) — the spike must meet the
+		// tick before clean samples erase it.
+		f.state.TimestampUs += 2_000_000
+		s.OnServerPong(f.state.TimestampUs+2_070_000, 80_000, 16, now)
+		tick(step)
+		step++
+		tick(step)
+		step++
+		// Clean samples at the true offset walk the estimate back (accepted:
+		// 120ms ≤ 1.5× the 80ms best), interleaved with more ticks.
+		for i := 0; i < 3; i++ {
+			f.state.TimestampUs += 2_000_000
+			s.OnServerPong(f.state.TimestampUs+2_000_000, 120_000, 16, now)
+			tick(step)
+			step++
+			tick(step)
+			step++
+		}
+	}
+	if len(f.tempos) != 0 {
+		t.Fatalf("slew engaged under teleporting offset estimate: tempos=%v", f.tempos)
+	}
+	if flaps != 0 {
+		t.Fatalf("tempo flapped %d times", flaps)
 	}
 }
 

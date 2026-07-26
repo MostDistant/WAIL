@@ -129,6 +129,64 @@ func TestGridAlignerOffsetMinRTT(t *testing.T) {
 	}
 }
 
+// TestOffsetRateLimitedAfterBootstrap: real clock offsets DRIFT (≤ a few
+// hundred ppm); they never teleport. Field finding (2026-07-26, Australia
+// VPN, ~300ms jittery RTT): after bootstrap, every new min-RTT pong jumped
+// the estimate by tens of ms; the slew read each jump as grid drift and
+// physically chased it — the local grid random-walked ±70ms and remote
+// audio flammed by up to ~100ms. Post-bootstrap updates must be clamped to
+// a plausible clock-slew rate; teleports converge over ~a minute instead of
+// instantly. Same endpoint, gentle trajectory.
+func TestOffsetRateLimitedAfterBootstrap(t *testing.T) {
+	g := NewGridAligner()
+	// Bootstrap: 8 samples at offset 2.0s, pong cadence 2s, free movement.
+	local := int64(8_000_000)
+	for i := 0; i < 8; i++ {
+		g.ObserveServerTime(local+2_000_000, local, 100_000)
+		local += 2_000_000
+	}
+	if off, _ := g.OffsetUs(); off != 2_000_000 {
+		t.Fatalf("bootstrap offset = %d, want 2000000", off)
+	}
+	// Teleport: a new-min-RTT sample 70ms away must NOT jump the estimate —
+	// it moves by at most the slew cap (500ppm × 2s + 0.5ms margin = 1.5ms).
+	g.ObserveServerTime(local+2_070_000, local, 50_000)
+	local += 2_000_000
+	off, _ := g.OffsetUs()
+	if off != 2_001_500 {
+		t.Fatalf("offset after teleport = %d, want 2001500 (clamped to the slew cap, not jumped to 2070000)", off)
+	}
+	// Persistent samples at the new level converge the estimate fully
+	// (monotonic approach — the same endpoint as the old jump, ~a minute out).
+	for i := 0; i < 50; i++ {
+		g.ObserveServerTime(local+2_070_000, local, 50_000)
+		local += 2_000_000
+	}
+	if off, _ = g.OffsetUs(); off != 2_070_000 {
+		t.Fatalf("offset after convergence = %d, want 2070000 (the truth, arrived gently)", off)
+	}
+}
+
+// TestOffsetTracksGenuineDrift: the clamp must never bind on real clock
+// drift — 300ppm (0.6ms per 2s pong) tracks unclamped.
+func TestOffsetTracksGenuineDrift(t *testing.T) {
+	g := NewGridAligner()
+	local := int64(8_000_000)
+	for i := 0; i < 8; i++ {
+		g.ObserveServerTime(local+2_000_000, local, 100_000)
+		local += 2_000_000
+	}
+	drift := int64(0)
+	for i := 0; i < 20; i++ {
+		drift += 600 // 300ppm × 2s
+		g.ObserveServerTime(local+2_000_000+drift, local, 100_000)
+		local += 2_000_000
+	}
+	if off, _ := g.OffsetUs(); off != 2_000_000+drift {
+		t.Fatalf("offset = %d, want %d (genuine drift tracked unclamped)", off, 2_000_000+drift)
+	}
+}
+
 func approxEq(a, b float64) bool {
 	d := a - b
 	if d < 0 {

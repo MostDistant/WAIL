@@ -71,6 +71,7 @@ type GridAligner struct {
 	bestRttUs     int64
 	offsetSamples int
 	haveOffset    bool
+	lastLocalUs   int64 // local clock at the previous sample (dt for the slew cap)
 }
 
 // minOffsetSamples is how many server pongs must arrive before the aligner is
@@ -78,6 +79,22 @@ type GridAligner struct {
 // label derivation (field finding: a stalled first pong put a joiner's offset
 // out by seconds — intervals of label error, frozen for the session).
 const minOffsetSamples = 3
+
+const (
+	// offsetFreeSamples is the bootstrap window: the first N samples move the
+	// estimate freely (min-RTT selection), so entry conformance behaves as it
+	// always has. The slew cap engages afterwards.
+	offsetFreeSamples = 8
+	// maxOffsetSlewPpm caps the post-bootstrap offset tracking rate. Real
+	// clock offsets only DRIFT (crystal skew, ≤ ~100ppm in practice); they
+	// never teleport. A candidate further than this rate allows is converged
+	// toward, not jumped to (field finding, 2026-07-26 Australia VPN: jittery
+	// min-RTT re-selections jumped the estimate ±70ms and the grid slew
+	// chased every jump — remote audio flammed by up to ~100ms).
+	maxOffsetSlewPpm = 500
+	// offsetSlewMarginUs absorbs measurement quantization on top of the rate.
+	offsetSlewMarginUs = 500
+)
 
 // NewGridAligner creates an empty aligner (not Ready until both an anchor and
 // an offset sample arrive).
@@ -89,6 +106,9 @@ func NewGridAligner() *GridAligner { return &GridAligner{} }
 // sampled at the same instant; rttUs is the measured round trip. The offset
 // comes from the lowest-RTT sample (buffering only adds delay); samples
 // within 1.5× of the best RTT also update it, so slow clock drift tracks.
+// After the bootstrap window, updates are slew-capped: the estimate converges
+// toward faraway candidates at a plausible clock-skew rate instead of jumping
+// (offsets drift; they never teleport).
 func (g *GridAligner) ObserveServerTime(serverNowEstUs, localNowUs, rttUs int64) {
 	sample := serverNowEstUs - localNowUs
 	g.offsetSamples++
@@ -96,9 +116,22 @@ func (g *GridAligner) ObserveServerTime(serverNowEstUs, localNowUs, rttUs int64)
 		if !g.haveOffset || rttUs < g.bestRttUs {
 			g.bestRttUs = rttUs
 		}
+		if g.haveOffset && g.offsetSamples > offsetFreeSamples {
+			dt := localNowUs - g.lastLocalUs
+			if dt < 0 {
+				dt = 0
+			}
+			maxStep := dt*maxOffsetSlewPpm/1e6 + offsetSlewMarginUs
+			if d := sample - g.offsetUs; d > maxStep {
+				sample = g.offsetUs + maxStep
+			} else if d < -maxStep {
+				sample = g.offsetUs - maxStep
+			}
+		}
 		g.offsetUs = sample
 		g.haveOffset = true
 	}
+	g.lastLocalUs = localNowUs
 }
 
 // SetAnchor records the room grid from an interval_anchor: the server-clock
