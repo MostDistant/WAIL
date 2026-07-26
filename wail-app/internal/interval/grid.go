@@ -20,8 +20,16 @@ const (
 	// aligned and restores the exact room tempo (hysteresis: the loop settles
 	// instead of hunting around zero).
 	SlewDeadbandUs = 10_000
-	// SlewMaxFraction caps the steady-state tempo nudge (0.3% — inaudible).
-	SlewMaxFraction = 0.003
+	// SlewMaxFraction caps the steady-state tempo nudge: 0.05% = 0.86 cents,
+	// below the pitch JND even for trained ears on isolated sustained tones
+	// (~1–3 cents) — inaudible, full stop. The old 0.3% cap (5.2 cents) was
+	// NOT inaudible: the 2026-07-25 field session heard every slew episode,
+	// and a post-tempo-change aftershock slewed for 7s at the cap. Because
+	// the cap sits below the proportional rate for any |δ| past the 10ms
+	// deadband on periods under 20s, the slew is effectively a fixed
+	// micro-nudge in practice: on when |δ| > deadband, off inside — closing
+	// 4ms per second per active tick on an 8s period.
+	SlewMaxFraction = 0.0005
 )
 
 // WrapPhase wraps a phase difference to the range (-period/2, period/2], so a

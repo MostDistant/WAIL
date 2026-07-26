@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 )
 
 // fakeGrid is a scripted LinkGrid: the room is 120 BPM, 16 BPI (8s period),
@@ -145,8 +147,8 @@ func TestSlewGatedAfterTempoCommit(t *testing.T) {
 		t.Fatalf("slew fired inside the 3s tempo gate: %v", f.tempos)
 	}
 	s.Tick(16, now.Add(4*time.Second))
-	if len(f.tempos) != 1 || !approxEq(f.tempos[0], 120*1.003) {
-		t.Fatalf("tempos = %v, want [120.36] (clamped slew)", f.tempos)
+	if len(f.tempos) != 1 || !approxEq(f.tempos[0], 120*(1+interval.SlewMaxFraction)) {
+		t.Fatalf("tempos = %v, want [120.06] (clamped slew)", f.tempos)
 	}
 }
 
@@ -162,8 +164,8 @@ func TestSlewGatedAfterSnap(t *testing.T) {
 		t.Fatalf("slew fired inside the 5s post-snap settle: %v", f.tempos)
 	}
 	s.Tick(16, now.Add(6*time.Second))
-	if len(f.tempos) != 1 || !approxEq(f.tempos[0], 120*1.003) {
-		t.Fatalf("tempos = %v, want [120.36] after settle", f.tempos)
+	if len(f.tempos) != 1 || !approxEq(f.tempos[0], 120*(1+interval.SlewMaxFraction)) {
+		t.Fatalf("tempos = %v, want [120.06] after settle", f.tempos)
 	}
 }
 
@@ -190,15 +192,17 @@ func TestSlewNudgeDoesNotArmTempoGate(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_100_000)
 	observe(s, now)
-	s.Tick(16, now.Add(6*time.Second)) // slew → 120.36
+	s.Tick(16, now.Add(6*time.Second)) // slew → 120.06 (clamped)
 	if len(f.tempos) != 1 {
 		t.Fatalf("tempos = %v, want slew active", f.tempos)
 	}
 	// The slew's own SetTempo must not arm the 3s gate against itself:
-	// a changed δ one second later still steers.
-	f.timeAtBeat = 14_015_000 // δ=15ms → target 120.225 ≠ current slew target
+	// a changed δ one second later still steers. (Opposite-sign δ: post
+	// cruise-clamp every active same-sign δ maps to the same target, which
+	// can't prove a second nudge fired.)
+	f.timeAtBeat = 13_985_000 // δ=−15ms → target 119.94 ≠ current slew target
 	s.Tick(16, now.Add(7*time.Second))
-	if len(f.tempos) != 2 || !approxEq(f.tempos[1], 120*1.001875) {
+	if len(f.tempos) != 2 || !approxEq(f.tempos[1], 120*(1-interval.SlewMaxFraction)) {
 		t.Fatalf("tempos = %v, want a second nudge — the slew gated itself", f.tempos)
 	}
 }
@@ -239,13 +243,13 @@ func TestSlewHoldsOffWhenDraggedFromOwnTarget(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_100_000)
 	observe(s, now)
-	s.Tick(16, now.Add(6*time.Second)) // slew active: target 120.36
+	s.Tick(16, now.Add(6*time.Second)) // slew active: target 120.06 (clamped)
 	if len(f.tempos) != 1 {
 		t.Fatalf("tempos = %v, want slew active", f.tempos)
 	}
 	// The session sits at the slew's own target: keep steering (no gate).
-	f.state.BPM = 120 * 1.003
-	f.timeAtBeat = 14_015_000 // δ=15ms → different nudge
+	f.state.BPM = lastTempo(f)
+	f.timeAtBeat = 13_985_000 // δ=−15ms → different nudge (opposite sign)
 	s.Tick(16, now.Add(7*time.Second))
 	if len(f.tempos) != 2 {
 		t.Fatalf("slew gated itself at its own target: %v", f.tempos)
@@ -303,6 +307,93 @@ func TestDisableMidSlewRestores(t *testing.T) {
 	s.SetEnabled(true, 16, now.Add(13*time.Second))
 	if len(f.snaps) != 2 {
 		t.Fatalf("re-enable did not re-run entry: snaps = %v", f.snaps)
+	}
+}
+
+func TestTempoCommitMidSlewClearsSlewTarget(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_100_000)
+	observe(s, now)
+	s.Tick(16, now.Add(6*time.Second)) // slew active
+	if s.slewTarget == 0 {
+		t.Fatal("precondition: slew should be active")
+	}
+	// A tempo commit lands mid-slew (user knob, or a remote TempoChange —
+	// the room moved to 121). Ownership cancels steering: the in-flight
+	// slew target must be dropped. Pre-fix it stayed stuck, and the
+	// same-rate gate then blocked the slew FOREVER — the session at the new
+	// room tempo never matched the stale target, so drift correction
+	// silently died for the rest of the session.
+	s.NoteTempoCommitted(121, now.Add(6*time.Second))
+	if s.slewTarget != 0 {
+		t.Fatalf("slewTarget = %v after tempo commit, want 0 — a commit cancels the in-flight slew", s.slewTarget)
+	}
+	// The room re-anchors at 121 and the session follows. Past the tempo
+	// gate the slew must steer against the new room grid (not stay wedged
+	// behind the stale target).
+	f.state.BPM = 121
+	period := 16 * 60.0 / 121
+	// Anchor boundary chosen so the same local boundary (14.1s, offset 2s)
+	// wraps to δ=+100ms at the new period.
+	anchor := int64(math.Round((16.1 - 2*period - 0.1) * 1e6))
+	s.OnAnchor(anchor, 1, 121, 16, now.Add(6*time.Second))
+	s.Tick(16, now.Add(10*time.Second)) // past the 3s tempo gate
+	if len(f.tempos) != 2 {
+		t.Fatalf("slew did not steer against the new room grid after a mid-slew commit (wedged): tempos=%v", f.tempos)
+	}
+}
+
+func TestRejoinMidSlewClearsSlewTarget(t *testing.T) {
+	now := time.Now()
+	s, _, _ := newSteerer(14_100_000)
+	observe(s, now)
+	s.Tick(16, now.Add(6*time.Second)) // slew active
+	if s.slewTarget == 0 {
+		t.Fatal("precondition: slew should be active")
+	}
+	// A reconnect lands mid-slew: the in-flight target must be dropped, or
+	// it wedges the same-rate gate if the room moved during the blip.
+	s.OnRejoin()
+	if s.slewTarget != 0 {
+		t.Fatalf("slewTarget = %v after rejoin, want 0", s.slewTarget)
+	}
+}
+
+// TestCruiseAbsorbsClockSkew is the 2026-07-25 field scenario in a closed
+// loop: 67ppm relay↔local clock skew regenerates δ ≈ 12ms every ~3 min,
+// and the old 0.3%-clamped slew ate each regrowth with an audible 0.15%
+// tempo wobble. The cruise clamp must keep δ bounded near the deadband for
+// 10 minutes of ticks while EVERY committed tempo stays within ±0.05%
+// (0.86 cents — inaudible) of the room tempo.
+func TestCruiseAbsorbsClockSkew(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_000_000) // aligned at entry
+	observe(s, now)
+	const skewUsPerSec = 67.0 // field-measured relay↔local clock skew
+	maxFrac := 0.0
+	for i := 1; i <= 600; i++ {
+		// Close the loop: the grid responds to the committed tempo — net
+		// drift = skew − (committed/120 − 1) × period, per second.
+		committed := 120.0
+		if s.slewTarget != 0 {
+			committed = s.slewTarget
+		}
+		f.timeAtBeat += int64(skewUsPerSec - (committed/120.0-1)*8_000_000)
+		s.Tick(16, now.Add(time.Duration(i+10)*time.Second))
+		if n := len(f.tempos); n > 0 {
+			if frac := math.Abs(f.tempos[n-1]/120.0 - 1); frac > maxFrac {
+				maxFrac = frac
+			}
+		}
+		if delta, ok := s.measureDelta(16); ok && delta > int64(interval.AlignThresholdUs) {
+			t.Fatalf("tick %d: δ=%dµs exceeded the snap threshold under cruise", i, delta)
+		}
+	}
+	if maxFrac > interval.SlewMaxFraction+1e-9 {
+		t.Fatalf("tempo offset %.5f%% exceeded the %.3f%% cruise clamp", maxFrac*100, interval.SlewMaxFraction*100)
+	}
+	if delta, _ := s.measureDelta(16); delta > 11_000 {
+		t.Fatalf("final δ=%dµs, want bounded near the 10ms deadband", delta)
 	}
 }
 

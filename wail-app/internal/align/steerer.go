@@ -136,9 +136,15 @@ func (s *Steerer) OnServerPong(serverNowEstUs, rttUs int64, bpi float64, now tim
 // user's change, a remote TempoChange, an adopted snapshot, or a UI command.
 // This is the fused write that used to be two variables at five call sites:
 // it updates the committed-tempo record AND arms the slew's tempo gate.
+// A commit is an ownership move, so it also cancels any in-flight slew:
+// pre-fix the stale slew target survived, and the same-rate gate then
+// blocked the slew forever (the session at the new room tempo never matched
+// the old target) — drift correction silently died for the rest of the
+// session on every mid-slew tempo change.
 func (s *Steerer) NoteTempoCommitted(bpm float64, now time.Time) {
 	s.currentBPM = bpm
 	s.lastTempoAt = now
+	s.slewTarget = 0
 }
 
 // CurrentBPM returns the tempo the session last committed to. The session
@@ -237,8 +243,13 @@ func (s *Steerer) SetEnabled(on bool, bpi float64, now time.Time) {
 // OnRejoin re-arms entry conformance after a signaling reconnect (ADR-0006:
 // rejoin is an entry). The fresh anchor + relay pongs re-measure δ; a
 // mid-blip rejoin finds δ ≈ 0 and no-ops, a genuinely diverged grid snaps
-// back onto the room.
-func (s *Steerer) OnRejoin() { s.entryPending = true }
+// back onto the room. A rejoin also cancels any in-flight slew target — the
+// room may have moved while we were gone, and a stale target would wedge
+// the same-rate gate exactly as a mid-slew tempo commit does.
+func (s *Steerer) OnRejoin() {
+	s.entryPending = true
+	s.slewTarget = 0
+}
 
 // Status returns the debug-panel readout: ("off", 0, true) when disabled,
 // ok=false until a δ can be measured (no anchor/offset yet, or Link state

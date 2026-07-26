@@ -122,7 +122,7 @@ The rule every peer runs on join or rejoin: adopt the room tempo, measure δ, an
 The one-time re-mapping of the local Link session onto the room grid during entry conformance. Confined to transition moments: never fires mid-session, never when already aligned.
 
 **Grid slew**:
-A small bounded tempo nudge that closes steady-state alignment error; gated so it never acts near user tempo changes or just after entry. The only steady-state steering WAIL ever applies.
+A small bounded tempo nudge (≤0.05%, below the pitch JND) that closes steady-state alignment error; gated so it never acts near user tempo changes or just after entry, and cancelled by any mid-slew tempo commit or rejoin. The only steady-state steering WAIL ever applies.
 _Avoid_: phase lock (WAIL deliberately does not phase-lock across the WAN), micro-slew (the capture path's per-buffer sample-domain drift correction — a different mechanism)
 
 **Grid steer**:
