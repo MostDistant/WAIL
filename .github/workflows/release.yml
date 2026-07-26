@@ -226,7 +226,7 @@ jobs:
           # Fail loudly: a failed platform doesn't block the release by design,
           # so silent plugin-less installers ship unless staging itself errors.
           for b in wail-send wail-recv linkbridge-send linkbridge-recv; do
-            test -d "dist/lib/${b}.clap" || { echo "::error::missing staged bundle ${b}.clap"; exit 1; }
+            test -e "dist/lib/${b}.clap" || { echo "::error::missing staged bundle ${b}.clap"; exit 1; }
           done
 
       - uses: actions/upload-artifact@v7
