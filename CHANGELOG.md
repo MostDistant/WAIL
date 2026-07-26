@@ -1,5 +1,12 @@
 # Changelog
 
+## 3.15.3 (2026-07-26)
+
+### Fixes
+
+- accept files in the Windows plugin staging guard (#466)
+- slew-cap the offset estimate; make the grid slew spike-proof (#468)
+
 ## 3.15.2 (2026-07-26)
 
 ### Fixes
