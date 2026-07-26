@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.16.0 (2026-07-26)
+
+### Features
+
+- share logs with the room by default (#469)
+
 ## 3.15.3 (2026-07-26)
 
 ### Fixes
