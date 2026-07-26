@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.15.2 (2026-07-26)
+
+### Fixes
+
+- select the Windows plugin staging dir explicitly (#464)
+
 ## 3.15.1 (2026-07-26)
 
 ### Fixes
