@@ -211,6 +211,27 @@ func engineCushionFrames() int {
 	return cushionFramesFor(ms)
 }
 
+// SetIntervalOffset live-adjusts the receive playout offset D for every
+// current and future stream (clamped 0..4; returns the effective D). D is
+// the NINJAM latency/reliability knob each receiver sets for itself — how
+// many intervals remote audio is held before playout.
+func (e *linkAudioEngine) SetIntervalOffset(d int) int {
+	if d < 0 {
+		d = 0
+	}
+	if d > 4 {
+		d = 4
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.offsetD = d
+	for _, st := range e.emit {
+		st.sched.SetOffset(int64(d))
+	}
+	log.Printf("[audio] interval offset D set to %d (live)", d)
+	return d
+}
+
 // SetCushionMs live-adjusts the emit feed-ahead depth for every current and
 // future stream (and the metronome). Clamped; returns the effective ms.
 func (e *linkAudioEngine) SetCushionMs(ms int) int {

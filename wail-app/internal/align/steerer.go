@@ -86,6 +86,7 @@ type Steerer struct {
 	lastSnapAt       time.Time
 	lastTempoAt      time.Time
 	slewTarget       float64 // 0 = sitting at exact room tempo
+	slewDir          int     // sign of the active episode's δ (0 = not slewing)
 	slewPendingDir   int     // sign of the δ being confirmed (0 = none)
 	slewPendingCount int     // consecutive same-direction ticks past the deadband
 	lastState        string
@@ -227,6 +228,21 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 	}
 	periodUs := int64(bpi * 60.0 / roomBPM * 1e6)
 	target, active := interval.SlewTempo(roomBPM, delta, periodUs)
+	if s.slewTarget != 0 && !active {
+		// Settle hysteresis: an active slew restores only when δ is truly
+		// closed (≤ SlewSettleUs) or has flipped sign — in between it holds
+		// the nudge so the episode settles deep instead of stopping at the
+		// deadband edge and re-firing when skew walks δ back out.
+		if abs64(delta) <= interval.SlewSettleUs || (delta > 0) != (s.slewDir > 0) {
+			s.link.SetTempo(roomBPM)
+			s.slewTarget = 0
+			s.slewDir = 0
+			s.slewPendingDir, s.slewPendingCount = 0, 0
+			s.logf("[align] slew settled (δ=%+.1f ms), restored %.1f BPM", float64(delta)/1000, roomBPM)
+		}
+		s.emitState(delta)
+		return
+	}
 	if active {
 		// Persistence: δ must hold the same direction past the deadband for
 		// slewPersistenceTicks ticks before acting (drift persists; spikes
@@ -247,15 +263,11 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 		if target != s.slewTarget {
 			s.link.SetTempo(target)
 			s.slewTarget = target
+			s.slewDir = dir
 			s.logf("[align] slew: δ=%+.1f ms → tempo %.4f BPM", float64(delta)/1000, target)
 		}
 	} else {
 		s.slewPendingDir, s.slewPendingCount = 0, 0
-		if s.slewTarget != 0 {
-			s.link.SetTempo(roomBPM)
-			s.slewTarget = 0
-			s.logf("[align] slew settled (δ=%+.1f ms), restored %.1f BPM", float64(delta)/1000, roomBPM)
-		}
 	}
 	s.emitState(delta)
 }

@@ -16,10 +16,15 @@ const (
 	// AlignThresholdUs is the |δ| above which alignment is acted on (~25 ms:
 	// below this, flamming on tight unison material is inaudible).
 	AlignThresholdUs = 25_000
-	// SlewDeadbandUs is the |δ| below which the slew considers the grid
-	// aligned and restores the exact room tempo (hysteresis: the loop settles
-	// instead of hunting around zero).
+	// SlewDeadbandUs is the |δ| above which the slew fires (below it the grid
+	// is aligned enough and the loop rests).
 	SlewDeadbandUs = 10_000
+	// SlewSettleUs is the |δ| below which an ACTIVE slew restores the room
+	// tempo — deliberately tighter than SlewDeadbandUs (hysteresis): episodes
+	// settle deep instead of stopping at the deadband edge and re-firing when
+	// skew walks δ back out (ss3 field pattern: settle at −9.1 ms re-fired
+	// every ~40 s).
+	SlewSettleUs = 5_000
 	// SlewMaxFraction caps the steady-state tempo nudge: 0.05% = 0.86 cents,
 	// below the pitch JND even for trained ears on isolated sustained tones
 	// (~1–3 cents) — inaudible, full stop. The old 0.3% cap (5.2 cents) was

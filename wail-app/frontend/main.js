@@ -107,6 +107,13 @@ if (metronomeBroadcastToggle) {
 // Emit-cushion slider (live). cushionUserSet gates the one-time initialisation
 // from engine health so we don't clobber the user's drag with a stale snapshot.
 const cushionSlider = document.getElementById('cushion-slider');
+const offsetSlider = document.getElementById('offset-slider');
+if (offsetSlider) {
+  offsetSlider.addEventListener('input', () => {
+    document.getElementById('offset-value').textContent = offsetSlider.value;
+    invoke('set_interval_offset', { d: parseInt(offsetSlider.value, 10) }).catch(() => {});
+  });
+}
 const cushionValue = document.getElementById('cushion-value');
 let cushionUserSet = false;
 if (cushionSlider) {
