@@ -29,6 +29,14 @@ const (
 	// tempoThreshold mirrors the Link poller's tempoChangeThreshold (0.01
 	// BPM): below it two tempos are "the same" for adoption decisions.
 	tempoThreshold = 0.01
+	// slewPersistenceTicks is how many consecutive ticks δ must hold outside
+	// the deadband in the same direction before the slew acts. Real grid
+	// drift persists for minutes; measurement spikes (a teleporting offset
+	// estimate over a jittery WAN path — 2026-07-26 Australia VPN) last a
+	// tick or two and often alternate sign. Chasing spikes flapped the tempo
+	// every two seconds in the field. Settling stays immediate — restoring
+	// the room tempo is always safe.
+	slewPersistenceTicks = 2
 )
 
 // State is the slice of Link session state the steerer samples. Beat is
@@ -68,16 +76,18 @@ type Steerer struct {
 	// boundary corresponds to the anchor's index, exact on an aligned grid.
 	alignRoomLabel func(roomIndex, localIndex int64)
 
-	aligner        *interval.GridAligner
-	enabled        bool
-	entryPending   bool
-	lastSnapAt     time.Time
-	lastTempoAt    time.Time
-	slewTarget     float64 // 0 = sitting at exact room tempo
-	lastState      string
-	currentBPM     float64
-	anchorIndex    int64
-	haveRoomAnchor bool
+	aligner          *interval.GridAligner
+	enabled          bool
+	entryPending     bool
+	lastSnapAt       time.Time
+	lastTempoAt      time.Time
+	slewTarget       float64 // 0 = sitting at exact room tempo
+	slewPendingDir   int     // sign of the δ being confirmed (0 = none)
+	slewPendingCount int     // consecutive same-direction ticks past the deadband
+	lastState        string
+	currentBPM       float64
+	anchorIndex      int64
+	haveRoomAnchor   bool
 }
 
 // NewSteerer creates a steerer with entry conformance armed (every session
@@ -145,6 +155,7 @@ func (s *Steerer) NoteTempoCommitted(bpm float64, now time.Time) {
 	s.currentBPM = bpm
 	s.lastTempoAt = now
 	s.slewTarget = 0
+	s.slewPendingDir, s.slewPendingCount = 0, 0
 }
 
 // CurrentBPM returns the tempo the session last committed to. The session
@@ -207,14 +218,35 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 	}
 	periodUs := int64(bpi * 60.0 / roomBPM * 1e6)
 	target, active := interval.SlewTempo(roomBPM, delta, periodUs)
-	if active && target != s.slewTarget {
-		s.link.SetTempo(target)
-		s.slewTarget = target
-		s.logf("[align] slew: δ=%+.1f ms → tempo %.4f BPM", float64(delta)/1000, target)
-	} else if !active && s.slewTarget != 0 {
-		s.link.SetTempo(roomBPM)
-		s.slewTarget = 0
-		s.logf("[align] slew settled (δ=%+.1f ms), restored %.1f BPM", float64(delta)/1000, roomBPM)
+	if active {
+		// Persistence: δ must hold the same direction past the deadband for
+		// slewPersistenceTicks ticks before acting (drift persists; spikes
+		// don't). A sign flip restarts the confirmation without retargeting.
+		dir := 1
+		if delta < 0 {
+			dir = -1
+		}
+		if dir == s.slewPendingDir {
+			s.slewPendingCount++
+		} else {
+			s.slewPendingDir, s.slewPendingCount = dir, 1
+		}
+		if s.slewPendingCount < slewPersistenceTicks {
+			s.emitState(delta)
+			return
+		}
+		if target != s.slewTarget {
+			s.link.SetTempo(target)
+			s.slewTarget = target
+			s.logf("[align] slew: δ=%+.1f ms → tempo %.4f BPM", float64(delta)/1000, target)
+		}
+	} else {
+		s.slewPendingDir, s.slewPendingCount = 0, 0
+		if s.slewTarget != 0 {
+			s.link.SetTempo(roomBPM)
+			s.slewTarget = 0
+			s.logf("[align] slew settled (δ=%+.1f ms), restored %.1f BPM", float64(delta)/1000, roomBPM)
+		}
 	}
 	s.emitState(delta)
 }
@@ -249,6 +281,7 @@ func (s *Steerer) SetEnabled(on bool, bpi float64, now time.Time) {
 func (s *Steerer) OnRejoin() {
 	s.entryPending = true
 	s.slewTarget = 0
+	s.slewPendingDir, s.slewPendingCount = 0, 0
 }
 
 // Status returns the debug-panel readout: ("off", 0, true) when disabled,
