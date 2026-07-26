@@ -166,6 +166,30 @@ func TestFeederStallPastCushionCountsUnderrunAndSkips(t *testing.T) {
 	}
 }
 
+// TestFeederSkipFramesReanchorsSilently: a grid snap moves the PLAYHEAD, not
+// the audio — SkipFrames re-anchors the readers without counting, and the
+// next Advance emits from the re-anchored position.
+func TestFeederSkipFramesReanchorsSilently(t *testing.T) {
+	var out []emitted
+	f, r := newTestFeeder(0, stampedSource(fTotal, 0))
+	f.Advance(0, collector(&out)) // cursor 50
+	f.SkipFrames(100)             // the entry snap jumped the grid 100 frames
+	if ev, fr := f.Underruns(); ev != 0 || fr != 0 {
+		t.Fatalf("SkipFrames counted: %d events/%d frames, want 0/0", ev, fr)
+	}
+	if r.Cursor() != 150 {
+		t.Fatalf("cursor = %d, want 150 (re-anchored)", r.Cursor())
+	}
+	out = nil
+	f.Advance(0.15, collector(&out)) // playhead 150 == cursor → no underrun
+	if ev, _ := f.Underruns(); ev != 0 {
+		t.Fatalf("underrun after re-anchor: %d events", ev)
+	}
+	if out[0].first != 150 {
+		t.Fatalf("post-re-anchor chunk starts at frame %d, want 150", out[0].first)
+	}
+}
+
 func TestFeederPlayheadExactlyAtCursorNoUnderrun(t *testing.T) {
 	var out []emitted
 	f, _ := newTestFeeder(0, stampedSource(fTotal, 0))
@@ -287,12 +311,20 @@ func TestFeederFreshReaderFirstTickLagIsNotAnUnderrun(t *testing.T) {
 	if ev, _ := f.Underruns(); ev != 0 {
 		t.Fatalf("first-tick lag counted as underrun (%d events)", ev)
 	}
-	// A genuinely late start (beyond 2 chunks) still counts.
+	// A big fresh-reader catch-up is setup, not loss — join warmup (the
+	// first interval can't play before N+D) or the entry snap's grid jump.
+	// In steady state SetCurrent only runs for a stream's first interval
+	// (promote covers the rest), so big cursor-0 skips are setup by
+	// construction (the ~500k join-time "underruns" field report). The skip
+	// still happens; it just never counts.
 	var out2 []emitted
 	f2, _ := newTestFeeder(0, stampedSource(fTotal, 0))
-	f2.Advance(0.05, collector(&out2)) // 50 frames in at cursor 0
-	if ev, _ := f2.Underruns(); ev != 1 {
-		t.Fatalf("late start past tolerance should count, got %d events", ev)
+	f2.Advance(0.5, collector(&out2)) // playhead 500 frames in, cursor 0
+	if ev, _ := f2.Underruns(); ev != 0 {
+		t.Fatalf("fresh-reader catch-up counted as underrun (%d events)", ev)
+	}
+	if out2[0].first != 500 {
+		t.Fatalf("first chunk starts at frame %d, want 500 (skip still happens)", out2[0].first)
 	}
 }
 

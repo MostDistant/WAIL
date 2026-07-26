@@ -223,7 +223,7 @@ func sessionLoop(
 	// all alignment state lives in internal/align.
 	steer := align.NewSteerer(alignBridge{link}, bpm, func(state string, errMs float64) {
 		emitter.Emit("align:state", AlignStateEvent{State: state, ErrorMs: errMs})
-	}, logInfo, audioEngine.AlignRoomLabel)
+	}, logInfo, audioEngine.AlignRoomLabel, audioEngine.OnGridSnap)
 
 	// Receivers label our republished channels with these names (StreamNames
 	// sync): enabled capture channels default to their discovered channel name,

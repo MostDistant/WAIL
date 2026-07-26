@@ -83,6 +83,22 @@ func (f *Feeder) Promote(idx int64, makeNext func() (*PacedReader, int64, int)) 
 // Current returns the playing interval's reader (nil before SetCurrent).
 func (f *Feeder) Current() *PacedReader { return f.cur }
 
+// SkipFrames re-anchors the readers after an entry-conformance grid snap
+// (ADR-0006): the snap moved the playhead, not the audio — the jumped frames
+// are dead work (stale stamps), so skip them WITHOUT counting underruns. The
+// engine calls it via OnGridSnap with the snap's delta in frames.
+func (f *Feeder) SkipFrames(frames int) {
+	if frames <= 0 {
+		return
+	}
+	if f.cur != nil {
+		f.cur.Skip(f.cur.Cursor() + frames)
+	}
+	if f.next != nil {
+		f.next.Skip(f.next.Cursor() + frames)
+	}
+}
+
 // Underruns returns cumulative underrun events and skipped frames — the feed
 // fell behind the playhead past the cushion: audio was late to the sink and
 // the shortfall played as silence (the honest audible-dropout metric).
@@ -133,19 +149,20 @@ func (f *Feeder) Advance(nowBeat float64, emit func(samples []int16, beatAtBegin
 	f.fill(f.next, f.nextStart+overPlay, f.nextStart+over, emit)
 }
 
-// fill brings one reader's cursor up to targetFrame, first skipping (and
-// counting) any shortfall behind playFrame — stale-stamped chunks would be
-// dropped by receivers, so emitting them is dead work. A fresh reader's first
-// tick is inherently ~one tick behind its start beat (boundaries are detected
-// on the tick after the beat), so a small shortfall at cursor 0 skips silently
-// instead of tainting the underrun counter.
+// fill brings one reader's cursor up to targetFrame, first skipping any
+// shortfall behind playFrame — stale-stamped chunks would be dropped by
+// receivers, so emitting them is dead work. Only MID-STREAM shortfall counts
+// as an underrun: a fresh reader's catch-up (cursor 0) is always setup —
+// join warmup (the first interval can't play before N+D) or the entry snap's
+// grid jump — and the skipped frames were never playable audio (the ~500k
+// join-time "underruns" field report). The skip itself always happens.
 func (f *Feeder) fill(r *PacedReader, playFrame, targetFrame int, emit func([]int16, float64)) {
 	if playFrame > r.Cursor() && r.Cursor() < r.TotalFrames() {
 		skipTo := playFrame
 		if skipTo > r.TotalFrames() {
 			skipTo = r.TotalFrames()
 		}
-		if r.Cursor() > 0 || skipTo > 2*f.chunkFrames {
+		if r.Cursor() > 0 {
 			f.underrunEvents++
 			f.underrunFrames += uint64(skipTo - r.Cursor())
 		}

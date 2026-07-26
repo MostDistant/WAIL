@@ -457,6 +457,22 @@ func (e *linkAudioEngine) RoomIndex(localIndex int64) (int64, bool) {
 // computed localIndex from the anchor's boundary time on an aligned grid, so
 // this never suffers the sample-align/snap off-by-one). Logs only on change —
 // re-running entry conformance is idempotent.
+// OnGridSnap re-anchors every emit feeder after an entry-conformance grid
+// snap (ADR-0006): the snap moved the playhead, not the audio — the jumped
+// frames skip silently, never counting as underruns (the join-time ~500k
+// "underrun frames" were exactly this setup event misattributed as loss).
+func (e *linkAudioEngine) OnGridSnap(deltaUs int64) {
+	if deltaUs <= 0 {
+		return // backward jump: the playhead pauses; nothing to skip
+	}
+	frames := int(deltaUs) * engineInternalRate / 1e6
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, st := range e.emit {
+		st.feeder.SkipFrames(frames)
+	}
+}
+
 func (e *linkAudioEngine) AlignRoomLabel(roomIndex, localIndex int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

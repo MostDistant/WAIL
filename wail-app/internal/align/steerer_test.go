@@ -94,6 +94,23 @@ func TestEntrySnapFiresWhenLate(t *testing.T) {
 	}
 }
 
+// TestEntrySnapNotifiesEngine: the entry snap must notify the audio engine
+// (the onSnapGrid hook) so emit feeders re-anchor silently — the snap moves
+// the playhead, not the audio.
+func TestEntrySnapNotifiesEngine(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_100_000) // 100ms late → snap
+	var snaps []int64
+	s.onSnapGrid = func(deltaUs int64) { snaps = append(snaps, deltaUs) }
+	observe(s, now)
+	if len(f.snaps) != 1 {
+		t.Fatalf("precondition: snaps = %v, want 1", f.snaps)
+	}
+	if len(snaps) != 1 || snaps[0] != 100_000 {
+		t.Fatalf("onSnapGrid calls = %v, want [100000]", snaps)
+	}
+}
+
 func TestEntryNoopWhenAligned(t *testing.T) {
 	now := time.Now()
 	s, f, emits := newSteerer(14_000_000) // exactly on the room grid

@@ -75,6 +75,10 @@ type Steerer struct {
 	// engine's AlignRoomLabel): the local interval ending at the anchor's
 	// boundary corresponds to the anchor's index, exact on an aligned grid.
 	alignRoomLabel func(roomIndex, localIndex int64)
+	// onSnapGrid fires after an entry-conformance snap so the audio engine
+	// can re-anchor its emit feeders: the snap moved the playhead, not the
+	// audio — the jumped frames must skip silently, never count as underruns.
+	onSnapGrid func(deltaUs int64)
 
 	aligner          *interval.GridAligner
 	enabled          bool
@@ -95,7 +99,7 @@ type Steerer struct {
 // reports alignment state changes ("aligned"/"aligning"/"drifted"/"off");
 // logf narrates steering decisions; alignRoomLabel applies the by-construction
 // labeler alignment to the audio engine. All three funcs may be nil.
-func NewSteerer(link LinkGrid, initialBPM float64, emit func(state string, errMs float64), logf func(format string, args ...any), alignRoomLabel func(roomIndex, localIndex int64)) *Steerer {
+func NewSteerer(link LinkGrid, initialBPM float64, emit func(state string, errMs float64), logf func(format string, args ...any), alignRoomLabel func(roomIndex, localIndex int64), onSnapGrid ...func(deltaUs int64)) *Steerer {
 	if emit == nil {
 		emit = func(string, float64) {}
 	}
@@ -105,11 +109,16 @@ func NewSteerer(link LinkGrid, initialBPM float64, emit func(state string, errMs
 	if alignRoomLabel == nil {
 		alignRoomLabel = func(int64, int64) {}
 	}
+	snap := func(int64) {}
+	if len(onSnapGrid) > 0 && onSnapGrid[0] != nil {
+		snap = onSnapGrid[0]
+	}
 	return &Steerer{
 		link:           link,
 		emit:           emit,
 		logf:           logf,
 		alignRoomLabel: alignRoomLabel,
+		onSnapGrid:     snap,
 		aligner:        interval.NewGridAligner(),
 		enabled:        true,
 		entryPending:   true,
@@ -328,6 +337,7 @@ func (s *Steerer) tryEntry(bpi float64, now time.Time) {
 	s.entryPending = false
 	if snapNeeded(delta) {
 		s.link.SnapGrid(delta)
+		s.onSnapGrid(delta)
 		s.lastSnapAt = now
 		s.logf("[align] entry: snapped grid %+.1f ms onto the room grid", float64(delta)/1000)
 	} else {
