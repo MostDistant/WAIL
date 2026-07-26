@@ -306,6 +306,55 @@ func TestDisableMidSlewRestores(t *testing.T) {
 	}
 }
 
+func TestTempoCommitMidSlewClearsSlewTarget(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_100_000)
+	observe(s, now)
+	s.Tick(16, now.Add(6*time.Second)) // slew active
+	if s.slewTarget == 0 {
+		t.Fatal("precondition: slew should be active")
+	}
+	// A tempo commit lands mid-slew (user knob, or a remote TempoChange —
+	// the room moved to 121). Ownership cancels steering: the in-flight
+	// slew target must be dropped. Pre-fix it stayed stuck, and the
+	// same-rate gate then blocked the slew FOREVER — the session at the new
+	// room tempo never matched the stale target, so drift correction
+	// silently died for the rest of the session.
+	s.NoteTempoCommitted(121, now.Add(6*time.Second))
+	if s.slewTarget != 0 {
+		t.Fatalf("slewTarget = %v after tempo commit, want 0 — a commit cancels the in-flight slew", s.slewTarget)
+	}
+	// The room re-anchors at 121 and the session follows. Past the tempo
+	// gate the slew must steer against the new room grid (not stay wedged
+	// behind the stale target).
+	f.state.BPM = 121
+	period := 16 * 60.0 / 121
+	// Anchor boundary chosen so the same local boundary (14.1s, offset 2s)
+	// wraps to δ=+100ms at the new period.
+	anchor := int64(math.Round((16.1 - 2*period - 0.1) * 1e6))
+	s.OnAnchor(anchor, 1, 121, 16, now.Add(6*time.Second))
+	s.Tick(16, now.Add(10*time.Second)) // past the 3s tempo gate
+	if len(f.tempos) != 2 {
+		t.Fatalf("slew did not steer against the new room grid after a mid-slew commit (wedged): tempos=%v", f.tempos)
+	}
+}
+
+func TestRejoinMidSlewClearsSlewTarget(t *testing.T) {
+	now := time.Now()
+	s, _, _ := newSteerer(14_100_000)
+	observe(s, now)
+	s.Tick(16, now.Add(6*time.Second)) // slew active
+	if s.slewTarget == 0 {
+		t.Fatal("precondition: slew should be active")
+	}
+	// A reconnect lands mid-slew: the in-flight target must be dropped, or
+	// it wedges the same-rate gate if the room moved during the blip.
+	s.OnRejoin()
+	if s.slewTarget != 0 {
+		t.Fatalf("slewTarget = %v after rejoin, want 0", s.slewTarget)
+	}
+}
+
 func TestRejoinRearmsEntry(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_000_000)

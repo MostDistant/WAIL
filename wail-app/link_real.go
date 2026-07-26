@@ -62,7 +62,13 @@ func (lb *LinkBridge) SetTempo(bpm float64) {
 	lb.mu.Unlock()
 	lb.detector.SetLastTempo(bpm)
 	lb.detector.ArmEchoGuard(time.Now().Add(echoGuardDuration))
-	log.Printf("[link] Applied remote tempo %.1f BPM", bpm)
+	// Neutral wording: EVERY SetTempo logs here — remote applies, slew
+	// nudges/restores, and entry adoptions alike. Remote applies are already
+	// attributed at session level ("Tempo change from <peer>"); claiming
+	// "remote" here misattributes self-steering and has already caused one
+	// wrong root-cause in the field (the 2026-07-25 "slew ping-pong"
+	// misdiagnosis — the slew was exonerated by the logs).
+	log.Printf("[link] Set tempo %.1f BPM", bpm)
 }
 
 // ForceBeat snaps the local beat clock to the given position.
