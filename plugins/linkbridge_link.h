@@ -53,6 +53,14 @@ double lb_beat_at_time(lb_state *s, int64_t micros, double quantum);
 int64_t lb_time_at_beat(lb_state *s, double beat, double quantum);
 int64_t lb_clock_micros(lb_link *l);
 
+// Start/stop transport sync. Enable so play/stop follows the session's peers;
+// query it realtime-safe from an already-captured state (lb_state_is_playing),
+// or via the convenience lb_is_playing (captures app state itself — main
+// thread / non-realtime).
+void lb_enable_start_stop_sync(lb_link *l, bool on);
+bool lb_state_is_playing(lb_state *s);
+bool lb_is_playing(lb_link *l);
+
 // --- Link Audio sink (publishing; Send plugin) ---
 // Commit is realtime-safe (the SDK's retain/commit is designed for the audio
 // thread). Create/destroy/set_name are main-thread calls.

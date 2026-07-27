@@ -76,6 +76,20 @@ int64_t lb_time_at_beat(lb_state *s, double beat, double quantum) {
 
 int64_t lb_clock_micros(lb_link *l) { return abl_link_clock_micros(l->h); }
 
+void lb_enable_start_stop_sync(lb_link *l, bool on) {
+  abl_link_enable_start_stop_sync(l->h, on);
+}
+
+bool lb_state_is_playing(lb_state *s) { return abl_link_is_playing(s->s); }
+
+bool lb_is_playing(lb_link *l) {
+  abl_link_session_state ss = abl_link_create_session_state();
+  abl_link_capture_app_session_state(l->h, ss);
+  bool p = abl_link_is_playing(ss);
+  abl_link_destroy_session_state(ss);
+  return p;
+}
+
 // --- sink ---
 
 struct lb_sink {

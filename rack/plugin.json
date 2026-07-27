@@ -1,0 +1,44 @@
+{
+  "slug": "MostDistant",
+  "name": "Most Distant",
+  "version": "2.6.0",
+  "license": "MIT",
+  "brand": "Most Distant",
+  "author": "Most Distant",
+  "authorEmail": "",
+  "authorUrl": "",
+  "pluginUrl": "",
+  "manualUrl": "",
+  "sourceUrl": "",
+  "donateUrl": "",
+  "changelogUrl": "",
+  "modules": [
+    {
+      "slug": "LinkClock",
+      "name": "Link Clock",
+      "description": "Ableton Link tempo/beat/start-stop transport as a clock, bar reset, and run gate.",
+      "tags": [
+        "Clock generator",
+        "Clock modulator",
+        "External"
+      ]
+    },
+    {
+      "slug": "LinkAudioReceive",
+      "name": "Link Audio Receive",
+      "description": "Play a remote Ableton Link Audio channel into Rack (M2: PCM path).",
+      "tags": [
+        "External",
+        "Polyphonic"
+      ]
+    },
+    {
+      "slug": "LinkAudioSend",
+      "name": "Link Audio Send",
+      "description": "Publish a Rack stereo input as an Ableton Link Audio channel (M2: PCM path).",
+      "tags": [
+        "External"
+      ]
+    }
+  ]
+}
