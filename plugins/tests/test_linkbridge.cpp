@@ -87,7 +87,7 @@ TEST(linkbridge_spike_hosts_and_logs) {
 TEST(linkbridge_send_pubsub_roundtrip) {
    wailtest::ClapInstance inst;
    std::string err;
-   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SEND_PATH, "software.linkbridge.send", 0, 48000.0, 256, 256, &err),
+   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SEND_PATH, "software.wail.linkbridge.send", 0, 48000.0, 256, 256, &err),
              err.c_str());
    if (!inst.plugin) return;
 
@@ -193,7 +193,7 @@ TEST(linkbridge_send_pubsub_roundtrip) {
 TEST(linkbridge_recv_hears_only_room_published) {
    wailtest::ClapInstance inst;
    std::string err;
-   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_RECV_PATH, "software.linkbridge.recv", 0, 48000.0, 256, 256, &err),
+   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_RECV_PATH, "software.wail.linkbridge.recv", 0, 48000.0, 256, 256, &err),
              err.c_str());
    if (!inst.plugin) return;
 

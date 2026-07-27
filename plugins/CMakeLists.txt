@@ -102,7 +102,7 @@ function(add_linkbridge_plugin name)
       OUTPUT_NAME "${name}"
       MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
       MACOSX_BUNDLE_BUNDLE_NAME "${name}"
-      MACOSX_BUNDLE_GUI_IDENTIFIER "software.linkbridge.${name}"
+      MACOSX_BUNDLE_GUI_IDENTIFIER "software.wail.${name}"
       MACOSX_BUNDLE_BUNDLE_VERSION "0.1.0"
       MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0")
   else()
@@ -111,8 +111,8 @@ function(add_linkbridge_plugin name)
 endfunction()
 
 add_linkbridge_plugin(linkbridge-spike linkbridge_spike.c) # dev spike (gate 1), not shipped
-add_linkbridge_plugin(linkbridge-send linkbridge_send.c)
-add_linkbridge_plugin(linkbridge-recv linkbridge_recv.c)
+add_linkbridge_plugin(wail-linkbridge-send linkbridge_send.c)
+add_linkbridge_plugin(wail-linkbridge-recv linkbridge_recv.c)
 
 # DAW-less integration tests (clap-trap host + IPC test double). Off by default:
 # enabling fetches clap-trap over the network at configure time.

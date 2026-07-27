@@ -223,12 +223,12 @@ jobs:
           # Bash runner; the missing-bundle guard below caught it loudly).
           src="build/plugins"
           if [ -d "build/plugins/Release" ]; then src="build/plugins/Release"; fi
-          for b in wail-send wail-recv linkbridge-send linkbridge-recv; do
+          for b in wail-send wail-recv wail-linkbridge-send wail-linkbridge-recv; do
             cp -R "${src}/${b}.clap" dist/lib/
           done
           # Fail loudly: a failed platform doesn't block the release by design,
           # so silent plugin-less installers ship unless staging itself errors.
-          for b in wail-send wail-recv linkbridge-send linkbridge-recv; do
+          for b in wail-send wail-recv wail-linkbridge-send wail-linkbridge-recv; do
             test -e "dist/lib/${b}.clap" || { echo "::error::missing staged bundle ${b}.clap"; exit 1; }
           done
 
@@ -336,7 +336,7 @@ jobs:
           mkdir -p dist/lib
           # Product bundles only — dev tools (transport-probe, linkbridge-spike) are
           # built but never shipped.
-          for b in wail-send wail-recv linkbridge-send linkbridge-recv; do
+          for b in wail-send wail-recv wail-linkbridge-send wail-linkbridge-recv; do
             cp -R "build/plugins/${b}.clap" dist/lib/
           done
 

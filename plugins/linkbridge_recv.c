@@ -461,9 +461,9 @@ static const void *CLAP_ABI lbr_get_extension(const clap_plugin_t *p, const char
 static const char *lbr_features[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY, NULL};
 static const clap_plugin_descriptor_t lbr_desc = {
     .clap_version = CLAP_VERSION_INIT,
-    .id = "software.linkbridge.recv",
-    .name = "Link Bridge Recv",
-    .vendor = "Link Bridge",
+    .id = "software.wail.linkbridge.recv",
+    .name = "WAIL Link Bridge Recv",
+    .vendor = "WAIL",
     .url = "https://github.com/nicholasgasior/wail",
     .version = "0.1.0",
     .description = "Hear WAIL room streams as named Link Audio sub-chains (ADR-0007).",

@@ -34,10 +34,10 @@ function(add_wail_harness name)
     WAIL_SEND_CLAP_PATH="$<TARGET_FILE:wail-send>"
     WAIL_RECV_CLAP_PATH="$<TARGET_FILE:wail-recv>"
     WAIL_LINKBRIDGE_SPIKE_PATH="$<TARGET_FILE:linkbridge-spike>"
-    WAIL_LINKBRIDGE_SEND_PATH="$<TARGET_FILE:linkbridge-send>"
-    WAIL_LINKBRIDGE_RECV_PATH="$<TARGET_FILE:linkbridge-recv>"
+    WAIL_LINKBRIDGE_SEND_PATH="$<TARGET_FILE:wail-linkbridge-send>"
+    WAIL_LINKBRIDGE_RECV_PATH="$<TARGET_FILE:wail-linkbridge-recv>"
   )
-  add_dependencies(${name} wail-send wail-recv linkbridge-spike linkbridge-send linkbridge-recv)
+  add_dependencies(${name} wail-send wail-recv linkbridge-spike wail-linkbridge-send wail-linkbridge-recv)
 endfunction()
 
 add_wail_harness(wail-plugin-tests main.cpp test_send.cpp test_recv.cpp test_linkbridge.cpp)
