@@ -17,8 +17,8 @@ import (
 var pluginBundles = []string{
 	"wail-send.clap",
 	"wail-recv.clap",
-	"linkbridge-send.clap",
-	"linkbridge-recv.clap",
+	"wail-linkbridge-send.clap",
+	"wail-linkbridge-recv.clap",
 }
 
 // SystemPluginDir returns the per-user CLAP directory DAWs scan by default. The

@@ -218,9 +218,9 @@ static void CLAP_ABI lbs_main_thread(const clap_plugin_t *p) {
 static const char *lbs_features[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY, NULL};
 static const clap_plugin_descriptor_t lbs_desc = {
     .clap_version = CLAP_VERSION_INIT,
-    .id = "software.linkbridge.send",
-    .name = "Link Bridge Send",
-    .vendor = "Link Bridge",
+    .id = "software.wail.linkbridge.send",
+    .name = "WAIL Link Bridge Send",
+    .vendor = "WAIL",
     .url = "https://github.com/nicholasgasior/wail",
     .version = "0.1.0",
     .description = "Publish this track as a Link Audio channel (ADR-0007).",

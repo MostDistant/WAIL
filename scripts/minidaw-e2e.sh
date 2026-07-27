@@ -51,13 +51,13 @@ log "building relay + app + minidaw → $WORK"
 ( cd "$REPO_ROOT/signaling-server" && go build -o "$WORK/relay" . )
 ( cd "$REPO_ROOT/wail-app" && go build -o "$WORK/wail" . )
 cmake -S "$REPO_ROOT/plugins" -B "$REPO_ROOT/build/plugins" > /dev/null
-cmake --build "$REPO_ROOT/build/plugins" --target minidaw linkbridge-recv > /dev/null
+cmake --build "$REPO_ROOT/build/plugins" --target minidaw wail-linkbridge-recv > /dev/null
 
 MINIDAW="$REPO_ROOT/build/plugins/tests/minidaw"
-RECV_PLUGIN="$REPO_ROOT/build/plugins/linkbridge-recv.clap"
+RECV_PLUGIN="$REPO_ROOT/build/plugins/wail-linkbridge-recv.clap"
 # The CLAP bundle on macOS is a directory; the loader wants the binary inside.
 if [ -d "$RECV_PLUGIN" ]; then
-  RECV_PLUGIN="$RECV_PLUGIN/Contents/MacOS/linkbridge-recv"
+  RECV_PLUGIN="$RECV_PLUGIN/Contents/MacOS/wail-linkbridge-recv"
 fi
 
 log "starting local relay on :${PORT} (room $ROOM)"

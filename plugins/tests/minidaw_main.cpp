@@ -12,7 +12,7 @@
 // bridge filter, stamp alignment, output pipeline.
 //
 // Usage:
-//   minidaw recv --plugin <path-to-linkbridge-recv> [--seconds 20]
+//   minidaw recv --plugin <path-to-wail-linkbridge-recv> [--seconds 20]
 //            [--threshold-ms 5] [--name-contains Metronome] [--verbose]
 //
 // Exit 0 = PASS (|median onset offset| <= threshold), 1 = FAIL/timeout.
@@ -137,7 +137,7 @@ int main(int argc, char **argv) {
 
    wailtest::ClapInstance inst;
    std::string err;
-   if (!inst.load(args.plugin.c_str(), "software.linkbridge.recv", 0, kRate, kBlock, kBlock, &err)) {
+   if (!inst.load(args.plugin.c_str(), "software.wail.linkbridge.recv", 0, kRate, kBlock, kBlock, &err)) {
       fprintf(stderr, "load failed: %s\n", err.c_str());
       return 1;
    }
