@@ -245,6 +245,10 @@ func (r *PeerRegistry) FlushAudioRecvPrev() {
 // AdoptIdentity records the persistent identity a peer announced in its Hello
 // and migrates any slots still keyed by its transient peer ID over to it. One
 // lock for the pair: separately they raced a concurrent Remove.
+//
+// It deliberately assigns no slot. A slot means "this peer sent audio on this
+// stream" and the GUI renders one row per slot, so claiming stream 0 up front
+// invented an unnamed channel for every peer that never sends on it.
 func (r *PeerRegistry) AdoptIdentity(peerID, identity string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -252,7 +256,6 @@ func (r *PeerRegistry) AdoptIdentity(peerID, identity string) {
 		p.Identity = &identity
 	}
 	r.rekeyPeerSlotsLocked(peerID, identity)
-	r.assignSlotLocked(peerID, 0)
 }
 
 // RekeyPeerSlots migrates slots from peerID key to identity key.
