@@ -44,14 +44,18 @@ class Wail < Formula
     end
     bin.install "wail-app/wail"
 
-    # Build the CLAP plugins (thin PCM bridge for non-Link-Audio DAWs, ADR-0005) and
-    # stage them under lib/. Homebrew can't write into the user's plugin folder, so
-    # `wail-install-plugins` (below) copies them there on demand.
+    # Build the CLAP plugins (thin PCM bridge for non-Link-Audio DAWs, ADR-0005, plus
+    # the Link Bridge pair, ADR-0007) and stage them under lib/. Homebrew can't write
+    # into the user's plugin folder, so `wail-install-plugins` (below) copies them
+    # there on demand.
     system "cmake", "-S", "plugins", "-B", "build/plugins", "-DCMAKE_BUILD_TYPE=Release"
     system "cmake", "--build", "build/plugins"
     # Product bundles only: dev tools (transport-probe, linkbridge-spike) build
-    # alongside but must not be installed.
-    lib.install Dir["build/plugins/{wail-send,wail-recv,linkbridge-send,linkbridge-recv}.clap"]
+    # alongside but must not be installed. Named explicitly rather than brace-globbed
+    # — a glob silently drops renamed bundles instead of failing the build.
+    %w[wail-send wail-recv wail-linkbridge-send wail-linkbridge-recv].each do |bundle|
+      lib.install "build/plugins/#{bundle}.clap"
+    end
     bin.install "scripts/wail-install-plugins.sh" => "wail-install-plugins"
   end
 
