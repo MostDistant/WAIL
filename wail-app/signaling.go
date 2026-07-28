@@ -72,9 +72,9 @@ type outgoingSync struct {
 
 // SignalingChannels holds the incoming channels from the signaling connection.
 type SignalingChannels struct {
-	IncomingCh chan SignalMessage                // control plane (PeerJoined, PeerLeft, etc.)
-	SyncCh     chan FromPeerSync                // sync messages from peers
-	AudioCh    chan FromPeerAudio               // binary audio from peers
+	IncomingCh chan SignalMessage // control plane (PeerJoined, PeerLeft, etc.)
+	SyncCh     chan FromPeerSync  // sync messages from peers
+	AudioCh    chan FromPeerAudio // binary audio from peers
 }
 
 // FromPeerSync wraps a sync message with the sender's peer ID.

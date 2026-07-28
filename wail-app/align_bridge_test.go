@@ -14,14 +14,14 @@ type fakeLinkBridge struct {
 	det *TempoChangeDetector
 }
 
-func (f *fakeLinkBridge) Enable()                          {}
-func (f *fakeLinkBridge) Disable()                         {}
-func (f *fakeLinkBridge) SetTempo(bpm float64)             { f.bpm = bpm }
-func (f *fakeLinkBridge) ForceBeat(float64, *int64)        {}
-func (f *fakeLinkBridge) SnapGrid(int64)                   {}
-func (f *fakeLinkBridge) TimeAtBeat(float64) int64         { return 0 }
-func (f *fakeLinkBridge) State() LinkState                 { return LinkState{BPM: f.bpm} }
-func (f *fakeLinkBridge) Detector() *TempoChangeDetector   { return f.det }
+func (f *fakeLinkBridge) Enable()                        {}
+func (f *fakeLinkBridge) Disable()                       {}
+func (f *fakeLinkBridge) SetTempo(bpm float64)           { f.bpm = bpm }
+func (f *fakeLinkBridge) ForceBeat(float64, *int64)      {}
+func (f *fakeLinkBridge) SnapGrid(int64)                 {}
+func (f *fakeLinkBridge) TimeAtBeat(float64) int64       { return 0 }
+func (f *fakeLinkBridge) State() LinkState               { return LinkState{BPM: f.bpm} }
+func (f *fakeLinkBridge) Detector() *TempoChangeDetector { return f.det }
 func (f *fakeLinkBridge) SpawnPoller(context.Context) (chan<- LinkCommand, <-chan LinkEvent) {
 	return nil, nil
 }

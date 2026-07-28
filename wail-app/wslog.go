@@ -20,10 +20,10 @@ type WsLogEntry struct {
 // WsLogWriter captures log output and broadcasts to subscribers.
 // Implements io.Writer so it can be added to a MultiWriter chain.
 type WsLogWriter struct {
-	enabled    atomic.Bool
-	mu         sync.Mutex
+	enabled     atomic.Bool
+	mu          sync.Mutex
 	subscribers []chan WsLogEntry
-	epoch      time.Time
+	epoch       time.Time
 }
 
 // NewWsLogWriter creates a new WebSocket log writer.

@@ -48,7 +48,7 @@ const (
 	discoveryInterval  = 1 * time.Second
 	emitChunkFrames    = engineInternalRate * 5 / 1000 // ~5ms per paced write
 
-// emitCushionMs is how far ahead of the playhead each sink is kept fed —
+	// emitCushionMs is how far ahead of the playhead each sink is kept fed —
 	// stall tolerance for the emit loop. It stamps audio into the future, which
 	// some Link Audio receivers stall on (the VOID DAW-bridge plugin chokes on
 	// any feed-ahead), so the default was briefly 0 — floored to one ~5ms write

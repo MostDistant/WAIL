@@ -26,11 +26,11 @@ var signalingURL = func() string {
 
 // App is the Wails application backend. All exported methods are callable from the frontend.
 type App struct {
-	mu          sync.Mutex
-	session     *SessionHandle
-	emitter     EventEmitter
-	identity    string
-	streamNames map[uint16]string
+	mu           sync.Mutex
+	session      *SessionHandle
+	emitter      EventEmitter
+	identity     string
+	streamNames  map[uint16]string
 	dataDir      string
 	instance     int      // per-instance offset; sets the CLAP IPC port (9191 + instance)
 	pluginErrors []string // CLAP auto-install errors from startup, surfaced to the UI
