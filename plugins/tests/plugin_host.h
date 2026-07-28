@@ -52,6 +52,16 @@ struct ClapInstance {
       return true;
    }
 
+   // reactivate drives a host's bypass/re-enable (or sample-rate change) cycle:
+   // stop+deactivate, then activate+start on the same instance, no reload.
+   bool reactivate(double sampleRate, uint32_t minFrames, uint32_t maxFrames) {
+      if (!plugin) return false;
+      plugin->stop_processing(plugin);
+      plugin->deactivate(plugin);
+      return plugin->activate(plugin, sampleRate, minFrames, maxFrames) &&
+             plugin->start_processing(plugin);
+   }
+
    void teardown() {
       if (!plugin) return;
       plugin->stop_processing(plugin);

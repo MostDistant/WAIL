@@ -405,6 +405,14 @@ static void CLAP_ABI lbr_deactivate(const clap_plugin_t *plugin) {
    lbr_recv *self = plugin->plugin_data;
    if (atomic_exchange(&self->running, false)) wail_thread_join(self->mgr_thread);
    for (int i = 0; i < LBR_SLOTS; i++) {
+      // Clear the dedupe keys too, not just the source. On re-activate the
+      // gone-check still sees the channel (its id is discoverable, so the miss
+      // count never climbs) and the assign dedupe still matches — a slot left
+      // marked assigned would never resubscribe, and process() would output
+      // silence forever from its NULL source.
+      atomic_store_explicit(&self->slots[i].assigned, false, memory_order_release);
+      self->slots[i].channel_id = 0;
+      self->slots[i].chan_name[0] = '\0';
       if (self->slots[i].source) {
          lb_source_destroy(self->slots[i].source);
          self->slots[i].source = NULL;

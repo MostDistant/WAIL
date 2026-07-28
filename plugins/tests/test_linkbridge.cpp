@@ -449,3 +449,92 @@ TEST(linkbridge_recv_follows_channel_rename) {
    inst.teardown();
    lb_destroy(pub);
 }
+
+// A host bypass/re-enable (or sample-rate change) deactivates and re-activates
+// the plugin. lbr_deactivate destroyed the sources but left slots[i].assigned
+// set with chan_name populated, so on re-activate the gone-check saw the
+// channel as still live (id discoverable, miss count never climbs) and the
+// dedupe saw a name match — the slot was never resubscribed. process() then hit
+// a NULL source and output silence forever behind a stale port name.
+TEST(linkbridge_recv_resubscribes_after_reactivate) {
+   wailtest::ClapInstance inst;
+   std::string err;
+   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_RECV_PATH, "software.wail.linkbridge.recv", 48000.0, 256, 256, &err),
+             err.c_str());
+   if (!inst.plugin) return;
+
+   lb_link *pub = lb_create(120.0);
+   lb_enable(pub, true);
+   lb_enable_audio(pub, true);
+   lb_sink *room = lb_sink_create(pub, "WAIL · reacttest · sweep", 16384);
+
+   const uint32_t kBlock = 256;
+   std::vector<float> outL[kPorts], outR[kPorts];
+   float *ch[kPorts][2];
+   clap_audio_buffer_t outs[kPorts];
+   for (int p = 0; p < kPorts; p++) {
+      outL[p].assign(kBlock, 0.0f);
+      outR[p].assign(kBlock, 0.0f);
+      ch[p][0] = outL[p].data();
+      ch[p][1] = outR[p].data();
+      outs[p] = clap_audio_buffer_t{};
+      outs[p].channel_count = 2;
+      outs[p].data32 = ch[p];
+   }
+
+   uint64_t frame = 0;
+   bool heard = false;
+   auto pump = [&]() {
+      float l[kBlock], r[kBlock];
+      for (uint32_t i = 0; i < kBlock; i++)
+         l[i] = r[i] = 0.5f * sinf(2.0f * 3.14159265f * 440.0f * (float)(frame + i) / 48000.0f);
+      frame += kBlock;
+      lb_state *st = lb_capture(pub);
+      double beat = lb_beat_at_time(st, lb_clock_micros(pub) + 10000, 4.0);
+      lb_sink_commit(room, st, beat, 4.0, l, r, kBlock, 48000);
+      lb_release(st);
+      clap_process_t p{};
+      p.steady_time = -1;
+      p.frames_count = kBlock;
+      p.audio_outputs_count = kPorts;
+      p.audio_outputs = outs;
+      inst.plugin->process(inst.plugin, &p);
+      inst.plugin->on_main_thread(inst.plugin);
+      for (int i = 0; i < kPorts && !heard; i++)
+         for (uint32_t f = 0; f < kBlock; f++)
+            if (outL[i][f] != 0.0f) {
+               heard = true;
+               break;
+            }
+   };
+   auto pumpUntil = [&](const std::function<bool()> &done, int seconds) {
+      auto t0 = std::chrono::steady_clock::now();
+      auto next = t0;
+      while (!done() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(seconds)) {
+         next += std::chrono::microseconds((int64_t)((double)kBlock * 1000000.0 / kSampleRate));
+         std::this_thread::sleep_until(next - std::chrono::milliseconds(2));
+         while (std::chrono::steady_clock::now() < next) {
+         }
+         pump();
+      }
+   };
+
+   pumpUntil([&] { return heard; }, 15);
+   CHECK_MSG(heard, "never heard the channel before re-activate");
+   if (!heard) {
+      lb_sink_destroy(room);
+      inst.teardown();
+      lb_destroy(pub);
+      return;
+   }
+
+   CHECK_MSG(inst.reactivate(48000.0, kBlock, kBlock), "re-activate failed");
+
+   heard = false;
+   pumpUntil([&] { return heard; }, 20);
+   CHECK_MSG(heard, "silent after re-activate — slot never resubscribed");
+
+   lb_sink_destroy(room);
+   inst.teardown();
+   lb_destroy(pub);
+}
