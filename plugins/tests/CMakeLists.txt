@@ -45,5 +45,6 @@ add_wail_harness(minidaw minidaw_main.cpp)
 
 add_test(NAME wail-plugin-tests COMMAND wail-plugin-tests)
 # Link discovery and the real-time-paced pumps mean a failing test takes seconds
-# to unwind; keep ctest patient.
-set_tests_properties(wail-plugin-tests PROPERTIES TIMEOUT 120)
+# to unwind, and each recv case waits out its own multi-second bound. A healthy
+# run is ~13s; the budget is sized so failures still get to report.
+set_tests_properties(wail-plugin-tests PROPERTIES TIMEOUT 240)
