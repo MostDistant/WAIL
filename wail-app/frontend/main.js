@@ -22,6 +22,7 @@ const settingsDisplayNameInput = document.getElementById('settings-display-name'
 const settingsLinkAudioNameInput = document.getElementById('settings-link-audio-name');
 const settingsTelemetryCheckbox = document.getElementById('settings-telemetry');
 const settingsRememberCheckbox = document.getElementById('settings-remember');
+const settingsDeveloperCheckbox = document.getElementById('settings-developer');
 const chatInput = document.getElementById('chat-input');
 const chatSendBtn = document.getElementById('chat-send-btn');
 const chatMessages = document.getElementById('chat-messages');
@@ -294,6 +295,9 @@ const LINK_AUDIO_NAME_KEY = 'wail-link-audio-name';
 const DEFAULT_LINK_AUDIO_NAME = 'WAIL';
 const TELEMETRY_KEY = 'wail-telemetry';
 const REMEMBER_KEY = 'wail-remember';
+const DEVELOPER_KEY = 'wail-developer-mode';
+function getDeveloperMode() { return localStorage.getItem(DEVELOPER_KEY) === '1'; }
+function saveDeveloperMode(on) { localStorage.setItem(DEVELOPER_KEY, on ? '1' : '0'); }
 
 function getDisplayName() {
   return localStorage.getItem(DISPLAY_NAME_KEY) || '';
@@ -571,18 +575,12 @@ function openSettings() {
   settingsLinkAudioNameInput.value = getLinkAudioName();
   settingsTelemetryCheckbox.checked = getTelemetryEnabled();
   settingsRememberCheckbox.checked = getRememberEnabled();
+  settingsDeveloperCheckbox.checked = getDeveloperMode();
   settingsPanel.style.display = 'flex';
 }
 
 settingsBtn.addEventListener('click', openSettings);
 document.getElementById('session-settings-btn').addEventListener('click', openSettings);
-
-document.getElementById('interval-prompt-ok').addEventListener('click', () => {
-  document.getElementById('interval-prompt').style.display = 'none';
-});
-document.getElementById('interval-prompt-close').addEventListener('click', () => {
-  document.getElementById('interval-prompt').style.display = 'none';
-});
 
 settingsCloseBtn.addEventListener('click', () => {
   settingsPanel.style.display = 'none';
@@ -610,6 +608,10 @@ settingsForm.addEventListener('submit', (e) => {
   const rememberEnabled = settingsRememberCheckbox.checked;
   saveRememberEnabled(rememberEnabled);
   invoke('set_remember_enabled', { enabled: rememberEnabled }).catch(() => {});
+  // Developer mode: persist + show/hide the Debug tab immediately.
+  const developerEnabled = settingsDeveloperCheckbox.checked;
+  saveDeveloperMode(developerEnabled);
+  applyDeveloperMode(developerEnabled);
   if (rememberEnabled) {
     saveSettings();
   } else {
@@ -642,6 +644,16 @@ function switchSessionTab(activeBtn) {
 sessionTabSessionBtn.addEventListener('click', () => switchSessionTab(sessionTabSessionBtn));
 sessionTabChatBtn.addEventListener('click', () => switchSessionTab(sessionTabChatBtn));
 sessionTabDebugBtn.addEventListener('click', () => switchSessionTab(sessionTabDebugBtn));
+
+// Developer mode gates the Debug tab (off by default). Turning it off while the
+// Debug tab is active falls back to the Session tab.
+function applyDeveloperMode(on) {
+  sessionTabDebugBtn.style.display = on ? '' : 'none';
+  if (!on && sessionTabDebugBtn.classList.contains('active')) {
+    switchSessionTab(sessionTabSessionBtn);
+  }
+}
+applyDeveloperMode(getDeveloperMode());
 
 function resetStatsWindow() {
   statusSnapshots = [];
@@ -744,30 +756,6 @@ joinForm.addEventListener('submit', async (e) => {
   }
 });
 
-// --- Debug Room ---
-// One button: join the shared wail-debug room with the reference metronome,
-// loopback, and peer log sharing armed (see App.DebugRoom).
-document.getElementById('debug-room-btn').addEventListener('click', async () => {
-  const btn = document.getElementById('debug-room-btn');
-  joinError.style.display = 'none';
-  btn.disabled = true;
-  btn.textContent = 'Connecting...';
-  try {
-    const result = await invoke('debug_room', {
-      displayName: getDisplayName(),
-      linkAudioName: getLinkAudioName(),
-    });
-    saveSettings();
-    showSession(result.room);
-    setupListeners();
-  } catch (err) {
-    showError(joinError, err);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Debug Room';
-  }
-});
-
 // --- Disconnect ---
 disconnectBtn.addEventListener('click', async () => {
   try {
@@ -778,25 +766,8 @@ disconnectBtn.addEventListener('click', async () => {
   showJoin();
 });
 
-// --- Set BPM (on Enter or blur) ---
-async function applyBpm() {
-  const bpm = parseFloat(sessionBpmInput.value);
-  if (isNaN(bpm) || bpm < 20 || bpm > 999) return;
-  try {
-    await invoke('change_bpm', { bpm });
-  } catch (err) {
-    console.error('BPM change error:', err);
-  }
-}
-
-sessionBpmInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    sessionBpmInput.blur();
-  }
-});
-
-sessionBpmInput.addEventListener('change', applyBpm);
+// Tempo is read-only in the UI — driven by the DAW via Ableton Link and only
+// displayed (see renderStatus / the tempo:changed listener). No in-app editing.
 
 // --- Set interval BPI (ADR-0004: anyone may change it; applies at the next
 // interval boundary, relay reanchors the room clock) ---
@@ -849,14 +820,28 @@ function toggleStatsMode() {
   if (lastStatusPayload) renderStatus(lastStatusPayload);
 }
 
-function renderStatus(s) {
-  const bpmInput = sessionBpmInput;
-  if (document.activeElement !== bpmInput) {
-    bpmInput.value = s.bpm.toFixed(1);
+// One in-session callout consolidating the old interval prompt + no-peers
+// warning: what to set in the DAW and the start order, shown until a Link peer
+// (your DAW) appears — then it self-hides.
+function updateSetupCallout(s) {
+  const el = document.getElementById('setup-callout');
+  if (!el) return;
+  if (s.link_peers > 0 || !s.interval_bars) {
+    el.style.display = 'none';
+    return;
   }
+  const bars = s.interval_bars;
+  const bpi = Math.round(bars * (s.interval_quantum || 4));
+  const barsWord = `${bars} bar${bars !== 1 ? 's' : ''}`;
+  el.textContent =
+    `This room runs ${bpi} beats (${barsWord}) per interval. Set your DAW's launch quantization to ${barsWord}, start Ableton Link, then start your transport.`;
+  el.style.display = '';
+}
+
+function renderStatus(s) {
+  sessionBpmInput.textContent = (typeof s.bpm === 'number') ? s.bpm.toFixed(1) : '—';
   document.getElementById('session-link-peers').textContent = s.link_peers;
-  document.getElementById('link-no-peers-warning').style.display =
-    (s.link_peers === 0 && s.plugin_connected) ? '' : 'none';
+  updateSetupCallout(s);
 
   // Compute display values (windowed or cumulative)
   let sent = s.audio_sent, recv = s.audio_recv;
@@ -1179,7 +1164,7 @@ async function setupListeners() {
   }));
 
   unlisten.push(await listen('tempo:changed', (event) => {
-    sessionBpmInput.value = event.payload.bpm.toFixed(1);
+    sessionBpmInput.textContent = event.payload.bpm.toFixed(1);
   }));
 
   // Grid alignment with the room grid (ADR-0006): quiet header badge.
@@ -1212,15 +1197,6 @@ async function setupListeners() {
 
   unlisten.push(await listen('session:error', (event) => {
     showError(sessionError, event.payload.message);
-  }));
-
-  unlisten.push(await listen('interval:prompt', (event) => {
-    const p = event.payload;
-    const bpi = Math.round(p.bars * p.quantum);
-    const barsWord = `${p.bars} bar${p.bars !== 1 ? 's' : ''}`;
-    document.getElementById('interval-prompt-text').textContent =
-      `This room runs ${bpi} beats (${barsWord}) per interval — set your DAW's launch quantization to ${barsWord} to match, then start your transport.`;
-    document.getElementById('interval-prompt').style.display = '';
   }));
 
   unlisten.push(await listen('session:ended', () => {

@@ -1,7 +1,7 @@
 // Package metronome renders a WAIL click track: one interval of PCM with a
 // short percussive click on every whole beat, accented on bar downbeats. It is
 // pure (no cgo, no networking), so it unit-tests without the Link SDK; the emit
-// engine publishes the rendered buffers on a locally-owned "WAIL Metronome"
+// engine publishes the rendered buffers on a locally-owned room metronome
 // Link Audio channel so a user can align it against their DAW's own metronome.
 package metronome
 

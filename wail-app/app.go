@@ -447,7 +447,7 @@ func (a *App) SetLoopback(enabled bool) error {
 	return nil
 }
 
-// SetMetronome toggles the "WAIL Metronome" Link Audio channel: a click on
+// SetMetronome toggles the room metronome Link Audio channel ("WAIL · {peer} · Metronome"): a click on
 // every beat (accented on bar downbeats) on the local Link grid, published so
 // the user can subscribe in their DAW and align it against the DAW's metronome.
 func (a *App) SetMetronome(enabled bool) error {
@@ -460,7 +460,7 @@ func (a *App) SetMetronome(enabled bool) error {
 }
 
 // SetMetronomeBroadcast toggles broadcasting the WAIL Metronome click to the
-// room as an audio stream: peers auto-publish it as a "{peer} · WAIL Metronome"
+// room as an audio stream: peers auto-publish it as a "WAIL · {peer} · Metronome"
 // Link Audio channel and hear it one interval late. Independent of SetMetronome
 // (the local-only channel) — both can run at once.
 func (a *App) SetMetronomeBroadcast(enabled bool) error {

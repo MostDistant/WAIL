@@ -55,7 +55,7 @@ func main() {
 	peerName := flag.String("name", "wail-probe", "Link Audio peer name for this probe")
 	match := flag.String("match", "", "only subscribe to channels whose \"peer · name\" contains this substring (case-insensitive); empty = all")
 	bpi := flag.Float64("bpi", 0, "if >0, also report the shared-grid interval index of received audio (beat mapped at this beats-per-interval lens; must match the room's BPI)")
-	offsetRef := flag.String("offset-ref", "", "if set, report per-channel onset phase offset in ms vs the channel whose name contains this substring (e.g. \"WAIL Metronome\")")
+	offsetRef := flag.String("offset-ref", "", "if set, report per-channel onset phase offset in ms vs the channel whose name contains this substring (e.g. \"Metronome\")")
 	offsetDump := flag.String("offset-dump", "", "if set (and -offset-ref), write ref+channel RMS envelopes as CSVs to this directory on exit")
 	flag.Parse()
 	matchLower := strings.ToLower(*match)
