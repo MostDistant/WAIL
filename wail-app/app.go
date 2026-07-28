@@ -26,15 +26,19 @@ var signalingURL = func() string {
 
 // App is the Wails application backend. All exported methods are callable from the frontend.
 type App struct {
-	mu           sync.Mutex
-	session      *SessionHandle
-	emitter      EventEmitter
-	identity     string
-	streamNames  map[uint16]string
-	dataDir      string
-	pluginErrors []string // CLAP auto-install errors from startup, surfaced to the UI
-	fileLog      *RotatingFileWriter
-	wsLog        *WsLogWriter
+	mu       sync.Mutex
+	session  *SessionHandle
+	emitter  EventEmitter
+	identity string
+	// streamNames is the live index-keyed override map the session works in;
+	// streamNameStore is its channel-keyed persisted form. The session owns the
+	// translation between them — only it sees the capture channel list.
+	streamNames     map[uint16]string
+	streamNameStore *StreamNameStore
+	dataDir         string
+	pluginErrors    []string // CLAP auto-install errors from startup, surfaced to the UI
+	fileLog         *RotatingFileWriter
+	wsLog           *WsLogWriter
 	// rememberEnabled mirrors the frontend "Remember settings" checkbox (pushed
 	// via SetRememberEnabled); it gates persisting captureEnabled to disk.
 	rememberEnabled bool
@@ -51,7 +55,7 @@ func NewApp(instance int) *App {
 	}
 	os.MkdirAll(dataDir, 0o755)
 	identity := getOrCreateIdentity(dataDir)
-	streamNames := LoadStreamNames(dataDir)
+	streamNameStore := LoadStreamNames(dataDir)
 
 	// Auto-install the bundled CLAP plugins into the user's CLAP directory on first
 	// launch (ADR-0007). They ship in the release archive, so this is a zero-friction
@@ -63,7 +67,8 @@ func NewApp(instance int) *App {
 	}
 
 	return &App{
-		streamNames:     streamNames,
+		streamNames:     make(map[uint16]string),
+		streamNameStore: streamNameStore,
 		dataDir:         dataDir,
 		identity:        identity,
 		pluginErrors:    pluginErrors,
@@ -192,19 +197,20 @@ func (a *App) JoinRoom(
 	}
 
 	config := SessionConfig{
-		Server:         signalingURL,
-		Room:           room,
-		Password:       password,
-		DisplayName:    displayName,
-		LinkAudioName:  actualLinkAudioName,
-		Identity:       a.identity,
-		BPM:            actualBPM,
-		Bars:           actualBars,
-		Quantum:        actualQuantum,
-		Recording:      recording,
-		StreamCount:    actualStreamCount,
-		LogSource:      a.logSource(),
-		CaptureRestore: a.captureEnabled,
+		Server:            signalingURL,
+		Room:              room,
+		Password:          password,
+		DisplayName:       displayName,
+		LinkAudioName:     actualLinkAudioName,
+		Identity:          a.identity,
+		BPM:               actualBPM,
+		Bars:              actualBars,
+		Quantum:           actualQuantum,
+		Recording:         recording,
+		StreamCount:       actualStreamCount,
+		LogSource:         a.logSource(),
+		CaptureRestore:    a.captureEnabled,
+		StreamNameRestore: a.streamNameStore,
 		OnCaptureEnabledChanged: func(keys []CaptureChannelKey) {
 			a.mu.Lock()
 			defer a.mu.Unlock()
@@ -212,6 +218,12 @@ func (a *App) JoinRoom(
 			if a.rememberEnabled {
 				SaveCaptureEnabled(a.dataDir, keys)
 			}
+		},
+		OnStreamNamesChanged: func(entries []StreamNameEntry, byIndex map[uint16]string) {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			a.streamNames = byIndex
+			SaveStreamNames(a.dataDir, entries)
 		},
 	}
 
@@ -517,8 +529,8 @@ func (a *App) RenameStream(streamIndex uint16, name string) error {
 	} else {
 		a.streamNames[streamIndex] = trimmed
 	}
-	SaveStreamNames(a.dataDir, a.streamNames)
-
+	// Persisting is the session's job: it re-keys these indices onto channels
+	// (OnStreamNamesChanged). Renaming with no session is a no-op on disk.
 	if a.session != nil {
 		snapshot := make(map[uint16]string, len(a.streamNames))
 		for k, v := range a.streamNames {

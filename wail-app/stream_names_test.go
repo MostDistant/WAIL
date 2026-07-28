@@ -7,47 +7,56 @@ import (
 	"testing"
 )
 
+func chanKey(peer, channel string) CaptureChannelKey {
+	return CaptureChannelKey{PeerName: peer, ChannelName: channel}
+}
+
 func TestLoadEmptyDirReturnsEmpty(t *testing.T) {
 	dir := t.TempDir()
-	names := LoadStreamNames(dir)
-	if len(names) != 0 {
-		t.Fatalf("expected empty, got %d", len(names))
+	store := LoadStreamNames(dir)
+	if len(store.ByChannel) != 0 || len(store.Legacy) != 0 {
+		t.Fatalf("expected empty, got %+v", store)
 	}
 }
 
 func TestSaveAndLoadRoundtrip(t *testing.T) {
 	dir := t.TempDir()
-	names := map[uint16]string{0: "Bass", 3: "Drums"}
+	entries := []StreamNameEntry{
+		{CaptureChannelKey: chanKey("Live", "Bus 1"), Name: "Bass"},
+		{CaptureChannelKey: chanKey("Live", "Bus 2"), Name: "Drums"},
+	}
 
-	SaveStreamNames(dir, names)
+	SaveStreamNames(dir, entries)
 	loaded := LoadStreamNames(dir)
 
-	if len(loaded) != 2 {
-		t.Fatalf("expected 2, got %d", len(loaded))
+	if len(loaded.ByChannel) != 2 {
+		t.Fatalf("expected 2, got %d", len(loaded.ByChannel))
 	}
-	if loaded[0] != "Bass" || loaded[3] != "Drums" {
-		t.Fatalf("mismatch: %v", loaded)
+	if n, _ := loaded.nameFor(chanKey("Live", "Bus 1")); n != "Bass" {
+		t.Fatalf("mismatch: %+v", loaded.ByChannel)
+	}
+	if n, _ := loaded.nameFor(chanKey("Live", "Bus 2")); n != "Drums" {
+		t.Fatalf("mismatch: %+v", loaded.ByChannel)
 	}
 }
 
 func TestSaveEmptyOverwrites(t *testing.T) {
 	dir := t.TempDir()
-	names := map[uint16]string{0: "Bass"}
-	SaveStreamNames(dir, names)
+	SaveStreamNames(dir, []StreamNameEntry{{CaptureChannelKey: chanKey("Live", "Bus 1"), Name: "Bass"}})
 
-	SaveStreamNames(dir, map[uint16]string{})
+	SaveStreamNames(dir, nil)
 	loaded := LoadStreamNames(dir)
-	if len(loaded) != 0 {
-		t.Fatalf("expected empty after overwrite, got %d", len(loaded))
+	if len(loaded.ByChannel) != 0 {
+		t.Fatalf("expected empty after overwrite, got %+v", loaded.ByChannel)
 	}
 }
 
 func TestLoadInvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, streamNamesFilename), []byte("not json"), 0o644)
-	names := LoadStreamNames(dir)
-	if len(names) != 0 {
-		t.Fatal("expected empty for invalid JSON")
+	store := LoadStreamNames(dir)
+	if len(store.ByChannel) != 0 || len(store.Legacy) != 0 {
+		t.Fatalf("expected empty for invalid JSON, got %+v", store)
 	}
 }
 
@@ -145,5 +154,121 @@ func TestStreamNameBroadcasterSnapshotsTheSentMap(t *testing.T) {
 
 	if sends != 2 {
 		t.Fatalf("a mutated map must count as changed, got %d sends", sends)
+	}
+}
+
+// Persisted renames key on (peer name, channel name), not the stream index:
+// indices are handed out in Link discovery order, so an index-keyed rename
+// lands on whatever channel happens to be discovered there after a restart.
+func TestStreamNameStoreRoundtripsByChannel(t *testing.T) {
+	dir := t.TempDir()
+	entries := []StreamNameEntry{
+		{CaptureChannelKey: CaptureChannelKey{PeerName: "Live", ChannelName: "Bus 1"}, Name: "Bass DI"},
+	}
+
+	SaveStreamNames(dir, entries)
+	store := LoadStreamNames(dir)
+
+	if got := store.ByChannel; len(got) != 1 || got[0] != entries[0] {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+	if len(store.Legacy) != 0 {
+		t.Fatalf("v2 file must not populate Legacy: %v", store.Legacy)
+	}
+}
+
+// A rename saved before the re-key is still keyed by index. It gets adopted the
+// first time that index shows up as a live channel, then persists by channel.
+func TestLoadStreamNamesReadsLegacyIndexKeyedFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, streamNamesFilename), []byte(`{"0":"Bass DI","3":"Drums"}`), 0o644)
+
+	store := LoadStreamNames(dir)
+
+	if len(store.ByChannel) != 0 {
+		t.Fatalf("legacy file has no channel keys, got %+v", store.ByChannel)
+	}
+	if store.Legacy[0] != "Bass DI" || store.Legacy[3] != "Drums" {
+		t.Fatalf("legacy names not read: %v", store.Legacy)
+	}
+}
+
+func TestResolveStreamNamesAppliesPersistedNameToItsChannel(t *testing.T) {
+	channels := []CaptureChannelInfo{
+		{StreamID: 0, PeerName: "Live", Name: "Bus 2", Enabled: true},
+		{StreamID: 1, PeerName: "Live", Name: "Bus 1", Enabled: true},
+	}
+	store := &StreamNameStore{ByChannel: []StreamNameEntry{
+		{CaptureChannelKey: CaptureChannelKey{PeerName: "Live", ChannelName: "Bus 1"}, Name: "Bass DI"},
+	}}
+	overrides := map[uint16]string{}
+
+	if !resolveStreamNames(channels, store, overrides) {
+		t.Fatal("expected resolve to report a change")
+	}
+	// "Bus 1" is stream 1 this run even though it was stream 0 when saved.
+	if overrides[1] != "Bass DI" {
+		t.Fatalf("persisted name must follow its channel, got %v", overrides)
+	}
+	if _, ok := overrides[0]; ok {
+		t.Fatalf("must not label the channel that merely reused the index: %v", overrides)
+	}
+}
+
+func TestResolveStreamNamesAdoptsLegacyIndexThenKeysIt(t *testing.T) {
+	channels := []CaptureChannelInfo{
+		{StreamID: 0, PeerName: "Live", Name: "Bus 1", Enabled: true},
+	}
+	store := &StreamNameStore{Legacy: map[uint16]string{0: "Bass DI"}}
+	overrides := map[uint16]string{}
+
+	if !resolveStreamNames(channels, store, overrides) {
+		t.Fatal("expected resolve to report a change")
+	}
+	if overrides[0] != "Bass DI" {
+		t.Fatalf("legacy name not adopted: %v", overrides)
+	}
+	if len(store.Legacy) != 0 {
+		t.Fatalf("adopted legacy entry must be consumed, got %v", store.Legacy)
+	}
+	want := StreamNameEntry{CaptureChannelKey: CaptureChannelKey{PeerName: "Live", ChannelName: "Bus 1"}, Name: "Bass DI"}
+	if len(store.ByChannel) != 1 || store.ByChannel[0] != want {
+		t.Fatalf("legacy entry must be re-keyed, got %+v", store.ByChannel)
+	}
+}
+
+// A user rename made this session must win over whatever was persisted.
+func TestResolveStreamNamesDoesNotClobberALiveOverride(t *testing.T) {
+	channels := []CaptureChannelInfo{
+		{StreamID: 0, PeerName: "Live", Name: "Bus 1", Enabled: true},
+	}
+	store := &StreamNameStore{ByChannel: []StreamNameEntry{
+		{CaptureChannelKey: CaptureChannelKey{PeerName: "Live", ChannelName: "Bus 1"}, Name: "Bass DI"},
+	}}
+	overrides := map[uint16]string{0: "Renamed Just Now"}
+
+	if resolveStreamNames(channels, store, overrides) {
+		t.Fatal("nothing to resolve — must report no change")
+	}
+	if overrides[0] != "Renamed Just Now" {
+		t.Fatalf("live override clobbered: %v", overrides)
+	}
+}
+
+// Only capture channels get persisted: the test tone / WAV / metronome labels
+// live at synthetic indices with no channel behind them.
+func TestStreamNameEntriesSkipsSendersWithNoChannel(t *testing.T) {
+	channels := []CaptureChannelInfo{
+		{StreamID: 0, PeerName: "Live", Name: "Bus 1", Enabled: true},
+	}
+	overrides := map[uint16]string{0: "Bass DI", 0xFF01: "Metronome"}
+
+	got := streamNameEntries(channels, overrides)
+
+	want := []StreamNameEntry{
+		{CaptureChannelKey: CaptureChannelKey{PeerName: "Live", ChannelName: "Bus 1"}, Name: "Bass DI"},
+	}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("streamNameEntries = %+v, want %+v", got, want)
 	}
 }

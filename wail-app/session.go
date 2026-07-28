@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"reflect"
@@ -40,6 +41,13 @@ type SessionConfig struct {
 	// OnCaptureEnabledChanged fires after a user capture-toggle with the full
 	// enabled set, so the app can persist it (gated on "Remember settings").
 	OnCaptureEnabledChanged func([]CaptureChannelKey)
+	// StreamNameRestore is the persisted rename set, keyed by channel. The
+	// session resolves it against live capture channels as they are discovered
+	// (stream indices are minted per run, so it can't be resolved up front).
+	StreamNameRestore *StreamNameStore
+	// OnStreamNamesChanged fires with the channel-keyed set to persist and the
+	// index-keyed map the app hands back on the next rename.
+	OnStreamNamesChanged func([]StreamNameEntry, map[uint16]string)
 	// LogSource, when set, is pumped to the room as LogBroadcast messages
 	// (peer log sharing, #440). Entries flow only when the writer is armed
 	// (debug room / -log-sharing / GUI toggle).
@@ -223,8 +231,31 @@ func sessionLoop(
 	// broadcast only when the map actually changes.
 	var effStreamNames map[uint16]string
 	nameCast := &streamNameBroadcaster{}
+	nameStore := config.StreamNameRestore
+	if nameStore == nil {
+		nameStore = &StreamNameStore{}
+	}
+	// persistStreamNames re-keys the session's index-keyed overrides onto their
+	// channels and hands them to the app. Called whenever either side moves: a
+	// user rename, or a persisted name resolving onto a newly discovered channel.
+	persistStreamNames := func(channels []CaptureChannelInfo) {
+		if config.OnStreamNamesChanged == nil {
+			return
+		}
+		entries := streamNameEntries(channels, localStreamNames)
+		for _, e := range entries {
+			nameStore.put(e.CaptureChannelKey, e.Name)
+		}
+		config.OnStreamNamesChanged(entries, maps.Clone(localStreamNames))
+	}
 	syncStreamNames := func() {
-		effStreamNames = effectiveStreamNames(audioEngine.CaptureChannels(), localStreamNames)
+		channels := audioEngine.CaptureChannels()
+		// Channels are discovered over time and their stream indices are minted
+		// per run, so persisted names are resolved here rather than at start.
+		if resolveStreamNames(channels, nameStore, localStreamNames) {
+			persistStreamNames(channels)
+		}
+		effStreamNames = effectiveStreamNames(channels, localStreamNames)
 		nameCast.Sync(effStreamNames, func(m map[uint16]string) bool {
 			return mesh.Broadcast(NewStreamNames(StreamNamesToWire(m)))
 		})
@@ -423,6 +454,7 @@ func sessionLoop(
 				emitter.Emit("chat:message", ChatMessageEvent{SenderName: displayName, IsOwn: true, Text: cmd.Text})
 			case "StreamNamesChanged":
 				localStreamNames = cmd.Names
+				persistStreamNames(audioEngine.CaptureChannels())
 				syncStreamNames()
 			case "SetTestTone":
 				// Stop existing test tone
