@@ -185,7 +185,7 @@ cd signaling-server && go test ./...            # relay server
 
 Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOCACHE write access; in a sandbox you may need to disable it. `-tags linkstub` swaps Link for a stub so the app and its pure logic packages build without the SDK.
 
-`go test` is all in-process. To exercise the real Link Audio Sink/Source path + relay round trip end-to-end on one machine (no DAW), run `./scripts/tier2-e2e.sh` (local relay + WAV-sweep sender + receiver + `linkaudio-probe`; exit 0 = PASS). See DEVELOPMENT.md → "Tier 2 audio E2E". For the Link Bridge path (ADR-0007), `./scripts/minidaw-e2e.sh` does the equivalent through the plugin: a clap-trap-hosted wail-linkbridge-recv wired to a real headless app over a local relay, sweep in, RMS/freq analysis out (exit 0 = PASS).
+`go test` is all in-process. To exercise the real Link Audio Sink/Source path + relay round trip end-to-end on one machine (no DAW), run `./scripts/tier2-e2e.sh` (local relay + WAV-sweep sender + receiver + `linkaudio-probe`; exit 0 = PASS). See DEVELOPMENT.md → "Tier 2 audio E2E". For the Link Bridge path (ADR-0007), `./scripts/minidaw-e2e.sh` does the equivalent through the plugin: a clap-trap-hosted wail-linkbridge-recv wired to a real headless app over a local relay, checking the looped-back metronome click lands on the session grid within ±5ms (exit 0 = PASS).
 
 ### Two-machine debugging (pair-debug)
 

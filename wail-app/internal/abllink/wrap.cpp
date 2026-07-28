@@ -19,8 +19,6 @@
 #define NOMINMAX
 #include <winsock2.h>
 #include <windows.h>
-#else
-#include <time.h>
 #endif
 
 #include "abl_link.cpp"

@@ -32,7 +32,6 @@ type App struct {
 	identity     string
 	streamNames  map[uint16]string
 	dataDir      string
-	instance     int      // per-instance offset for multi-app-on-one-machine runs
 	pluginErrors []string // CLAP auto-install errors from startup, surfaced to the UI
 	fileLog      *RotatingFileWriter
 	wsLog        *WsLogWriter
@@ -67,7 +66,6 @@ func NewApp(instance int) *App {
 		streamNames:     streamNames,
 		dataDir:         dataDir,
 		identity:        identity,
-		instance:        instance,
 		pluginErrors:    pluginErrors,
 		rememberEnabled: true, // frontend default; corrected on settings load
 		captureEnabled:  LoadCaptureEnabled(dataDir),

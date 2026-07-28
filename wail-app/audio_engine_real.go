@@ -1291,8 +1291,8 @@ func (st *emitStream) shiftedInterval(idx int64) []int16 {
 }
 
 // topUpSinks advances each stream's feeder to playhead+cushion, writing paced
-// chunks into its sink (multiple chunks per tick when catching up after a stall),
-func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, bpi float64, localBeat float64) {
+// chunks into its sink (multiple chunks per tick when catching up after a stall).
+func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, bpi, localBeat float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, st := range e.emit {
