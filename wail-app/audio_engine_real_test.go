@@ -269,6 +269,22 @@ func TestCaptureChannelsNeverSerializesOwnChannels(t *testing.T) {
 	}
 }
 
+func TestCaptureExcludesWAILPrefixedChannelsFromAnyPeer(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	// A "WAIL · " room channel published by a DIFFERENT peer (not ours, and not a
+	// name we minted) must still be kept out of the capture mixer: it carries
+	// already-relayed room audio, so capturing it would re-relay the room. This
+	// exercises the name-prefix filter, distinct from the own-ID/own-name filter.
+	roomCh := testDiscoveredChannel(1, "SomeoneElse", "WAIL · Bob · guitar")
+	plainCh := testDiscoveredChannel(2, "Live", "Main")
+	le.reconcileChannels([]abllink.Channel{roomCh, plainCh})
+
+	infos := le.CaptureChannels()
+	if len(infos) != 1 || infos[0].Name != "Main" {
+		t.Fatalf("capture mixer must exclude WAIL · room channels from any peer, got %+v", infos)
+	}
+}
+
 // A room interval-config change must re-grid running capture assemblers: they
 // are built once at channel start, and a stale grid makes a sender's room
 // labels tick at the old rate — receivers hear that peer drift out of sync

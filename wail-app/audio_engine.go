@@ -50,7 +50,7 @@ type AudioEngine interface {
 	// writes two WAV files — the PCM fed to Opus and that audio decoded as a
 	// receiver would — for diagnosing where transmitted audio degrades.
 	SetCaptureDump(enabled bool)
-	// SetMetronome publishes (or tears down) a locally-generated "WAIL Metronome"
+	// SetMetronome publishes (or tears down) a locally-generated room metronome
 	// Link Audio channel — a click on every beat (accented on bar downbeats) on
 	// the local Link grid, for aligning against the DAW's own metronome.
 	SetMetronome(enabled bool)

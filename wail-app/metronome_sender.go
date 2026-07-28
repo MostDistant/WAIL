@@ -26,7 +26,7 @@ const (
 // Opus-encodes it into WAIF frames, and drips them onto the relay at a
 // wall-clock 20ms cadence so they leave in real time during the interval and
 // never burst the relay. Receivers decode it, hold it until room interval N+D,
-// and republish it as a "{peer} · WAIL Metronome" Link Audio channel — the same
+// and republish it as a "WAIL · {peer} · Metronome" Link Audio channel — the same
 // click grid as the sender's local metronome, only one interval late.
 func MetronomeSenderTask(
 	ctx context.Context,

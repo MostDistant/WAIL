@@ -129,7 +129,7 @@ type linkAudioEngine struct {
 
 	cushionFrames int // per-sink feed-ahead (emitCushionMs or WAIL_EMIT_CUSHION_MS)
 
-	// Locally-generated "WAIL Metronome" click channel (nil = off). metronomeOn
+	// Locally-generated room metronome click channel (nil = off). metronomeOn
 	// mirrors (metronome != nil) so the emit loop skips it lock-free when off.
 	metronome   *metronomeStream
 	metronomeOn atomic.Bool
@@ -547,6 +547,11 @@ func (e *linkAudioEngine) CaptureChannels() []CaptureChannelInfo {
 		if e.own.Own(id, ch.peerName == e.peerName, ch.name) {
 			continue
 		}
+		// Same guard by name prefix — excludes any WAIL peer's room channels,
+		// not just our own (reconcileChannels applies the identical rule).
+		if strings.HasPrefix(ch.name, affinity.RoomChannelPrefix) {
+			continue
+		}
 		out = append(out, CaptureChannelInfo{
 			ChannelID: id, Name: ch.name, PeerName: ch.peerName, Enabled: ch.enabled,
 			StreamID: ch.streamID,
@@ -708,6 +713,12 @@ func (e *linkAudioEngine) reconcileChannels(chans []abllink.Channel) {
 		// by peer name alone is too blunt — a third-party publisher may share
 		// our peer name — so classify by minted sink names and learned IDs.
 		if e.own.Own(id, c.PeerName == e.peerName, c.Name) {
+			continue
+		}
+		// Never surface WAIL room-published channels (our own republished
+		// streams, the metronome, or *another* WAIL peer's) as capture inputs —
+		// they carry already-relayed room audio, so capturing one re-relays it.
+		if strings.HasPrefix(c.Name, affinity.RoomChannelPrefix) {
 			continue
 		}
 		seen[id] = true
@@ -1392,7 +1403,8 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, tempo, bpi float6
 	}
 }
 
-// SetMetronome publishes or tears down the "WAIL Metronome" Link Audio channel.
+// SetMetronome publishes or tears down the room metronome Link Audio channel
+// (named "WAIL · {peer} · Metronome" so it carries the room-channel prefix).
 // The sink is registered as our own so capture discovery won't offer it back as
 // an input (a feedback loop). No-op if already in the requested state.
 func (e *linkAudioEngine) SetMetronome(enabled bool) {
@@ -1402,7 +1414,7 @@ func (e *linkAudioEngine) SetMetronome(enabled bool) {
 		if e.metronome != nil {
 			return
 		}
-		const name = "WAIL Metronome"
+		name := affinity.FormatRoomChannelName(e.peerName, "Metronome")
 		e.own.Published(name)
 		e.metronome = &metronomeStream{
 			sink:     e.link.NewSink(name, engineInternalRate*2),

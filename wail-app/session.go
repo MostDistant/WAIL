@@ -540,9 +540,9 @@ func sessionLoop(
 					boundaryCh := make(chan IntervalBoundaryInfo, 4)
 					metronomeSendBoundaryCh = boundaryCh
 					localSendStreams[metronomeBroadcastStreamID] = true
-					// Plain name: FormatName prepends the peer, so receivers show
-					// "{peer} · WAIL Metronome" rather than a doubled-up label.
-					localStreamNames[metronomeBroadcastStreamID] = "WAIL Metronome"
+					// Plain "Metronome": the republish path prepends "WAIL · {peer} · ",
+					// so receivers show "WAIL · {peer} · Metronome" (no doubled "WAIL").
+					localStreamNames[metronomeBroadcastStreamID] = "Metronome"
 					go MetronomeSenderTask(metCtx, metronomeBroadcastStreamID, sendWaif, boundaryCh)
 					logInfo("[metronome] broadcast to room started")
 				} else {

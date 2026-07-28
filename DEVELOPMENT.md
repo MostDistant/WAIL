@@ -90,7 +90,7 @@ For measuring a peer's rhythmic phase offset against the room grid (the
   (`internal/offset`, computed from labeled WAIF frames — exact, no envelope
   matching). |offset| > 25ms is highlighted. A peer performing late because
   their monitoring path is latent shows it directly.
-- **Probe**: `linkaudio-probe -offset-ref "WAIL Metronome"` cross-correlates
+- **Probe**: `linkaudio-probe -offset-ref "Metronome"` cross-correlates
   each channel's envelope against the reference metronome (best for
   same-period rhythmic content), and `-offset-dump <dir>` writes per-channel
   RMS envelopes as CSVs for offline analysis.
