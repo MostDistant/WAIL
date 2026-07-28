@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.19.3 (2026-07-28)
+
+### Fixes
+
+- docs: point DAWs without Link Audio at the WAIL Link Bridge plugins (#485)
+
 ## 3.19.2 (2026-07-28)
 
 ### Fixes
