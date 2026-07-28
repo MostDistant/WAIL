@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.19.0 (2026-07-28)
+
+### Features
+
+- simplify the WAIL GUI for a musician-first flow (#479)
+
+### Fixes
+
+- prefix the Link Bridge plugins with WAIL (#477)
+
 ## 3.18.0 (2026-07-26)
 
 ### Features
