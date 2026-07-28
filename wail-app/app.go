@@ -32,7 +32,7 @@ type App struct {
 	identity     string
 	streamNames  map[uint16]string
 	dataDir      string
-	instance     int      // per-instance offset; sets the CLAP IPC port (9191 + instance)
+	instance     int      // per-instance offset for multi-app-on-one-machine runs
 	pluginErrors []string // CLAP auto-install errors from startup, surfaced to the UI
 	fileLog      *RotatingFileWriter
 	wsLog        *WsLogWriter
@@ -55,7 +55,7 @@ func NewApp(instance int) *App {
 	streamNames := LoadStreamNames(dataDir)
 
 	// Auto-install the bundled CLAP plugins into the user's CLAP directory on first
-	// launch (ADR-0005). They ship in the release archive, so this is a zero-friction
+	// launch (ADR-0007). They ship in the release archive, so this is a zero-friction
 	// path for DAWs without Link Audio; any errors surface via GetPluginInstallErrors
 	// so the UI can point at the manual-copy fallback.
 	var pluginErrors []string
@@ -205,7 +205,6 @@ func (a *App) JoinRoom(
 		Quantum:        actualQuantum,
 		Recording:      recording,
 		StreamCount:    actualStreamCount,
-		IPCPort:        uint16(9191 + a.instance),
 		LogSource:      a.logSource(),
 		CaptureRestore: a.captureEnabled,
 		OnCaptureEnabledChanged: func(keys []CaptureChannelKey) {

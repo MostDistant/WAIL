@@ -105,16 +105,10 @@ type linkAudioEngine struct {
 	tempoBPM float64
 	dumpDir  string // guarded by mu; current dump session directory
 
-	capture      map[string]*captureChannel // by channel-id hex (or "ipc:N" for plugin sends)
+	capture      map[string]*captureChannel // by channel-id hex
 	emit         map[affinity.Key]*emitStream
 	own          *affinity.OwnChannels // our published sinks, for discovery exclusion
 	nextStreamID uint16
-	pluginEpoch  uint64 // monotonic; stamps each plugin (re)connection's channel
-
-	// recvPool fans decoded remote audio to connected CLAP Recv plugins over IPC
-	// (ADR-0005). nil until the IPC server sets it; each emit stream then also
-	// carries an ipcEmitSink. Guarded by mu.
-	recvPool *IPCWriterPool
 
 	// stopping is set under mu before Stop's wg.Wait, and checked before any wg.Add
 	// (startDrainLocked). It stops a late AddPluginSource / SetCaptureEnabled from
@@ -147,44 +141,6 @@ const (
 	cushionMinMs = 100
 	cushionMaxMs = 500
 )
-
-// ipcLeadMs* — how far ahead of its stamped beat a chunk may be *delivered* to
-// a recv plugin (FIFO sink): enough to cover emit-tick and socket jitter so the
-// plugin's ring never starves, but no more, because the plugin renders arrival
-// order — delivery lead IS playback offset (this replaced the emit cushion on
-// the plugin path, which made all remote audio play ~cushion late).
-//
-// The floor is set by the DAW's pull: process() takes a whole block per call
-// and pads silence when the ring holds less, so the lead must cover ~DAW block
-// + app chunk + jitter — ≈10ms at 128-sample buffers, ≈18ms at 512. The 20ms
-// default is safe through 512-sample blocks; WAIL_IPC_LEAD_MS lets a small-
-// buffer setup tighten it (per listener: each side's local app feeds its own
-// plugin). The clamp floor keeps experiments out of the guaranteed-crackle
-// zone. Sample-accurate alignment regardless of block size requires the plugin
-// to render against the host transport instead of FIFO — the proper fix.
-const (
-	ipcLeadMsDefault = 20
-	ipcLeadMsMin     = 5   // one emit tick — below this even 128-sample-block DAWs starve
-	ipcLeadMsMax     = 100 // the old cushion-sized offset; no setup should want more
-)
-
-// resolveIPCLeadMs reads WAIL_IPC_LEAD_MS (clamped) or returns the default.
-func resolveIPCLeadMs() int {
-	ms := ipcLeadMsDefault
-	src := "default"
-	if v := os.Getenv("WAIL_IPC_LEAD_MS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			ms = min(max(n, ipcLeadMsMin), ipcLeadMsMax)
-			src = "WAIL_IPC_LEAD_MS"
-		}
-	}
-	log.Printf("[audio] ipc delivery lead: %dms (%s)", ms, src)
-	return ms
-}
-
-// ipcLeadMs resolves the lead once (first emit tick) — the env var is process
-// configuration, and per-tick resolution would spam the log line above.
-var ipcLeadMs = sync.OnceValue(resolveIPCLeadMs)
 
 func clampCushionMs(ms int) int   { return min(max(ms, cushionMinMs), cushionMaxMs) }
 func cushionFramesFor(ms int) int { return engineInternalRate * ms / 1000 }
@@ -256,10 +212,6 @@ type captureChannel struct {
 	peerName string
 	streamID uint16
 	enabled  bool
-	// epoch distinguishes successive plugin connections that reuse a channel key
-	// ("ipc:N"): RemovePluginSource only tears down if its epoch still matches, so a
-	// dropped connection's late cleanup can't nuke a newer reconnection's channel.
-	epoch uint64
 
 	source captureSource
 	asm    *capture.Assembler
@@ -291,9 +243,8 @@ type emitStream struct {
 	dec      *IntervalDecoder
 	reasm    *emit.Reassembler
 	sched    *playout.Scheduler
-	// sinks are this stream's published outputs: the Link Audio channel always,
-	// plus one IPC sink per attached CLAP recv plugin (ADR-0005). sinks[0] is the
-	// Link Audio sink — the write-rejected metric anchors on it. The emit map keyed
+	// sinks are this stream's published outputs. sinks[0] is the Link Audio
+	// sink — the write-rejected metric anchors on it. The emit map keyed
 	// by affinity.Key IS the affinity (a reconnecting identity reuses this stream +
 	// channel), so no separate registry is needed.
 	sinks []emitSink
@@ -739,12 +690,8 @@ func (e *linkAudioEngine) reconcileChannels(chans []abllink.Channel) {
 			ch.peerName = c.PeerName
 		}
 	}
-	// Drop channels that disappeared. Plugin sends ("ipc:N") aren't Link-discovered
-	// — they're managed via Add/RemovePluginSource — so never reap them here.
+	// Drop channels that disappeared.
 	for id, ch := range e.capture {
-		if strings.HasPrefix(id, "ipc:") {
-			continue
-		}
 		if !seen[id] {
 			e.stopCaptureLocked(ch)
 			delete(e.capture, id)
@@ -768,10 +715,9 @@ func (e *linkAudioEngine) startCaptureLocked(ch *captureChannel) {
 }
 
 // startDrainLocked wires an already-built captureSource into the
-// encode→pace→send path and launches its drain goroutine. Shared by Link Audio
-// channels and plugin sends (ADR-0005). It returns false — leaving ch disabled and
-// the source unadopted, so the caller can release it — if the encoder fails to
-// init. mu held.
+// encode→pace→send path and launches its drain goroutine. It returns false —
+// leaving ch disabled and the source unadopted, so the caller can release it —
+// if the encoder fails to init. mu held.
 func (e *linkAudioEngine) startDrainLocked(ch *captureChannel, src captureSource, channels int) bool {
 	if ch.enabled || e.stopping {
 		return false
@@ -961,11 +907,7 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		}
 		label := streamLabel(streamName, f.StreamID)
 		sinkName := affinity.FormatRoomChannelName(displayName, label)
-		// Publish to Link Audio always; also to any connected CLAP Recv plugins.
 		sinks := []emitSink{e.link.NewSink(sinkName, engineInternalRate*2)}
-		if e.recvPool != nil {
-			sinks = append(sinks, newIPCEmitSink(e.recvPool, key.Identity, key.Stream))
-		}
 		st = &emitStream{
 			key:             key,
 			channels:        channels,
@@ -1197,11 +1139,6 @@ func (e *linkAudioEngine) emitLoop() {
 		case <-t.C:
 			e.link.CaptureAppSessionState(ss)
 			clockMicros := e.link.ClockMicros()
-			// Bridge offset between the Link session timeline and the machine
-			// monotonic clock the plugins read. The session timeline is offset
-			// and filtered (converges across peers), so this is measured fresh
-			// every tick; per-tick drift is sub-µs.
-			monoD := clockMicros - abllink.MonoMicros()
 
 			e.mu.Lock()
 			cfg := e.cfg
@@ -1238,11 +1175,7 @@ func (e *linkAudioEngine) emitLoop() {
 				lastLocalIdx = localIdx
 				haveLast = true
 			}
-			// playAt converts a chunk's stamped Link beat into the monotonic-µs
-			// instant its first frame should play on this machine — the stamp a
-			// transport-aware recv plugin renders against its host sample clock.
-			playAt := func(beat float64) int64 { return ss.TimeAtBeat(beat, bpi) - monoD }
-			e.topUpSinks(ss, tempo, bpi, localBeat, playAt)
+			e.topUpSinks(ss, bpi, localBeat)
 			// The metronome runs on the local Link grid, independent of the
 			// labeler that gates onBoundary — it works before a room anchor.
 			if e.metronomeOn.Load() {
@@ -1359,22 +1292,16 @@ func (st *emitStream) shiftedInterval(idx int64) []int16 {
 
 // topUpSinks advances each stream's feeder to playhead+cushion, writing paced
 // chunks into its sink (multiple chunks per tick when catching up after a stall),
-// then releases due chunks to FIFO sinks (recv plugins) at the playhead.
-func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, tempo, bpi float64, localBeat float64, playAt func(beat float64) int64) {
+func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, bpi float64, localBeat float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	leadBeats := float64(ipcLeadMs()) * tempo / 60000 // 0 at non-positive tempo: release exactly at the beat
-	if leadBeats < 0 {
-		leadBeats = 0
-	}
 	for _, st := range e.emit {
 		if len(st.sinks) == 0 {
 			continue
 		}
 		st.feeder.Advance(localBeat, func(samples []int16, beat float64) {
 			frames := len(samples) / st.channels
-			// Fan the same chunk to every sink (Link Audio + any recv-plugin IPC
-			// sinks). sinks[0] is the Link Audio channel; anchor the write-rejected
+			// sinks[0] is the Link Audio channel; anchor the write-rejected
 			// metric on it so its meaning is unchanged from the single-sink path.
 			linkOK := false
 			for i, sk := range st.sinks {
@@ -1393,13 +1320,6 @@ func (e *linkAudioEngine) topUpSinks(ss *abllink.SessionState, tempo, bpi float6
 		ev, fr := st.feeder.Underruns()
 		st.sinkUnderrunEvents.Store(ev)
 		st.sinkUnderrunFrames.Store(fr)
-		// FIFO sinks (recv plugins) get their queued chunks as they come due —
-		// delivery time is play time on that path.
-		for _, sk := range st.sinks {
-			if f, ok := sk.(fifoFlusher); ok {
-				f.Flush(localBeat, leadBeats, playAt)
-			}
-		}
 	}
 }
 

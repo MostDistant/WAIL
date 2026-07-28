@@ -79,12 +79,12 @@ func TestInstallPluginsFreshInstall(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	pluginDir := t.TempDir()
-	makeFakeBundle(t, pluginDir, "wail-send.clap")
+	makeFakeBundle(t, pluginDir, "wail-linkbridge-send.clap")
 
 	if errs := InstallPluginsIfMissing(pluginDir); len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
-	dest := filepath.Join(clapDestDir(t), "wail-send.clap")
+	dest := filepath.Join(clapDestDir(t), "wail-linkbridge-send.clap")
 	info, err := os.Lstat(dest)
 	if err != nil {
 		t.Fatalf("dest not installed: %v", err)
@@ -92,7 +92,7 @@ func TestInstallPluginsFreshInstall(t *testing.T) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		t.Fatalf("dest should be a real directory, got mode %v", info.Mode())
 	}
-	if _, err := os.Stat(filepath.Join(dest, "Contents", "MacOS", "wail-send")); err != nil {
+	if _, err := os.Stat(filepath.Join(dest, "Contents", "MacOS", "wail-linkbridge-send")); err != nil {
 		t.Fatalf("bundle contents missing: %v", err)
 	}
 }
@@ -104,16 +104,16 @@ func TestInstallPluginsReplacesBrokenSymlink(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	pluginDir := t.TempDir()
-	makeFakeBundle(t, pluginDir, "wail-send.clap")
+	makeFakeBundle(t, pluginDir, "wail-linkbridge-send.clap")
 
 	destDir := clapDestDir(t)
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	dest := filepath.Join(destDir, "wail-send.clap")
+	dest := filepath.Join(destDir, "wail-linkbridge-send.clap")
 	// Relative symlink, broken from the CLAP folder's perspective — exactly
 	// what the buggy script produced (../Cellar/wail/<ver>/lib/...).
-	if err := os.Symlink(filepath.Join("..", "Cellar", "wail", "0.0.0", "lib", "wail-send.clap"), dest); err != nil {
+	if err := os.Symlink(filepath.Join("..", "Cellar", "wail", "0.0.0", "lib", "wail-linkbridge-send.clap"), dest); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,7 +127,7 @@ func TestInstallPluginsReplacesBrokenSymlink(t *testing.T) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		t.Fatal("broken symlink was not replaced with a real copy")
 	}
-	if _, err := os.Stat(filepath.Join(dest, "Contents", "MacOS", "wail-send")); err != nil {
+	if _, err := os.Stat(filepath.Join(dest, "Contents", "MacOS", "wail-linkbridge-send")); err != nil {
 		t.Fatalf("bundle contents missing: %v", err)
 	}
 }
