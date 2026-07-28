@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.19.2 (2026-07-28)
+
+### Fixes
+
+- hash room passwords with bcrypt instead of raw SHA-256 (#483)
+
 ## 3.19.1 (2026-07-28)
 
 ### Fixes
