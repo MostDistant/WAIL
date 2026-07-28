@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.19.1 (2026-07-28)
+
+### Fixes
+
+- install the Link Bridge plugins on Homebrew (#481)
+
 ## 3.19.0 (2026-07-28)
 
 ### Features
