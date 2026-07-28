@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
@@ -388,9 +391,48 @@ func openDB() *sql.DB {
 	return db
 }
 
-func hashPassword(pw string) string {
-	h := sha256.Sum256([]byte(pw))
-	return hex.EncodeToString(h[:])
+// bcryptCost is deliberately above the library default: joins are rare, so
+// ~250ms per attempt costs a musician nothing and makes offline cracking of a
+// leaked rooms table expensive.
+const bcryptCost = 12
+
+// bcryptInput folds passwords past bcrypt's 72-byte input limit through
+// SHA-256 so long ones are neither rejected nor silently truncated. The
+// base64 encoding keeps the result free of NUL bytes.
+func bcryptInput(pw string) []byte {
+	if len(pw) <= 72 {
+		return []byte(pw)
+	}
+	sum := sha256.Sum256([]byte(pw))
+	return []byte(base64.RawStdEncoding.EncodeToString(sum[:]))
+}
+
+func hashPassword(pw string) (string, error) {
+	h, err := bcrypt.GenerateFromPassword(bcryptInput(pw), bcryptCost)
+	if err != nil {
+		return "", err
+	}
+	return string(h), nil
+}
+
+// isLegacySHA256Hash reports whether stored is a pre-bcrypt unsalted SHA-256
+// digest, i.e. a bare 64-char hex string.
+func isLegacySHA256Hash(stored string) bool {
+	if len(stored) != hex.EncodedLen(sha256.Size) {
+		return false
+	}
+	_, err := hex.DecodeString(stored)
+	return err == nil
+}
+
+// checkPassword verifies pw against a stored room hash. legacy reports that
+// the stored digest is an old SHA-256 one and should be upgraded to bcrypt.
+func checkPassword(stored, pw string) (ok, legacy bool) {
+	if isLegacySHA256Hash(stored) {
+		sum := sha256.Sum256([]byte(pw))
+		return subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(stored)) == 1, true
+	}
+	return bcrypt.CompareHashAndPassword([]byte(stored), bcryptInput(pw)) == nil, false
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +486,23 @@ func (h *hub) deleteRoom(name string) {
 	}
 }
 
+// upgradeRoomHash re-hashes a room's legacy SHA-256 password with bcrypt after
+// a successful join. The oldHash guard keeps a concurrent join from clobbering
+// an upgrade that already landed.
+func (h *hub) upgradeRoomHash(roomName, oldHash, pw string) {
+	newHash, err := hashPassword(pw)
+	if err != nil {
+		log.Printf("upgrade password hash for room %s: %v", roomName, err)
+		return
+	}
+	if _, err := h.db.Exec("UPDATE rooms SET password_hash = ? WHERE room = ? AND password_hash = ?",
+		newHash, roomName, oldHash); err != nil {
+		log.Printf("upgrade password hash for room %s: %v", roomName, err)
+		return
+	}
+	log.Printf("upgraded room %s password hash to bcrypt", roomName)
+}
+
 func (h *hub) archiveSession(roomName string, s *session) {
 	h.completedMu.Lock()
 	defer h.completedMu.Unlock()
@@ -481,9 +540,13 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 		roomExists = true
 	}
 	if roomExists && storedHash.Valid && storedHash.String != "" {
-		if hashPassword(msg.Password) != storedHash.String {
+		ok, legacy := checkPassword(storedHash.String, msg.Password)
+		if !ok {
 			c.sendJSON(map[string]any{"type": "join_error", "code": "unauthorized"})
 			return "", "", 0
+		}
+		if legacy {
+			h.upgradeRoomHash(roomName, storedHash.String, msg.Password)
 		}
 	}
 
@@ -498,7 +561,12 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 	if !roomExists {
 		pwHash := ""
 		if msg.Password != "" {
-			pwHash = hashPassword(msg.Password)
+			var err error
+			if pwHash, err = hashPassword(msg.Password); err != nil {
+				log.Printf("hash password for room %s: %v", roomName, err)
+				c.sendJSON(map[string]any{"type": "join_error", "code": "server_error"})
+				return "", "", 0
+			}
 		}
 		h.db.Exec("INSERT OR IGNORE INTO rooms (room, password_hash, created_at) VALUES (?, ?, ?)", roomName, pwHash, time.Now().Unix())
 	}
