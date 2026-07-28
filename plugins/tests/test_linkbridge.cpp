@@ -530,8 +530,11 @@ TEST(linkbridge_recv_resubscribes_after_reactivate) {
 
    CHECK_MSG(inst.reactivate(48000.0, kBlock, kBlock), "re-activate failed");
 
+   // Re-activate builds a *fresh* Link peer, so the publisher has to rediscover
+   // it while the torn-down peer's session membership ages out — slower than the
+   // first join, and much slower on a CI runner's virtualised network.
    heard = false;
-   pumpUntil([&] { return heard; }, 20);
+   pumpUntil([&] { return heard; }, getenv("GITHUB_ACTIONS") ? 60 : 20);
    CHECK_MSG(heard, "silent after re-activate — slot never resubscribed");
 
    lb_sink_destroy(room);
