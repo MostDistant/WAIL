@@ -127,6 +127,11 @@ func (r *PeerRegistry) Remove(peerID string) {
 func (r *PeerRegistry) AssignSlot(peerID string, streamID uint16) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.assignSlotLocked(peerID, streamID)
+}
+
+// assignSlotLocked is AssignSlot's body. mu held.
+func (r *PeerRegistry) assignSlotLocked(peerID string, streamID uint16) int {
 	peer, ok := r.peers[peerID]
 	if !ok {
 		return -1
@@ -237,10 +242,31 @@ func (r *PeerRegistry) FlushAudioRecvPrev() {
 	}
 }
 
+// AdoptIdentity records the persistent identity a peer announced in its Hello
+// and migrates any slots still keyed by its transient peer ID over to it. One
+// lock for the pair: separately they raced a concurrent Remove.
+//
+// It deliberately assigns no slot. A slot means "this peer sent audio on this
+// stream" and the GUI renders one row per slot, so claiming stream 0 up front
+// invented an unnamed channel for every peer that never sends on it.
+func (r *PeerRegistry) AdoptIdentity(peerID, identity string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p, ok := r.peers[peerID]; ok {
+		p.Identity = &identity
+	}
+	r.rekeyPeerSlotsLocked(peerID, identity)
+}
+
 // RekeyPeerSlots migrates slots from peerID key to identity key.
 func (r *PeerRegistry) RekeyPeerSlots(peerID, identity string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.rekeyPeerSlotsLocked(peerID, identity)
+}
+
+// rekeyPeerSlotsLocked is RekeyPeerSlots' body. mu held.
+func (r *PeerRegistry) rekeyPeerSlotsLocked(peerID, identity string) {
 	for i := range r.slots {
 		if r.slots[i].Occupied && r.slots[i].ClientID == peerID {
 			r.slots[i].ClientID = identity

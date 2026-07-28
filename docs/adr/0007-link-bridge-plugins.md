@@ -70,10 +70,11 @@ bridge ships in parallel (see Consequences).
   reach the LAN Link session from inside Bitwig. With the gate cleared, both PCM
   bundles, their loopback IPC, and the app-side IPC stack were removed. Reopen if a
   DAW turns up that blocks a plugin's UDP.
-- **The Link Bridge pair is deliberately stateless** — no `clap.state`, no
-  `clap.params`. Send derives its channel name from `clap.track-info` and Recv derives
-  its ports from LAN discovery, so a project file has nothing to persist. This is why
-  ADR-0005's `test_state` roundtrip harness was retired rather than re-pointed.
+- **The Link Bridge pair carries no configuration** — no `clap.params`. Send derives
+  its channel name from `clap.track-info` and Recv derives its ports from LAN
+  discovery, so a project file has nothing of ours to persist. Both still implement
+  `clap.state` with a version marker: Bitwig refuses to save a project containing a
+  plugin that cannot save state, and Bitwig is this ADR's target host.
 - **Pillar 6 narrows** (CONTEXT.md): room intelligence (codec, intervals, relay, room
   clock) never enters any plugin; Link Audio rendering is legitimately plugin-resident.
 - **A channel-name semantic enters the protocol surface**: `WAIL · ` means

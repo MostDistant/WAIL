@@ -2,39 +2,148 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 )
 
 const streamNamesFilename = "stream_names.json"
 
-// LoadStreamNames loads stream names from disk. Returns empty map on any failure.
-func LoadStreamNames(dataDir string) map[uint16]string {
-	path := filepath.Join(dataDir, streamNamesFilename)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return make(map[uint16]string)
-	}
+// StreamNameEntry is one persisted rename, keyed the way a user thinks of the
+// channel rather than by stream index.
+type StreamNameEntry struct {
+	CaptureChannelKey
+	Name string `json:"name"`
+}
 
-	var stringMap map[string]string
-	if err := json.Unmarshal(data, &stringMap); err != nil {
-		log.Printf("[stream_names] Failed to parse %s: %v", streamNamesFilename, err)
-		return make(map[uint16]string)
-	}
+// StreamNameStore is the persisted rename set. Stream indices are handed out in
+// Link discovery order (they are not stable across restarts), so names key on
+// (peer name, channel name) — the same reasoning as CaptureChannelKey. Legacy
+// holds an index-keyed file written before that change; each entry is adopted
+// and re-keyed the first time its index turns up as a live channel.
+type StreamNameStore struct {
+	ByChannel []StreamNameEntry
+	Legacy    map[uint16]string
+}
 
-	names := make(map[uint16]string, len(stringMap))
-	for k, v := range stringMap {
-		var idx uint16
-		if _, err := fmt.Sscanf(k, "%d", &idx); err == nil {
-			names[idx] = v
+func (s *StreamNameStore) nameFor(k CaptureChannelKey) (string, bool) {
+	for _, e := range s.ByChannel {
+		if e.CaptureChannelKey == k {
+			return e.Name, true
 		}
 	}
-	if len(names) > 0 {
-		log.Printf("[stream_names] Loaded %d stream names", len(names))
+	return "", false
+}
+
+func (s *StreamNameStore) put(k CaptureChannelKey, name string) {
+	for i := range s.ByChannel {
+		if s.ByChannel[i].CaptureChannelKey == k {
+			s.ByChannel[i].Name = name
+			return
+		}
 	}
-	return names
+	s.ByChannel = append(s.ByChannel, StreamNameEntry{CaptureChannelKey: k, Name: name})
+}
+
+func (s *StreamNameStore) remove(k CaptureChannelKey) {
+	for i := range s.ByChannel {
+		if s.ByChannel[i].CaptureChannelKey == k {
+			s.ByChannel = append(s.ByChannel[:i], s.ByChannel[i+1:]...)
+			return
+		}
+	}
+}
+
+// Entries is the full set to persist. Saving is a whole-file overwrite, so this
+// must be the union the store holds — not just the channels live right now, or
+// a session with one DAW open would erase every name belonging to another.
+func (s *StreamNameStore) Entries() []StreamNameEntry { return s.ByChannel }
+
+// Reconcile folds this session's overrides back into the store: a name set or
+// changed is recorded, and a name *cleared* is forgotten. Only live channels
+// are considered — an absent channel's name is untouched, since "not on the LAN
+// today" must never read as "the user deleted it".
+func (s *StreamNameStore) Reconcile(channels []CaptureChannelInfo, overrides map[uint16]string) {
+	for _, cc := range channels {
+		key := CaptureChannelKey{PeerName: cc.PeerName, ChannelName: cc.Name}
+		if name, ok := overrides[cc.StreamID]; ok {
+			s.put(key, name)
+		} else {
+			s.remove(key)
+		}
+	}
+}
+
+// LoadStreamNames loads persisted stream names. Returns an empty store on any
+// failure, and falls back to reading the pre-re-key index-keyed format.
+func LoadStreamNames(dataDir string) *StreamNameStore {
+	store := &StreamNameStore{}
+	data, err := os.ReadFile(filepath.Join(dataDir, streamNamesFilename))
+	if err != nil {
+		// A missing file is the first run. Anything else (permissions, EIO) looks
+		// identical from here and would silently drop every name the user set.
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("[stream_names] Failed to read %s: %v", streamNamesFilename, err)
+		}
+		return store
+	}
+
+	if err := json.Unmarshal(data, &store.ByChannel); err == nil {
+		if len(store.ByChannel) > 0 {
+			log.Printf("[stream_names] Loaded %d stream names", len(store.ByChannel))
+		}
+		return store
+	}
+
+	// Pre-re-key format: a bare object of stream index → name.
+	var byIndex map[string]string
+	if err := json.Unmarshal(data, &byIndex); err != nil {
+		log.Printf("[stream_names] Failed to parse %s: %v", streamNamesFilename, err)
+		return store
+	}
+	store.Legacy = make(map[uint16]string, len(byIndex))
+	for k, v := range byIndex {
+		var idx uint16
+		if _, err := fmt.Sscanf(k, "%d", &idx); err == nil {
+			store.Legacy[idx] = v
+		}
+	}
+	if len(store.Legacy) > 0 {
+		log.Printf("[stream_names] Loaded %d stream names in the old index-keyed format; "+
+			"each is re-keyed to its channel the first time that channel appears", len(store.Legacy))
+	}
+	return store
+}
+
+// resolveStreamNames folds persisted names into this session's override map,
+// which is keyed by the stream index the engine happened to mint this run. It
+// never clobbers an override already set (a rename made this session wins), and
+// it adopts + re-keys any legacy index-keyed entry whose index is now live.
+// Reports whether anything changed.
+func resolveStreamNames(channels []CaptureChannelInfo, store *StreamNameStore, overrides map[uint16]string) bool {
+	changed := false
+	for _, cc := range channels {
+		if _, ok := overrides[cc.StreamID]; ok {
+			continue
+		}
+		key := CaptureChannelKey{PeerName: cc.PeerName, ChannelName: cc.Name}
+		if name, ok := store.nameFor(key); ok {
+			overrides[cc.StreamID] = name
+			changed = true
+			continue
+		}
+		if name, ok := store.Legacy[cc.StreamID]; ok {
+			overrides[cc.StreamID] = name
+			delete(store.Legacy, cc.StreamID)
+			store.put(key, name)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // effectiveStreamNames is the map receivers should label our streams with:
@@ -61,16 +170,15 @@ func effectiveStreamNames(captureChannels []CaptureChannelInfo, overrides map[ui
 }
 
 // SaveStreamNames persists stream names to disk. Logs on failure, never panics.
-func SaveStreamNames(dataDir string, names map[uint16]string) {
+func SaveStreamNames(dataDir string, entries []StreamNameEntry) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		log.Printf("[stream_names] Failed to create data dir: %v", err)
 		return
 	}
-	stringMap := make(map[string]string, len(names))
-	for k, v := range names {
-		stringMap[fmt.Sprintf("%d", k)] = v
+	if entries == nil {
+		entries = []StreamNameEntry{}
 	}
-	data, err := json.MarshalIndent(stringMap, "", "  ")
+	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		log.Printf("[stream_names] Failed to serialize: %v", err)
 		return
@@ -80,3 +188,27 @@ func SaveStreamNames(dataDir string, names map[uint16]string) {
 		log.Printf("[stream_names] Failed to write %s: %v", streamNamesFilename, err)
 	}
 }
+
+// streamNameBroadcaster owns the "have the peers been told?" half of the
+// StreamNames sync. It records the last map the relay *accepted*, not the last
+// one we tried to send: a sync dropped on a full outgoing queue is silent, and
+// because the map itself hasn't changed nothing ever retries it — receivers
+// would sit on "stream N" for the rest of the session.
+type streamNameBroadcaster struct{ sent map[uint16]string }
+
+// Sync hands eff to send when it differs from the last accepted map. send
+// reports whether the relay took the message; a refusal leaves the record
+// untouched, so the next status tick retries.
+func (b *streamNameBroadcaster) Sync(eff map[uint16]string, send func(map[uint16]string) bool) {
+	if maps.Equal(eff, b.sent) {
+		return
+	}
+	if !send(eff) {
+		return
+	}
+	b.sent = maps.Clone(eff)
+}
+
+// Reset forgets the record so the next Sync resends unchanged names — a peer
+// that just joined has never heard them.
+func (b *streamNameBroadcaster) Reset() { b.sent = nil }

@@ -207,3 +207,38 @@ func TestNoIdentityActivePeersExcludesIdentified(t *testing.T) {
 		t.Fatal("identified peers must be excluded")
 	}
 }
+
+// A slot means "this peer sent audio on this stream" — it is what the GUI
+// renders as a channel row. Creating one at Hello time invents a stream 0 for
+// peers that only ever send on 0x8000+ or 0xFF01 (the broadcast metronome),
+// and that row has no name, so the peers tree renders the literal "stream 0".
+func TestAdoptIdentityDoesNotInventAChannel(t *testing.T) {
+	reg := NewPeerRegistry()
+	reg.Add("peer1", strPtr("Alice"))
+
+	reg.AdoptIdentity("peer1", "alice-id")
+
+	if got := reg.ActiveMappings(); len(got) != 0 {
+		t.Fatalf("Hello must not create a channel slot, got %+v", got)
+	}
+}
+
+// Dropping the eager AssignSlot must not take slot affinity with it: a peer
+// that actually sends still has to reclaim its old slot after reconnecting
+// under a new peer id.
+func TestAdoptIdentityStillReclaimsSlotAffinityOnReconnect(t *testing.T) {
+	reg := NewPeerRegistry()
+	reg.Add("peer1", strPtr("Alice"))
+	reg.AdoptIdentity("peer1", "alice-id")
+	if slot := reg.AssignSlot("peer1", 0x8000); slot != 0 {
+		t.Fatalf("first send should take slot 0, got %d", slot)
+	}
+
+	reg.Remove("peer1")
+
+	reg.Add("peer2", strPtr("Alice"))
+	reg.AdoptIdentity("peer2", "alice-id")
+	if slot := reg.AssignSlot("peer2", 0x8000); slot != 0 {
+		t.Fatalf("reconnect should reclaim slot 0 via affinity, got %d", slot)
+	}
+}

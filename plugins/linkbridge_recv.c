@@ -1,10 +1,10 @@
 // Link Bridge Recv (ADR-0007) — a 16-port Link Audio receiver for WAIL room
 // streams. Subscribes only to room-published channels (names starting with
 // "WAIL " — remote streams "WAIL · {peer} · {stream}" and the WAIL Metronome),
-// one port per channel, auto-assigned and live-renamed (first-wins dedupe on
-// the channel name, so two WAILs on one LAN publishing the same room don't
-// double a port). A peer joining the jam appears as a named sub-chain with no
-// user action.
+// one port per channel, auto-assigned and live-renamed. Dedupe is first-wins on
+// channel id (which survives the app's in-place rename), falling back to the
+// channel name so two WAILs on one LAN publishing the same room don't double a
+// port. A peer joining the jam appears as a named sub-chain with no user action.
 //
 // Rendering is stamp-aligned: per-slot anchor ring (chunk start frame ↔ begin
 // beat / play-at µs), pad when early, skip when late, 32-frame deadband. Two
@@ -83,6 +83,7 @@ typedef struct {
    wail_mutex   names_mu;
    char         name[LBR_SLOTS][CLAP_NAME_SIZE];
    _Atomic bool names_dirty;
+   bool logged_no_rescan; // main thread only
 
    wail_thread  mgr_thread;
    _Atomic bool running;
@@ -316,15 +317,36 @@ static void *mgr_main(void *arg) {
          }
       }
 
-      // Assign new room-published channels (first-wins dedupe on the name).
+      // Assign new room-published channels. Dedupe in two tiers: the channel id
+      // is the identity that survives a rename (the app renames a room sink in
+      // place once StreamNames arrives), so an id match is the SAME channel —
+      // follow its new name. A name match with a *different* id is a second
+      // WAIL republishing the same room stream on this LAN: first wins, don't
+      // double the port. Two passes, because a lower-indexed name match must
+      // not shadow a higher-indexed id match.
       for (size_t c = 0; c < nch; c++) {
          if (strncmp(chans[c].name, LBR_NAME_PREFIX, strlen(LBR_NAME_PREFIX)) != 0) continue;
-         bool have = false;
-         for (int i = 0; i < LBR_SLOTS; i++)
-            if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire) &&
-                strcmp(self->slots[i].chan_name, chans[c].name) == 0)
-               have = true;
-         if (have) continue;
+         int idSlot = -1, nameSlot = -1;
+         for (int i = 0; i < LBR_SLOTS; i++) {
+            if (!atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire)) continue;
+            if (self->slots[i].channel_id == chans[c].id_u64) {
+               idSlot = i;
+               break;
+            }
+            if (nameSlot < 0 && strcmp(self->slots[i].chan_name, chans[c].name) == 0) nameSlot = i;
+         }
+         if (idSlot >= 0) {
+            if (strcmp(self->slots[idSlot].chan_name, chans[c].name) != 0) {
+               lbr_log(self, "renamed: \"%s\" → \"%s\" (port %d)", self->slots[idSlot].chan_name,
+                       chans[c].name, idSlot + 1);
+               snprintf(self->slots[idSlot].chan_name, sizeof(self->slots[idSlot].chan_name), "%s",
+                        chans[c].name);
+               char disp[128];
+               set_port_name(self, idSlot, display_name(chans[c].name, disp, sizeof(disp)));
+            }
+            continue;
+         }
+         if (nameSlot >= 0) continue;
          for (int i = 0; i < LBR_SLOTS; i++) {
             if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire)) continue;
             lbr_slot *s = &self->slots[i];
@@ -337,7 +359,15 @@ static void *mgr_main(void *arg) {
             s->channel_id = chans[c].id_u64;
             snprintf(s->chan_name, sizeof(s->chan_name), "%s", chans[c].name);
             s->source = lb_source_create(self->link, chans[c].id_u64);
-            if (!s->source) break;
+            if (!s->source) {
+               // Every success is logged; without this the one failure that
+               // matters looks like the channel was never discovered at all.
+               lbr_log(self, "subscribe FAILED: \"%s\" (lb_source_create returned NULL)",
+                       chans[c].name);
+               s->channel_id = 0;
+               s->chan_name[0] = '\0';
+               break;
+            }
             atomic_store_explicit(&s->assigned, true, memory_order_release);
             char disp[128];
             set_port_name(self, i, display_name(chans[c].name, disp, sizeof(disp)));
@@ -365,6 +395,7 @@ static bool CLAP_ABI lbr_activate(const clap_plugin_t *plugin, double sr, uint32
    lbr_recv *self = plugin->plugin_data;
    { char lp[512]; lb_temp_log_path("linkbridge-recv.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
    self->rate_ok = (sr == 48000.0);
+   self->logged_no_rescan = false; // the log file is per-activation; re-arm with it
    self->link = lb_create(120.0);
    lb_enable(self->link, true);
    lb_enable_audio(self->link, true);
@@ -383,6 +414,14 @@ static void CLAP_ABI lbr_deactivate(const clap_plugin_t *plugin) {
    lbr_recv *self = plugin->plugin_data;
    if (atomic_exchange(&self->running, false)) wail_thread_join(self->mgr_thread);
    for (int i = 0; i < LBR_SLOTS; i++) {
+      // Clear the dedupe keys too, not just the source. On re-activate the
+      // gone-check still sees the channel (its id is discoverable, so the miss
+      // count never climbs) and the assign dedupe still matches — a slot left
+      // marked assigned would never resubscribe, and process() would output
+      // silence forever from its NULL source.
+      atomic_store_explicit(&self->slots[i].assigned, false, memory_order_release);
+      self->slots[i].channel_id = 0;
+      self->slots[i].chan_name[0] = '\0';
       if (self->slots[i].source) {
          lb_source_destroy(self->slots[i].source);
          self->slots[i].source = NULL;
@@ -413,9 +452,16 @@ static void CLAP_ABI lbr_on_main_thread(const clap_plugin_t *plugin) {
    lbr_recv *self = plugin->plugin_data;
    if (!atomic_exchange(&self->names_dirty, false)) return;
    const clap_host_audio_ports_t *hap = self->host->get_extension(self->host, CLAP_EXT_AUDIO_PORTS);
-   if (hap && hap->rescan && hap->is_rescan_flag_supported &&
-       hap->is_rescan_flag_supported(self->host, CLAP_AUDIO_PORTS_RESCAN_NAMES))
+   bool ok = hap && hap->rescan && hap->is_rescan_flag_supported &&
+             hap->is_rescan_flag_supported(self->host, CLAP_AUDIO_PORTS_RESCAN_NAMES);
+   if (ok) {
       hap->rescan(self->host, CLAP_AUDIO_PORTS_RESCAN_NAMES);
+   } else if (!self->logged_no_rescan) {
+      // Once: otherwise a field log can't tell "host refused" from "never asked".
+      self->logged_no_rescan = true;
+      lbr_log(self, "host does not support CLAP_AUDIO_PORTS_RESCAN_NAMES — port names "
+                    "will only refresh when the host re-queries audio ports");
+   }
 }
 
 // --- audio ports: 1 stereo input (ignored) + 16 stereo outputs ---
@@ -452,9 +498,57 @@ static bool CLAP_ABI lbr_ap_get(const clap_plugin_t *plugin, uint32_t idx, bool 
 }
 static const clap_plugin_audio_ports_t lbr_audio_ports = {lbr_ap_count, lbr_ap_get};
 
+// --- clap.state ---
+// Nothing to persist: Send names its channel from clap.track-info and Recv
+// derives its ports from LAN discovery. Bitwig refuses to save a project
+// containing a plugin that can't save state, so both write a version marker
+// and reject anything they don't recognise.
+#define LBR_STATE_MAGIC 0x4C425243u /* 'LBRC' */
+#define LBR_STATE_VERSION 1u
+
+static void lbr_put_u32(uint8_t *p, uint32_t v) {
+   p[0] = (uint8_t)(v & 0xFF);
+   p[1] = (uint8_t)((v >> 8) & 0xFF);
+   p[2] = (uint8_t)((v >> 16) & 0xFF);
+   p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+static uint32_t lbr_get_u32(const uint8_t *p) {
+   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static bool CLAP_ABI lbr_state_save(const clap_plugin_t *p, const clap_ostream_t *os) {
+   (void)p;
+   uint8_t buf[8];
+   lbr_put_u32(buf, LBR_STATE_MAGIC);
+   lbr_put_u32(buf + 4, LBR_STATE_VERSION);
+   uint32_t off = 0;
+   while (off < sizeof(buf)) {
+      int64_t n = os->write(os, buf + off, sizeof(buf) - off);
+      if (n <= 0) return false;
+      off += (uint32_t)n;
+   }
+   return true;
+}
+
+static bool CLAP_ABI lbr_state_load(const clap_plugin_t *p, const clap_istream_t *is) {
+   (void)p;
+   uint8_t buf[8];
+   uint32_t off = 0;
+   while (off < sizeof(buf)) {
+      int64_t n = is->read(is, buf + off, sizeof(buf) - off);
+      if (n <= 0) return false; // truncated or errored
+      off += (uint32_t)n;
+   }
+   return lbr_get_u32(buf) == LBR_STATE_MAGIC &&
+          lbr_get_u32(buf + 4) <= LBR_STATE_VERSION;
+}
+
+static const clap_plugin_state_t lbr_state = {.save = lbr_state_save, .load = lbr_state_load};
+
 static const void *CLAP_ABI lbr_get_extension(const clap_plugin_t *p, const char *id) {
    (void)p;
    if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &lbr_audio_ports;
+   if (!strcmp(id, CLAP_EXT_STATE)) return &lbr_state;
    return NULL;
 }
 

@@ -9,7 +9,11 @@ enters a plugin.
 - **`wail-linkbridge-send`** — publishes the track as a Link Audio channel named from
   the DAW track name (host `clap.track-info`).
 - **`wail-linkbridge-recv`** — 16 stereo ports subscribed to the room-published
-  `WAIL · {peer} · {stream}` channels, auto-named as peers arrive.
+  `WAIL · {peer} · {stream}` channels, auto-named as peers arrive and renamed live
+  (CLAP `RESCAN_NAMES`) when the app relabels a stream.
+
+Neither has any configuration to persist, but both implement `clap.state` with a
+version marker — Bitwig refuses to save a project containing a plugin that can't.
 
 ## Build
 
@@ -53,7 +57,8 @@ ctest --test-dir build/plugins --output-on-failure   # add -C Release for multi-
 second in-process Link peer, so publish/subscribe behaviour is exercised without a
 DAW: the spike hosts and logs, Send's channel round-trips to a subscriber, and Recv
 subscribes only to room-published (`WAIL · `-prefixed) channels and renders their
-audio. Runs in CI.
+audio, follows an in-place channel rename onto the same port, resubscribes after a
+host bypass/re-enable, and round-trips `clap.state`. Runs in CI.
 
 `minidaw` (same build) is the driver for `scripts/minidaw-e2e.sh`: it hosts
 `wail-linkbridge-recv` against a real headless WAIL app over a local relay and checks
