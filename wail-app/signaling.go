@@ -60,6 +60,7 @@ type SignalingClient struct {
 	suppressLeave bool
 
 	audioDrops atomic.Uint64 // outgoing audio frames dropped on a full queue
+	syncDrops  atomic.Uint64 // outgoing sync messages dropped on a full queue
 
 	cancel context.CancelFunc
 }
@@ -354,19 +355,34 @@ func ConnectSignaling(
 	return client, channels, serverMsg.PeerDisplayNames, nil
 }
 
-// BroadcastSync broadcasts a sync message to all peers.
-func (sc *SignalingClient) BroadcastSync(msg SyncMessage) {
+// BroadcastSync broadcasts a sync message to all peers. It reports whether the
+// message was queued: a full queue drops it, and callers that track what peers
+// have been told must not record a drop as delivered.
+func (sc *SignalingClient) BroadcastSync(msg SyncMessage) bool {
 	select {
 	case sc.syncOutCh <- outgoingSync{broadcast: true, msg: msg}:
+		return true
 	default:
+		sc.reportSyncDrop(msg)
+		return false
 	}
 }
 
-// SendSyncTo sends a sync message to a specific peer.
-func (sc *SignalingClient) SendSyncTo(peerID string, msg SyncMessage) {
+// SendSyncTo sends a sync message to a specific peer. Reports queued, as
+// BroadcastSync does.
+func (sc *SignalingClient) SendSyncTo(peerID string, msg SyncMessage) bool {
 	select {
 	case sc.syncOutCh <- outgoingSync{broadcast: false, peerID: peerID, msg: msg}:
+		return true
 	default:
+		sc.reportSyncDrop(msg)
+		return false
+	}
+}
+
+func (sc *SignalingClient) reportSyncDrop(msg SyncMessage) {
+	if n := sc.syncDrops.Add(1); n == 1 || n%100 == 0 {
+		log.Printf("[signaling] WARN: outgoing sync queue full — dropped %s (%d total)", msg.Type, n)
 	}
 }
 
@@ -426,9 +442,9 @@ func NewPeerMesh(peerID string, signaling *SignalingClient, channels *SignalingC
 	}
 }
 
-// Broadcast sends a sync message to all peers.
-func (m *PeerMesh) Broadcast(msg SyncMessage) {
-	m.signaling.BroadcastSync(msg)
+// Broadcast sends a sync message to all peers, reporting whether it was queued.
+func (m *PeerMesh) Broadcast(msg SyncMessage) bool {
+	return m.signaling.BroadcastSync(msg)
 }
 
 // SendTo sends a sync message to a specific peer.

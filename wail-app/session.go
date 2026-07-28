@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"maps"
 	"math"
 	"os"
 	"reflect"
@@ -222,14 +221,13 @@ func sessionLoop(
 	// overridden by user-set names. Recomputed on the status tick (discovery
 	// changes don't raise commands) and after any command that affects it;
 	// broadcast only when the map actually changes.
-	var effStreamNames, sentStreamNames map[uint16]string
+	var effStreamNames map[uint16]string
+	nameCast := &streamNameBroadcaster{}
 	syncStreamNames := func() {
 		effStreamNames = effectiveStreamNames(audioEngine.CaptureChannels(), localStreamNames)
-		if maps.Equal(effStreamNames, sentStreamNames) {
-			return
-		}
-		sentStreamNames = effStreamNames
-		mesh.Broadcast(NewStreamNames(StreamNamesToWire(effStreamNames)))
+		nameCast.Sync(effStreamNames, func(m map[uint16]string) bool {
+			return mesh.Broadcast(NewStreamNames(StreamNamesToWire(m)))
+		})
 	}
 
 	// Audio stats
@@ -575,7 +573,7 @@ func sessionLoop(
 				// would otherwise flap the room clock mid-jam.
 				mesh.Broadcast(NewIntervalConfig(intervalCfg.Bars, intervalCfg.Quantum))
 				mesh.Broadcast(NewAudioCapabilities([]uint32{48000}, []uint16{1, 2}, true, true))
-				sentStreamNames = nil // new peer: re-broadcast even if unchanged
+				nameCast.Reset() // new peer: re-broadcast even if unchanged
 				syncStreamNames()
 
 			case "LogBroadcast":

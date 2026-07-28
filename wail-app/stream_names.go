@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 )
@@ -80,3 +81,27 @@ func SaveStreamNames(dataDir string, names map[uint16]string) {
 		log.Printf("[stream_names] Failed to write %s: %v", streamNamesFilename, err)
 	}
 }
+
+// streamNameBroadcaster owns the "have the peers been told?" half of the
+// StreamNames sync. It records the last map the relay *accepted*, not the last
+// one we tried to send: a sync dropped on a full outgoing queue is silent, and
+// because the map itself hasn't changed nothing ever retries it — receivers
+// would sit on "stream N" for the rest of the session.
+type streamNameBroadcaster struct{ sent map[uint16]string }
+
+// Sync hands eff to send when it differs from the last accepted map. send
+// reports whether the relay took the message; a refusal leaves the record
+// untouched, so the next status tick retries.
+func (b *streamNameBroadcaster) Sync(eff map[uint16]string, send func(map[uint16]string) bool) {
+	if maps.Equal(eff, b.sent) {
+		return
+	}
+	if !send(eff) {
+		return
+	}
+	b.sent = maps.Clone(eff)
+}
+
+// Reset forgets the record so the next Sync resends unchanged names — a peer
+// that just joined has never heard them.
+func (b *streamNameBroadcaster) Reset() { b.sent = nil }
