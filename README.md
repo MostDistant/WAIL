@@ -56,6 +56,19 @@ Two numbers control the timing of every jam, NINJAM-style:
 
 Together they set the interval length: (BPI ÷ BPM) × 60 = seconds. At 120 BPM and 16 BPI, each interval lasts 8 seconds.
 
+### How intervals work
+
+Everyone plays to the same tempo and the same interval length. While you **record** the interval that is happening now, you **hear** what everyone else played during the **previous** one — a musical round, or a relay: you answer what just happened.
+
+|                | Interval 1         | Interval 2               | Interval 3               |
+| -------------- | ------------------ | ------------------------ | ------------------------ |
+| **You hear**   | — *nothing yet*    | 🟦 the room's interval 1 | 🟦 the room's interval 2 |
+| **You record** | 🟩 your interval 1 | 🟩 your interval 2       | 🟩 your interval 3       |
+
+🟩 what you play — captured, Opus-encoded, sent · 🟦 what you hear back from the room, one interval late
+
+During interval 1 you only record; nothing has arrived from anyone else yet. From interval 2 on you play over what the room played in the previous interval — and the interval you just recorded is what everyone else plays over next. That one-interval offset is what makes jamming work over any connection, however far apart you are, and it is why WAIL suits improvisation — jazz, blues, funk, ambient, anything you can react to — more than playing a written song note-for-note.
+
 The first peer in a room sets its BPI; everyone who joins adopts it. Anyone can change it mid-jam from the session screen — the change applies at the next interval boundary. BPI must divide evenly into whole bars at the room's beats per bar (default 4), e.g. 4, 8, 16, or 32.
 
 **Match your DAW's launch quantization to the room interval.** WAIL can't read or set your DAW's launch quantization (Ableton Link doesn't carry it), so it tells you instead: when you join a room, WAIL shows the room's interval and asks you to set your DAW to match (e.g. Live's Global Quantization → 4 Bars). This keeps everyone's clip launches aligned with the interval grid. Join the room first, then start your DAW's transport — that gives you a clean first interval (WAIL still handles a mid-interval start, so it's a nicety, not a hard requirement).
