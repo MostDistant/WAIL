@@ -14,11 +14,11 @@ import (
 // read as silence and are surfaced separately via LAN-loss metrics). Index is
 // the *local* interval index; the caller labels it with the shared room index.
 type CompletedInterval struct {
-	Index        int64
-	Samples      []int16 // interleaved, Frames × Channels
-	Frames       int     // full interval length in frames
-	Channels     int
-	WrittenFrames int    // frames actually covered by received buffers (<= Frames)
+	Index         int64
+	Samples       []int16 // interleaved, Frames × Channels
+	Frames        int     // full interval length in frames
+	Channels      int
+	WrittenFrames int // frames actually covered by received buffers (<= Frames)
 }
 
 // Complete reports whether the whole interval was covered by received audio.
@@ -38,10 +38,10 @@ func (c *CompletedInterval) Complete() bool { return c.WrittenFrames >= c.Frames
 // (measured live 2026-07: ~5-frame gaps every 64000 samples plus a growing
 // ~100-frame pop at every interval boundary — audible clicks).
 type Assembler struct {
-	cfg        interval.Config
-	channels   int
-	sampleRate uint32
-	cur        *intervalBuf
+	cfg         interval.Config
+	channels    int
+	sampleRate  uint32
+	cur         *intervalBuf
 	droppedLate uint64
 
 	// Contiguous placement cursor (frames within cur) + anchoring state.

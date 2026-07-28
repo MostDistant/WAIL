@@ -59,15 +59,15 @@ var errStopped = fmt.Errorf("stopped")
 // {type:"sync", from, payload:<SyncMessage JSON>}; LogBroadcast rides in the
 // payload. peer_joined/peer_left are relay-originated, snake_case.
 type envelope struct {
-	Type        string          `json:"type"`
-	From        string          `json:"from,omitempty"`
-	PeerID      string          `json:"peer_id,omitempty"`
-	DisplayName *string         `json:"display_name,omitempty"`
-	Code        string          `json:"code,omitempty"`
-	Payload     json.RawMessage `json:"payload,omitempty"`
-	Level       string          `json:"level,omitempty"`
-	Message     string          `json:"message,omitempty"`
-	Peers       []string        `json:"peers,omitempty"`
+	Type        string            `json:"type"`
+	From        string            `json:"from,omitempty"`
+	PeerID      string            `json:"peer_id,omitempty"`
+	DisplayName *string           `json:"display_name,omitempty"`
+	Code        string            `json:"code,omitempty"`
+	Payload     json.RawMessage   `json:"payload,omitempty"`
+	Level       string            `json:"level,omitempty"`
+	Message     string            `json:"message,omitempty"`
+	Peers       []string          `json:"peers,omitempty"`
 	PeerNames   map[string]string `json:"peer_display_names,omitempty"`
 }
 

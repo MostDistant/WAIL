@@ -11,7 +11,7 @@ const (
 	tempoChangeThreshold  = 0.01 // BPM
 	echoGuardDuration     = 150 * time.Millisecond
 	linkPollInterval      = 20 * time.Millisecond // 50 Hz
-	snapshotIntervalTicks = 10                     // ~200ms at 50Hz
+	snapshotIntervalTicks = 10                    // ~200ms at 50Hz
 	// tempoHoldDown is how long a detected local tempo change must hold
 	// before it is reported as user intent. Link session convergence nudges
 	// (join merges, phase re-lock — up to ±2%) are transient, lasting a few

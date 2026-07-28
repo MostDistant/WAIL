@@ -3,8 +3,9 @@
 // user turning the tempo knob would (a committed timeline — newest wins).
 //
 // Usage:
-//   linktempo -bpm 120 -script "10:122,20:124,30:120"   # t-seconds:bpm steps
-//   linktempo -bpm 122 -insist-ms 500                    # re-apply -bpm every 500ms
+//
+//	linktempo -bpm 120 -script "10:122,20:124,30:120"   # t-seconds:bpm steps
+//	linktempo -bpm 122 -insist-ms 500                    # re-apply -bpm every 500ms
 //
 // -insist-ms models a LAN peer that refuses to follow (an external session or
 // a DAW whose user keeps turning the knob back): after every script step (or

@@ -103,9 +103,9 @@ type StatusUpdate struct {
 	CaptureChannels []CaptureChannelInfo `json:"capture_channels,omitempty"`
 	// Grid alignment (ADR-0006): live readout for the debug panel. State is
 	// "aligned"/"aligning"/"drifted"/"off"; empty until the aligner is ready.
-	AlignState   string         `json:"align_state,omitempty"`
-	AlignErrorMs *float64       `json:"align_error_ms,omitempty"`
-	RelayRTTMs   *float64       `json:"relay_rtt_ms,omitempty"`
+	AlignState   string   `json:"align_state,omitempty"`
+	AlignErrorMs *float64 `json:"align_error_ms,omitempty"`
+	RelayRTTMs   *float64 `json:"relay_rtt_ms,omitempty"`
 	// StreamOffsets is the debug-room readout: per-stream rhythmic phase
 	// offset vs the room grid (internal/offset), empty until enough rhythmic
 	// content has arrived to judge.

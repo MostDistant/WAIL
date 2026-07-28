@@ -222,7 +222,7 @@ func TestSlewNudgeDoesNotArmTempoGate(t *testing.T) {
 	// active same-sign δ maps to the same target, which can't prove a second
 	// nudge fired. The flip restarts persistence — the nudge lands on the
 	// second confirming tick.)
-	f.timeAtBeat = 13_985_000 // δ=−15ms → target 119.94 ≠ current slew target
+	f.timeAtBeat = 13_985_000          // δ=−15ms → target 119.94 ≠ current slew target
 	s.Tick(16, now.Add(8*time.Second)) // flip sighting
 	s.Tick(16, now.Add(9*time.Second)) // confirmed → retarget
 	if len(f.tempos) != 2 || !approxEq(f.tempos[1], 120*(1-interval.SlewMaxFraction)) {
@@ -274,9 +274,9 @@ func TestSlewHoldsOffWhenDraggedFromOwnTarget(t *testing.T) {
 	}
 	// The session sits at the slew's own target: keep steering (no gate).
 	f.state.BPM = lastTempo(f)
-	f.timeAtBeat = 13_985_000 // δ=−15ms → different nudge (opposite sign)
+	f.timeAtBeat = 13_985_000          // δ=−15ms → different nudge (opposite sign)
 	s.Tick(16, now.Add(8*time.Second)) // flip sighting
-	s.Tick(16, now.Add(9*time.Second))  // confirmed → retarget
+	s.Tick(16, now.Add(9*time.Second)) // confirmed → retarget
 	if len(f.tempos) != 2 {
 		t.Fatalf("slew gated itself at its own target: %v", f.tempos)
 	}
@@ -490,7 +490,7 @@ func TestSlewSettleStaysImmediate(t *testing.T) {
 	s.Tick(16, now.Add(6*time.Second))
 	s.Tick(16, now.Add(7*time.Second)) // active
 	f.state.BPM = lastTempo(f)
-	f.timeAtBeat = 14_000_000 // δ closed
+	f.timeAtBeat = 14_000_000          // δ closed
 	s.Tick(16, now.Add(8*time.Second)) // restore must not wait for persistence
 	if got := lastTempo(f); got != 120 {
 		t.Fatalf("settled tempo = %v, want 120 (immediate restore)", got)

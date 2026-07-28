@@ -1160,7 +1160,7 @@ func sessionLoop(
 				AudioDCOpen: dcOpen, PluginConnected: true,
 				AlignState: alignStateStr, AlignErrorMs: alignErrMs, RelayRTTMs: relayRttMs,
 				StreamOffsets: health.StreamOffsets,
-				Recording: recorder != nil,
+				Recording:     recorder != nil,
 				RecordingSizeBytes: func() uint64 {
 					if recorder != nil {
 						return recorder.BytesWritten()

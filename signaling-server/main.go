@@ -39,12 +39,12 @@ const (
 	// The Link Audio engine sends a whole interval's WAIF frames in one burst at
 	// the boundary (~400 frames for 8s at 20ms; more at slow tempos), so the
 	// burst must absorb a full interval — steady-state is still ~50 frames/sec.
-	baseBinaryRate   = 100.0  // tokens/sec per stream
-	baseBinaryBurst  = 2500.0 // max tokens per stream
-	baseTextRate     = 100.0 // tokens/sec (not scaled by streams)
-	baseTextBurst    = 200.0 // max tokens
-	rateLimitWarnMax = 50    // violations before disconnect
-	maxStreamsPerPeer = 16   // cap stream_count for rate-limit scaling
+	baseBinaryRate    = 100.0  // tokens/sec per stream
+	baseBinaryBurst   = 2500.0 // max tokens per stream
+	baseTextRate      = 100.0  // tokens/sec (not scaled by streams)
+	baseTextBurst     = 200.0  // max tokens
+	rateLimitWarnMax  = 50     // violations before disconnect
+	maxStreamsPerPeer = 16     // cap stream_count for rate-limit scaling
 )
 
 // ---------------------------------------------------------------------------
@@ -165,20 +165,20 @@ type directionMetrics struct {
 type peerStatus struct {
 	dcOpen          bool
 	pluginConnected bool
-	lastPerPeer map[string]peerFrameReport
+	lastPerPeer     map[string]peerFrameReport
 }
 
 // session tracks aggregate metrics for a multi-peer session in a room.
 type session struct {
-	ID        string                              `json:"id"`
-	Room      string                              `json:"room"`
-	StartedAt time.Time                           `json:"started_at"`
-	EndedAt   *time.Time                          `json:"ended_at,omitempty"`
-	Phase     string                              `json:"phase"`
-	Peers     []string                            `json:"peers"`
-	Joining   map[string]*directionMetrics        `json:"joining"`
-	Playing   map[string]*directionMetrics        `json:"playing"`
-	peerState map[string]*peerStatus
+	ID                 string                       `json:"id"`
+	Room               string                       `json:"room"`
+	StartedAt          time.Time                    `json:"started_at"`
+	EndedAt            *time.Time                   `json:"ended_at,omitempty"`
+	Phase              string                       `json:"phase"`
+	Peers              []string                     `json:"peers"`
+	Joining            map[string]*directionMetrics `json:"joining"`
+	Playing            map[string]*directionMetrics `json:"playing"`
+	peerState          map[string]*peerStatus
 	peerDisplayNames   map[string]string // snapshotted at archive time
 	transitionSnapshot map[directionKey]peerFrameReport
 }
@@ -187,10 +187,10 @@ func newSession(roomName string, peers []string) *session {
 	id := fmt.Sprintf("%s-%d", roomName, time.Now().UnixMilli())
 	s := &session{
 		ID: id, Room: roomName, StartedAt: time.Now(), Phase: "joining",
-		Peers: peers,
-		Joining: make(map[string]*directionMetrics),
-		Playing: make(map[string]*directionMetrics),
-		peerState: make(map[string]*peerStatus),
+		Peers:              peers,
+		Joining:            make(map[string]*directionMetrics),
+		Playing:            make(map[string]*directionMetrics),
+		peerState:          make(map[string]*peerStatus),
 		transitionSnapshot: make(map[directionKey]peerFrameReport),
 	}
 	for _, p := range peers {
@@ -278,7 +278,9 @@ func (s *session) updateMetrics(reporter string, dcOpen, pluginConnected bool, p
 			s.Phase = "playing"
 			for _, peer := range s.Peers {
 				st := s.peerState[peer]
-				if st == nil { continue }
+				if st == nil {
+					continue
+				}
 				for remotePeer, report := range st.lastPerPeer {
 					s.transitionSnapshot[directionKey{from: remotePeer, to: peer}] = report
 				}
@@ -289,7 +291,9 @@ func (s *session) updateMetrics(reporter string, dcOpen, pluginConnected bool, p
 
 func (s *session) addPeer(peerID string) {
 	for _, p := range s.Peers {
-		if p == peerID { return }
+		if p == peerID {
+			return
+		}
 	}
 	s.Peers = append(s.Peers, peerID)
 	if _, ok := s.peerState[peerID]; !ok {
@@ -302,9 +306,9 @@ func (s *session) addPeer(peerID string) {
 // ---------------------------------------------------------------------------
 
 type room struct {
-	mu      sync.Mutex
-	conns   atomic.Pointer[[]connEntry]
-	connMap map[string]*conn
+	mu                sync.Mutex
+	conns             atomic.Pointer[[]connEntry]
+	connMap           map[string]*conn
 	activeSession     *session
 	completedSessions []*session
 
@@ -337,15 +341,17 @@ func (r *room) rebuildConns() {
 
 func (r *room) loadConns() []connEntry {
 	p := r.conns.Load()
-	if p == nil { return nil }
+	if p == nil {
+		return nil
+	}
 	return *p
 }
 
 // hub tracks all rooms.
 type hub struct {
-	mu    sync.RWMutex
-	rooms map[string]*room
-	db    *sql.DB
+	mu                sync.RWMutex
+	rooms             map[string]*room
+	db                *sql.DB
 	completedMu       sync.Mutex
 	completedSessions map[string][]*session
 }
@@ -356,9 +362,13 @@ type hub struct {
 
 func openDB() *sql.DB {
 	path := os.Getenv("DB_PATH")
-	if path == "" { path = "/data/wail.db" }
+	if path == "" {
+		path = "/data/wail.db"
+	}
 	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
-	if err != nil { log.Fatalf("open db: %v", err) }
+	if err != nil {
+		log.Fatalf("open db: %v", err)
+	}
 	for _, stmt := range []string{
 		`CREATE TABLE IF NOT EXISTS peers (
 			room TEXT NOT NULL, peer_id TEXT NOT NULL, display_name TEXT,
@@ -368,7 +378,9 @@ func openDB() *sql.DB {
 			room TEXT PRIMARY KEY, password_hash TEXT,
 			created_at INTEGER NOT NULL DEFAULT 0)`,
 	} {
-		if _, err := db.Exec(stmt); err != nil { log.Fatalf("migrate: %v", err) }
+		if _, err := db.Exec(stmt); err != nil {
+			log.Fatalf("migrate: %v", err)
+		}
 	}
 	cutoff := time.Now().Unix() - stalePeerSec
 	db.Exec("DELETE FROM peers WHERE last_seen < ?", cutoff)
@@ -396,11 +408,15 @@ func (h *hub) getOrCreateRoom(name string) *room {
 	h.mu.RLock()
 	r, ok := h.rooms[name]
 	h.mu.RUnlock()
-	if ok { return r }
+	if ok {
+		return r
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	r, ok = h.rooms[name]
-	if ok { return r }
+	if ok {
+		return r
+	}
 	r = newRoom()
 	h.rooms[name] = r
 	return r
@@ -417,11 +433,15 @@ func (h *hub) deleteRoom(name string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	r, ok := h.rooms[name]
-	if !ok { return }
+	if !ok {
+		return
+	}
 	r.mu.Lock()
 	empty := len(r.connMap) == 0
 	r.mu.Unlock()
-	if empty { delete(h.rooms, name) }
+	if empty {
+		delete(h.rooms, name)
+	}
 }
 
 func (h *hub) archiveSession(roomName string, s *session) {
@@ -442,8 +462,12 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 	roomName := msg.Room
 	peerID := msg.PeerID
 	streamCount := msg.StreamCount
-	if streamCount < 1 { streamCount = 1 }
-	if streamCount > maxStreamsPerPeer { streamCount = maxStreamsPerPeer }
+	if streamCount < 1 {
+		streamCount = 1
+	}
+	if streamCount > maxStreamsPerPeer {
+		streamCount = maxStreamsPerPeer
+	}
 
 	if semverLess(msg.ClientVersion, minVersion) {
 		c.sendJSON(map[string]any{"type": "join_error", "code": "version_outdated", "min_version": minVersion})
@@ -473,12 +497,16 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 
 	if !roomExists {
 		pwHash := ""
-		if msg.Password != "" { pwHash = hashPassword(msg.Password) }
+		if msg.Password != "" {
+			pwHash = hashPassword(msg.Password)
+		}
 		h.db.Exec("INSERT OR IGNORE INTO rooms (room, password_hash, created_at) VALUES (?, ?, ?)", roomName, pwHash, time.Now().Unix())
 	}
 
 	displayName := ""
-	if msg.DisplayName != nil { displayName = *msg.DisplayName }
+	if msg.DisplayName != nil {
+		displayName = *msg.DisplayName
+	}
 	h.db.Exec(`INSERT INTO peers (room, peer_id, display_name, stream_count, last_seen) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(room, peer_id) DO UPDATE SET display_name=excluded.display_name, stream_count=excluded.stream_count, last_seen=excluded.last_seen`,
 		roomName, peerID, displayName, streamCount, time.Now().Unix())
@@ -524,7 +552,9 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 			log.Printf("[metrics] peer %s joined active session %s (now %d peers)", peerID, s.ID, peerCountAfter)
 		} else {
 			allPeers := make([]string, 0, peerCountAfter)
-			for pid := range r.connMap { allPeers = append(allPeers, pid) }
+			for pid := range r.connMap {
+				allPeers = append(allPeers, pid)
+			}
 			s := newSession(roomName, allPeers)
 			r.activeSession = s
 			log.Printf("[metrics] session %s started with %d peers", s.ID, peerCountAfter)
@@ -537,7 +567,9 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 		if id != peerID && rc.publicIP == c.publicIP {
 			lanPeerPresent = true
 			ipPrefix := c.publicIP
-			if len(ipPrefix) > 8 { ipPrefix = ipPrefix[:8] }
+			if len(ipPrefix) > 8 {
+				ipPrefix = ipPrefix[:8]
+			}
 			log.Printf("peer %s shares LAN with existing peer %s (IP prefix: %s...)", peerID, id, ipPrefix)
 			break
 		}
@@ -559,9 +591,13 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 }
 
 func (h *hub) signal(room, peerID string, c *conn, msg clientMsg) {
-	if room == "" { return }
+	if room == "" {
+		return
+	}
 	r := h.getRoom(room)
-	if r == nil { return }
+	if r == nil {
+		return
+	}
 	for _, e := range r.loadConns() {
 		if e.peerID == msg.To {
 			e.c.sendJSON(map[string]any{"type": "signal", "to": msg.To, "from": peerID, "payload": msg.Payload})
@@ -571,14 +607,22 @@ func (h *hub) signal(room, peerID string, c *conn, msg clientMsg) {
 }
 
 func (h *hub) broadcastSync(room, peerID string, c *conn, msg clientMsg) {
-	if room == "" { return }
+	if room == "" {
+		return
+	}
 	r := h.getRoom(room)
-	if r == nil { return }
+	if r == nil {
+		return
+	}
 	raw, err := json.Marshal(map[string]any{"type": "sync", "from": peerID, "payload": msg.Payload})
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	wsMsg := wsMessage{websocket.TextMessage, raw}
 	for _, e := range r.loadConns() {
-		if e.peerID != peerID { e.c.sendWS(wsMsg) }
+		if e.peerID != peerID {
+			e.c.sendWS(wsMsg)
+		}
 	}
 	// The relay owns the room interval clock (ADR-0003): if this sync carried a
 	// tempo/config change, update the clock and broadcast the new anchor to all.
@@ -597,9 +641,13 @@ func (h *hub) broadcastSync(room, peerID string, c *conn, msg clientMsg) {
 }
 
 func (h *hub) syncTo(room, peerID string, c *conn, msg clientMsg) {
-	if room == "" { return }
+	if room == "" {
+		return
+	}
 	r := h.getRoom(room)
-	if r == nil { return }
+	if r == nil {
+		return
+	}
 	for _, e := range r.loadConns() {
 		if e.peerID == msg.To {
 			e.c.sendJSON(map[string]any{"type": "sync", "from": peerID, "payload": msg.Payload})
@@ -613,9 +661,13 @@ func (h *hub) syncTo(room, peerID string, c *conn, msg clientMsg) {
 // avoiding unsynchronized reads of c.room/c.peerID (which may be cleared by eviction/leave).
 // loopback additionally echoes the frame back to the sender (set_loopback opt-in).
 func (h *hub) broadcastAudioBinary(room, peerID string, c *conn, data []byte, loopback bool) {
-	if room == "" { return }
+	if room == "" {
+		return
+	}
 	r := h.getRoom(room)
-	if r == nil { return }
+	if r == nil {
+		return
+	}
 
 	// Label watchdog: peek the sender's interval label and heal frozen
 	// offsets (see labelwatch.go). Cheap: one header parse per frame.
@@ -635,42 +687,64 @@ func (h *hub) broadcastAudioBinary(room, peerID string, c *conn, data []byte, lo
 
 	wsMsg := wsMessage{websocket.BinaryMessage, frame}
 	for _, e := range r.loadConns() {
-		if e.peerID != peerID || loopback { e.c.sendWS(wsMsg) }
+		if e.peerID != peerID || loopback {
+			e.c.sendWS(wsMsg)
+		}
 	}
 }
 
 func (h *hub) broadcastLog(room, peerID string, c *conn, msg clientMsg) {
-	if room == "" { return }
+	if room == "" {
+		return
+	}
 	r := h.getRoom(room)
-	if r == nil { return }
+	if r == nil {
+		return
+	}
 	raw, err := json.Marshal(map[string]any{
 		"type": "log", "from": peerID, "level": msg.Level,
 		"target": msg.Target, "message": msg.Message, "timestamp_us": msg.TimestampUs,
 	})
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	wsMsg := wsMessage{websocket.TextMessage, raw}
 	for _, e := range r.loadConns() {
-		if e.peerID != peerID { e.c.sendWS(wsMsg) }
+		if e.peerID != peerID {
+			e.c.sendWS(wsMsg)
+		}
 	}
 }
 
 func (h *hub) metricsReport(room, peerID string, c *conn, msg clientMsg) {
-	if room == "" { return }
+	if room == "" {
+		return
+	}
 	r := h.getRoom(room)
-	if r == nil { return }
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := r.activeSession
-	if s == nil { return }
+	if s == nil {
+		return
+	}
 	dcOpen := false
-	if msg.DcOpen != nil { dcOpen = *msg.DcOpen }
+	if msg.DcOpen != nil {
+		dcOpen = *msg.DcOpen
+	}
 	pluginConnected := false
-	if msg.PluginConnected != nil { pluginConnected = *msg.PluginConnected }
+	if msg.PluginConnected != nil {
+		pluginConnected = *msg.PluginConnected
+	}
 	s.updateMetrics(peerID, dcOpen, pluginConnected, msg.PerPeer)
 }
 
 func (h *hub) leave(room, peerID string, c *conn) {
-	if room == "" { return }
+	if room == "" {
+		return
+	}
 	r := h.getRoom(room)
 	if r != nil {
 		r.watch.forget(peerID)
@@ -767,10 +841,14 @@ func (c *conn) writePump() {
 				c.ws.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			if err := c.ws.WriteMessage(msg.msgType, msg.data); err != nil { return }
+			if err := c.ws.WriteMessage(msg.msgType, msg.data); err != nil {
+				return
+			}
 		case <-ticker.C:
 			c.ws.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.ws.WriteMessage(websocket.PingMessage, nil); err != nil { return }
+			if err := c.ws.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -805,7 +883,9 @@ func (c *conn) readPump(h *hub) {
 
 	for {
 		msgType, raw, err := c.ws.ReadMessage()
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 
 		if msgType == websocket.BinaryMessage {
 			if binaryBucket != nil && !binaryBucket.allow() {
@@ -847,10 +927,14 @@ func (c *conn) readPump(h *hub) {
 		}
 
 		var msg clientMsg
-		if err := json.Unmarshal(raw, &msg); err != nil { continue }
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
+		}
 		switch msg.Type {
 		case "join":
-			if room != "" { h.leave(room, peerID, c) }
+			if room != "" {
+				h.leave(room, peerID, c)
+			}
 			var sc int
 			room, peerID, sc = h.join(c, msg)
 			loopback = false
@@ -889,18 +973,25 @@ func (c *conn) readPump(h *hub) {
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 func clientIP(r *http.Request) string {
-	if ip := r.Header.Get("Fly-Client-IP"); ip != "" { return ip }
+	if ip := r.Header.Get("Fly-Client-IP"); ip != "" {
+		return ip
+	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		return strings.TrimSpace(strings.Split(xff, ",")[0])
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil { return r.RemoteAddr }
+	if err != nil {
+		return r.RemoteAddr
+	}
 	return host
 }
 
 func handleWS(h *hub, w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil { log.Printf("upgrade: %v", err); return }
+	if err != nil {
+		log.Printf("upgrade: %v", err)
+		return
+	}
 	c := &conn{ws: ws, send: make(chan wsMessage, 256), publicIP: clientIP(r)}
 	go c.writePump()
 	c.readPump(h)
@@ -908,8 +999,10 @@ func handleWS(h *hub, w http.ResponseWriter, r *http.Request) {
 
 func handleRooms(h *hub, w http.ResponseWriter, r *http.Request) {
 	type roomInfo struct {
-		Room string `json:"room"`; CreatedAt int64 `json:"created_at"`
-		PeerCount int `json:"peer_count"`; DisplayNames []string `json:"display_names"`
+		Room         string   `json:"room"`
+		CreatedAt    int64    `json:"created_at"`
+		PeerCount    int      `json:"peer_count"`
+		DisplayNames []string `json:"display_names"`
 	}
 	h.mu.RLock()
 	roomNames := make([]string, 0, len(h.rooms))
@@ -925,36 +1018,48 @@ func handleRooms(h *hub, w http.ResponseWriter, r *http.Request) {
 		var pwHash sql.NullString
 		var createdAt int64
 		h.db.QueryRow("SELECT password_hash, created_at FROM rooms WHERE room = ?", roomName).Scan(&pwHash, &createdAt)
-		if pwHash.Valid && pwHash.String != "" { continue }
+		if pwHash.Valid && pwHash.String != "" {
+			continue
+		}
 		conns := roomSnaps[roomName]
 		names := []string{}
 		for _, e := range conns {
-			if e.displayName != "" { names = append(names, e.displayName) }
+			if e.displayName != "" {
+				names = append(names, e.displayName)
+			}
 		}
 		result = append(result, roomInfo{Room: roomName, CreatedAt: createdAt, PeerCount: len(conns), DisplayNames: names})
 	}
-	if result == nil { result = []roomInfo{} }
+	if result == nil {
+		result = []roomInfo{}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"rooms": result})
 }
 
 type sessionJSON struct {
-	ID string `json:"id"`; Room string `json:"room"`; StartedAt string `json:"started_at"`
-	EndedAt *string `json:"ended_at,omitempty"`; Duration string `json:"duration"`
-	Phase string `json:"phase"`; Peers []string `json:"peers"`
-	PeerDisplayNames map[string]string `json:"peer_display_names,omitempty"`
-	Joining map[string]*directionMetrics `json:"joining"`
-	Playing map[string]*directionMetrics `json:"playing"`
+	ID               string                       `json:"id"`
+	Room             string                       `json:"room"`
+	StartedAt        string                       `json:"started_at"`
+	EndedAt          *string                      `json:"ended_at,omitempty"`
+	Duration         string                       `json:"duration"`
+	Phase            string                       `json:"phase"`
+	Peers            []string                     `json:"peers"`
+	PeerDisplayNames map[string]string            `json:"peer_display_names,omitempty"`
+	Joining          map[string]*directionMetrics `json:"joining"`
+	Playing          map[string]*directionMetrics `json:"playing"`
 }
 type metricsSnapshot struct {
-	Active []sessionJSON `json:"active"`; Completed []sessionJSON `json:"completed"`
+	Active    []sessionJSON `json:"active"`
+	Completed []sessionJSON `json:"completed"`
 }
 
 func sessionToJSON(s *session) sessionJSON {
 	sj := sessionJSON{ID: s.ID, Room: s.Room, StartedAt: s.StartedAt.UTC().Format(time.RFC3339),
 		Phase: s.Phase, Peers: s.Peers, Joining: s.Joining, Playing: s.Playing}
 	if s.EndedAt != nil {
-		t := s.EndedAt.UTC().Format(time.RFC3339); sj.EndedAt = &t
+		t := s.EndedAt.UTC().Format(time.RFC3339)
+		sj.EndedAt = &t
 		sj.Duration = s.EndedAt.Sub(s.StartedAt).Round(time.Second).String()
 	} else {
 		sj.Duration = time.Since(s.StartedAt).Round(time.Second).String()
@@ -964,7 +1069,9 @@ func sessionToJSON(s *session) sessionJSON {
 
 func (h *hub) lookupDisplayNames(sj *sessionJSON) {
 	r := h.getRoom(sj.Room)
-	if r == nil { return }
+	if r == nil {
+		return
+	}
 	names := make(map[string]string)
 	for _, e := range r.loadConns() {
 		if e.displayName != "" {
@@ -981,10 +1088,15 @@ func (h *hub) snapshotMetrics(roomFilter string) metricsSnapshot {
 	h.mu.RLock()
 	roomNames := make([]string, 0, len(h.rooms))
 	roomPtrs := make([]*room, 0, len(h.rooms))
-	for name, r := range h.rooms { roomNames = append(roomNames, name); roomPtrs = append(roomPtrs, r) }
+	for name, r := range h.rooms {
+		roomNames = append(roomNames, name)
+		roomPtrs = append(roomPtrs, r)
+	}
 	h.mu.RUnlock()
 	for i, name := range roomNames {
-		if roomFilter != "" && name != roomFilter { continue }
+		if roomFilter != "" && name != roomFilter {
+			continue
+		}
 		r := roomPtrs[i]
 		r.mu.Lock()
 		if s := r.activeSession; s != nil {
@@ -996,7 +1108,9 @@ func (h *hub) snapshotMetrics(roomFilter string) metricsSnapshot {
 	}
 	h.completedMu.Lock()
 	for rn, sessions := range h.completedSessions {
-		if roomFilter != "" && rn != roomFilter { continue }
+		if roomFilter != "" && rn != roomFilter {
+			continue
+		}
 		for _, s := range sessions {
 			sj := sessionToJSON(s)
 			if len(s.peerDisplayNames) > 0 {
@@ -1009,8 +1123,12 @@ func (h *hub) snapshotMetrics(roomFilter string) metricsSnapshot {
 	}
 	h.completedMu.Unlock()
 	sort.Slice(completed, func(i, j int) bool { return completed[i].StartedAt > completed[j].StartedAt })
-	if active == nil { active = []sessionJSON{} }
-	if completed == nil { completed = []sessionJSON{} }
+	if active == nil {
+		active = []sessionJSON{}
+	}
+	if completed == nil {
+		completed = []sessionJSON{}
+	}
 	return metricsSnapshot{Active: active, Completed: completed}
 }
 
@@ -1022,20 +1140,35 @@ func handleMetrics(h *hub, w http.ResponseWriter, r *http.Request) {
 
 func handleMetricsWS(h *hub, w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
-	if err != nil { log.Printf("metrics ws upgrade: %v", err); return }
+	if err != nil {
+		log.Printf("metrics ws upgrade: %v", err)
+		return
+	}
 	defer ws.Close()
 	roomFilter := r.URL.Query().Get("room")
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	if err := ws.WriteJSON(h.snapshotMetrics(roomFilter)); err != nil { return }
+	if err := ws.WriteJSON(h.snapshotMetrics(roomFilter)); err != nil {
+		return
+	}
 	done := make(chan struct{})
-	go func() { defer close(done); for { if _, _, err := ws.ReadMessage(); err != nil { return } } }()
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := ws.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
 	for {
 		select {
-		case <-done: return
+		case <-done:
+			return
 		case <-ticker.C:
 			ws.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := ws.WriteJSON(h.snapshotMetrics(roomFilter)); err != nil { return }
+			if err := ws.WriteJSON(h.snapshotMetrics(roomFilter)); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -1122,8 +1255,12 @@ func semverLess(a, b string) bool {
 	var a1, a2, a3, b1, b2, b3 int
 	fmt.Sscanf(a, "%d.%d.%d", &a1, &a2, &a3)
 	fmt.Sscanf(b, "%d.%d.%d", &b1, &b2, &b3)
-	if a1 != b1 { return a1 < b1 }
-	if a2 != b2 { return a2 < b2 }
+	if a1 != b1 {
+		return a1 < b1
+	}
+	if a2 != b2 {
+		return a2 < b2
+	}
 	return a3 < b3
 }
 
@@ -1142,7 +1279,9 @@ func main() {
 	http.HandleFunc("/metrics/dashboard", func(w http.ResponseWriter, r *http.Request) { handleDashboard(w, r) })
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200); w.Write([]byte("ok")) })
 	port := os.Getenv("PORT")
-	if port == "" { port = "8080" }
+	if port == "" {
+		port = "8080"
+	}
 	log.Printf("WAIL signaling server listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
