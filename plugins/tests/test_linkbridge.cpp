@@ -14,6 +14,7 @@
 
 namespace {
 constexpr double kSampleRate = 48000.0;
+constexpr int kPorts = 16; // LBR_SLOTS in linkbridge_recv.c
 }
 
 #include "linkbridge_link.h"
@@ -28,7 +29,7 @@ TEST(linkbridge_spike_hosts_and_logs) {
 
    wailtest::ClapInstance inst;
    std::string err;
-   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SPIKE_PATH, "software.linkbridge.spike", 0, 48000.0, 256, 256, &err),
+   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SPIKE_PATH, "software.linkbridge.spike", 48000.0, 256, 256, &err),
              err.c_str());
    if (!inst.plugin) return;
 
@@ -87,7 +88,7 @@ TEST(linkbridge_spike_hosts_and_logs) {
 TEST(linkbridge_send_pubsub_roundtrip) {
    wailtest::ClapInstance inst;
    std::string err;
-   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SEND_PATH, "software.wail.linkbridge.send", 0, 48000.0, 256, 256, &err),
+   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SEND_PATH, "software.wail.linkbridge.send", 48000.0, 256, 256, &err),
              err.c_str());
    if (!inst.plugin) return;
 
@@ -193,7 +194,7 @@ TEST(linkbridge_send_pubsub_roundtrip) {
 TEST(linkbridge_recv_hears_only_room_published) {
    wailtest::ClapInstance inst;
    std::string err;
-   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_RECV_PATH, "software.wail.linkbridge.recv", 0, 48000.0, 256, 256, &err),
+   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_RECV_PATH, "software.wail.linkbridge.recv", 48000.0, 256, 256, &err),
              err.c_str());
    if (!inst.plugin) return;
 
@@ -205,10 +206,10 @@ TEST(linkbridge_recv_hears_only_room_published) {
    lb_sink *raw = lb_sink_create(pub, "raw-channel", 16384);
 
    const uint32_t kBlock = 256;
-   std::vector<float> outL[wailtest::RecvHost::kPorts], outR[wailtest::RecvHost::kPorts];
-   float *ch[wailtest::RecvHost::kPorts][2];
-   clap_audio_buffer_t outs[wailtest::RecvHost::kPorts];
-   for (int p = 0; p < wailtest::RecvHost::kPorts; p++) {
+   std::vector<float> outL[kPorts], outR[kPorts];
+   float *ch[kPorts][2];
+   clap_audio_buffer_t outs[kPorts];
+   for (int p = 0; p < kPorts; p++) {
       outL[p].assign(kBlock, 0.0f);
       outR[p].assign(kBlock, 0.0f);
       ch[p][0] = outL[p].data();
@@ -237,7 +238,7 @@ TEST(linkbridge_recv_hears_only_room_published) {
       clap_process_t p{};
       p.steady_time = -1;
       p.frames_count = kBlock;
-      p.audio_outputs_count = wailtest::RecvHost::kPorts;
+      p.audio_outputs_count = kPorts;
       p.audio_outputs = outs;
       inst.plugin->process(inst.plugin, &p);
    };

@@ -6,9 +6,9 @@
 // double a port). A peer joining the jam appears as a named sub-chain with no
 // user action.
 //
-// Rendering is stamp-aligned (the IPC recv path's design, ported): per-slot
-// anchor ring (chunk start frame ↔ begin beat / play-at µs), pad when early,
-// skip when late, 32-frame deadband. Two modes chosen per block: host
+// Rendering is stamp-aligned: per-slot anchor ring (chunk start frame ↔ begin
+// beat / play-at µs), pad when early, skip when late, 32-frame deadband. Two
+// modes chosen per block: host
 // transport rolling with a beats timeline → fractional-beat-phase alignment
 // (sample-accurate to the DAW grid; the host's transport→sample mapping
 // absorbs output latency); otherwise session-clock mono alignment (the
@@ -30,7 +30,7 @@
 
 #include "clap/clap.h"
 #include "linkbridge_link.h"
-#include "wail_ipc.h" // wail_thread / wail_sleep_ms / wail_mono_micros (not IPC itself)
+#include "wail_thread.h" // wail_thread / wail_mutex / wail_sleep_ms
 
 #define LBR_SLOTS 16
 #define LBR_RING_FRAMES 32768 // power of two; ~0.68s stereo @48k
@@ -158,7 +158,7 @@ static void slot_drain(lbr_recv *self, lbr_slot *s) {
 }
 
 // --- align: pad early / skip late, deadband 32 frames [process thread] ---
-// Same math as the IPC recv plugin's recv_align (wail_recv.c), ported: phase
+// Pad early / skip late against the host transport: phase
 // mode uses the chunk's session beat vs the host transport's song position;
 // mono mode uses session-clock µs. Phase targets snap by whole beats to the
 // mono target (µs error is ms; the ±0.5-beat ambiguity is hundreds of ms).

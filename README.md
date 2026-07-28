@@ -33,8 +33,6 @@ For DAWs that don't support Ableton Link Audio, load the **WAIL Link Bridge Send
 
 Two requirements: your DAW must load **CLAP** plugins (Bitwig, REAPER, Studio One, Qtractor; not Logic or Pro Tools), and the project must run at **48 kHz** — Link Audio is 48 kHz only, so at any other rate Send publishes nothing and Recv outputs silence.
 
-WAIL also still ships the older **WAIL Send** / **WAIL Recv** pair, which move raw audio to and from the running app over loopback instead.
-
 On the Windows and Linux release builds the plugins auto-install on first launch into your per-user CLAP folder (`%LOCALAPPDATA%\Programs\Common\CLAP` / `~/.clap`); if that's blocked, copy the `.clap` bundles from the release's `lib/` folder there yourself and rescan. On Homebrew, run `wail-install-plugins`.
 
 ## Getting Started

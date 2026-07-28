@@ -28,7 +28,6 @@
 
 #include "linkbridge_link.h"
 #include "plugin_host.h"
-#include "wail_ipc.h"
 
 namespace {
 
@@ -137,7 +136,7 @@ int main(int argc, char **argv) {
 
    wailtest::ClapInstance inst;
    std::string err;
-   if (!inst.load(args.plugin.c_str(), "software.wail.linkbridge.recv", 0, kRate, kBlock, kBlock, &err)) {
+   if (!inst.load(args.plugin.c_str(), "software.wail.linkbridge.recv", kRate, kBlock, kBlock, &err)) {
       fprintf(stderr, "load failed: %s\n", err.c_str());
       return 1;
    }

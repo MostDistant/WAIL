@@ -56,8 +56,8 @@ func GenerateSineFrame(freq float64, phase *float64, sampleRate uint32, channels
 	return samples
 }
 
-// TestToneTask runs a virtual send plugin that generates WAIF frames.
-// It behaves like a real WAIL Send plugin but runs in-process.
+// TestToneTask is an in-process WAIF frame generator — a synthetic sender that
+// feeds the relay path without any capture hardware or DAW.
 func TestToneTask(
 	ctx context.Context,
 	streamIndex uint16,

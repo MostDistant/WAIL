@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.15)
 project(wail_plugins C CXX) # CXX: the Link Bridge plugins embed the Link SDK (ADR-0007)
 
-# Thin CLAP bridge plugins (ADR-0005). No external deps beyond the vendored CLAP
-# headers, libpthread (POSIX) / ws2_32 (Windows), and the system sockets — the WAIL
-# app owns all codec/relay logic, so these carry only raw PCM over loopback TCP.
+# The Link Bridge CLAP plugins (ADR-0007) bring Link Audio into DAWs that don't
+# speak it natively. Room intelligence (codec, intervals, relay, room clock) stays
+# in the WAIL app; the plugins only publish/subscribe Link Audio channels.
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -21,14 +21,7 @@ function(add_wail_plugin name src)
   target_include_directories(${name} PRIVATE "${CLAP_INCLUDE}" "${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(${name} PRIVATE Threads::Threads)
   if(UNIX AND NOT APPLE)
-    target_link_libraries(${name} PRIVATE m) # floor() in the align path
-  endif()
-  if(MSVC)
-    # MSVC has no C11 atomics by default (even current VS2022): /std:c11 alone
-    # makes vcruntime_c11_stdatomic.h #error "C atomic support is not enabled".
-    # The plugins only use lock-free atomics (bool/int/u32/u64), which the
-    # experimental flag covers.
-    target_compile_options(${name} PRIVATE /std:c11 /experimental:c11atomics)
+    target_link_libraries(${name} PRIVATE m)
   endif()
   if(WIN32)
     target_link_libraries(${name} PRIVATE ws2_32)
@@ -48,8 +41,6 @@ function(add_wail_plugin name src)
   endif()
 endfunction()
 
-add_wail_plugin(wail-send wail_send.c)
-add_wail_plugin(wail-recv wail_recv.c)
 add_wail_plugin(transport-probe transport_probe.c) # dev diagnostic, not shipped
 
 # Link Bridge plugins (ADR-0007): the Link SDK (C++17 + asio) compiled into the
@@ -90,7 +81,7 @@ function(add_linkbridge_plugin name)
   set_target_properties(${name} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
   target_link_libraries(${name} PRIVATE linkbridge-link)
   if(MSVC)
-    # Same as add_wail_plugin: linkbridge_recv uses C11 atomics (wail_ipc.h).
+    # linkbridge_recv.c uses C11 atomics (wail_thread.h).
     target_compile_options(${name} PRIVATE /std:c11 /experimental:c11atomics)
   endif()
   if(WIN32)
@@ -114,24 +105,12 @@ add_linkbridge_plugin(linkbridge-spike linkbridge_spike.c) # dev spike (gate 1),
 add_linkbridge_plugin(wail-linkbridge-send linkbridge_send.c)
 add_linkbridge_plugin(wail-linkbridge-recv linkbridge_recv.c)
 
-# DAW-less integration tests (clap-trap host + IPC test double). Off by default:
+# DAW-less integration tests (clap-trap host + a second in-process Link peer).
+# Off by default:
 # enabling fetches clap-trap over the network at configure time.
 option(WAIL_PLUGIN_TESTS "Build the CLAP plugin integration tests (fetches clap-trap)" OFF)
 if(WAIL_PLUGIN_TESTS)
   enable_language(CXX) # tests only — the plugins themselves are pure C
   enable_testing()
   add_subdirectory(tests)
-endif()
-
-# State-extension roundtrip test: loads each built bundle and drives clap.state
-# with a fake host (see test_state.c). wail-send also asserts its "Stream
-# Index" param survives a save/load cycle.
-if(NOT WIN32)
-  enable_testing()
-  add_executable(test_state test_state.c)
-  target_include_directories(test_state PRIVATE "${CLAP_INCLUDE}")
-  target_link_libraries(test_state PRIVATE ${CMAKE_DL_LIBS})
-  add_dependencies(test_state wail-send wail-recv)
-  add_test(NAME state_send COMMAND test_state $<TARGET_FILE:wail-send> software.wail.send stream-index)
-  add_test(NAME state_recv COMMAND test_state $<TARGET_FILE:wail-recv> software.wail.recv)
 endif()
