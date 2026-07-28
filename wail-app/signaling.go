@@ -61,6 +61,7 @@ type SignalingClient struct {
 
 	audioDrops atomic.Uint64 // outgoing audio frames dropped on a full queue
 	syncDrops  atomic.Uint64 // outgoing sync messages dropped on a full queue
+	ctrlDrops  atomic.Uint64 // outgoing control messages dropped on a full queue
 
 	cancel context.CancelFunc
 }
@@ -402,6 +403,11 @@ func (sc *SignalingClient) SendControl(msg SignalMessage) {
 	select {
 	case sc.ctrlOutCh <- msg:
 	default:
+		// Carries the loopback toggle (a user action) alongside log and metrics
+		// traffic, so a silent drop reads as "the toggle doesn't work".
+		if n := sc.ctrlDrops.Add(1); n == 1 || n%100 == 0 {
+			log.Printf("[signaling] WARN: outgoing control queue full — dropped %s (%d total)", msg.Type, n)
+		}
 	}
 }
 
@@ -447,10 +453,11 @@ func (m *PeerMesh) Broadcast(msg SyncMessage) bool {
 	return m.signaling.BroadcastSync(msg)
 }
 
-// SendTo sends a sync message to a specific peer.
-func (m *PeerMesh) SendTo(peerID string, msg SyncMessage) error {
-	m.signaling.SendSyncTo(peerID, msg)
-	return nil
+// SendTo sends a sync message to a specific peer, reporting whether it was
+// queued. It used to return a nil error unconditionally, which told callers a
+// dropped message had been delivered.
+func (m *PeerMesh) SendTo(peerID string, msg SyncMessage) bool {
+	return m.signaling.SendSyncTo(peerID, msg)
 }
 
 // BroadcastAudio sends binary audio to all peers.

@@ -29,3 +29,19 @@ func TestSendSyncToReportsDropWhenQueueFull(t *testing.T) {
 		t.Fatal("full queue must report a drop")
 	}
 }
+
+// SendTo used to return a nil error for a send it knew had been dropped. The
+// Hello reply is sent behind MarkHelloSent, which latches on the first call —
+// so a drop there means the peer never learns our identity and evicts us at
+// 15s, while our own GUI still shows them. Callers need the truth.
+func TestPeerMeshSendToReportsDropWhenQueueFull(t *testing.T) {
+	sc := &SignalingClient{syncOutCh: make(chan outgoingSync, 1)}
+	mesh := &PeerMesh{signaling: sc}
+
+	if !mesh.SendTo("peer1", NewStreamNames(nil)) {
+		t.Fatal("first send should enqueue")
+	}
+	if mesh.SendTo("peer1", NewStreamNames(nil)) {
+		t.Fatal("full queue must report a drop")
+	}
+}

@@ -257,18 +257,84 @@ func TestResolveStreamNamesDoesNotClobberALiveOverride(t *testing.T) {
 
 // Only capture channels get persisted: the test tone / WAV / metronome labels
 // live at synthetic indices with no channel behind them.
-func TestStreamNameEntriesSkipsSendersWithNoChannel(t *testing.T) {
+func TestReconcileSkipsSendersWithNoChannel(t *testing.T) {
 	channels := []CaptureChannelInfo{
 		{StreamID: 0, PeerName: "Live", Name: "Bus 1", Enabled: true},
 	}
 	overrides := map[uint16]string{0: "Bass DI", 0xFF01: "Metronome"}
 
-	got := streamNameEntries(channels, overrides)
+	store := &StreamNameStore{}
+	store.Reconcile(channels, overrides)
 
 	want := []StreamNameEntry{
-		{CaptureChannelKey: CaptureChannelKey{PeerName: "Live", ChannelName: "Bus 1"}, Name: "Bass DI"},
+		{CaptureChannelKey: chanKey("Live", "Bus 1"), Name: "Bass DI"},
 	}
-	if len(got) != 1 || got[0] != want[0] {
-		t.Fatalf("streamNameEntries = %+v, want %+v", got, want)
+	if got := store.Entries(); len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("Entries = %+v, want %+v", got, want)
+	}
+}
+
+// The save payload is built from the live capture channels, but the file is a
+// full overwrite — so a name for a channel that simply isn't on the LAN today
+// must still survive. Persist the union the store holds, not the live slice.
+func TestSaveKeepsNamesForChannelsNotCurrentlyPresent(t *testing.T) {
+	dir := t.TempDir()
+	SaveStreamNames(dir, []StreamNameEntry{
+		{CaptureChannelKey: chanKey("Live", "Bus 1"), Name: "Bass"},
+		{CaptureChannelKey: chanKey("Bitwig", "Master"), Name: "Gtr"},
+	})
+
+	// Next session: only Bitwig is running.
+	store := LoadStreamNames(dir)
+	channels := []CaptureChannelInfo{{StreamID: 0, PeerName: "Bitwig", Name: "Master", Enabled: true}}
+	overrides := map[uint16]string{}
+	resolveStreamNames(channels, store, overrides)
+
+	SaveStreamNames(dir, store.Entries())
+
+	reloaded := LoadStreamNames(dir)
+	if n, ok := reloaded.nameFor(chanKey("Live", "Bus 1")); !ok || n != "Bass" {
+		t.Fatalf("absent channel's name was erased: %+v", reloaded.ByChannel)
+	}
+}
+
+// Clearing a name has to stick. Without a delete on the store, the next resolve
+// pass re-applies the old name and writes it straight back to disk.
+func TestClearingANameRemovesItFromTheStore(t *testing.T) {
+	channels := []CaptureChannelInfo{{StreamID: 0, PeerName: "Live", Name: "Bus 1", Enabled: true}}
+	store := &StreamNameStore{ByChannel: []StreamNameEntry{
+		{CaptureChannelKey: chanKey("Live", "Bus 1"), Name: "Bass"},
+	}}
+
+	// User clears the override; the session syncs the now-empty map.
+	overrides := map[uint16]string{}
+	store.Reconcile(channels, overrides)
+
+	if resolveStreamNames(channels, store, overrides) {
+		t.Fatal("a cleared name must not be resurrected by the next resolve")
+	}
+	if _, ok := overrides[0]; ok {
+		t.Fatalf("cleared name came back: %v", overrides)
+	}
+	if _, ok := store.nameFor(chanKey("Live", "Bus 1")); ok {
+		t.Fatal("cleared name still in the store — it would be rewritten to disk")
+	}
+}
+
+// Reconcile must not treat "this channel isn't here right now" as "deleted".
+func TestReconcileOnlyForgetsNamesForLiveChannels(t *testing.T) {
+	channels := []CaptureChannelInfo{{StreamID: 0, PeerName: "Live", Name: "Bus 1", Enabled: true}}
+	store := &StreamNameStore{ByChannel: []StreamNameEntry{
+		{CaptureChannelKey: chanKey("Live", "Bus 1"), Name: "Bass"},
+		{CaptureChannelKey: chanKey("Bitwig", "Master"), Name: "Gtr"},
+	}}
+
+	store.Reconcile(channels, map[uint16]string{}) // Bus 1 cleared, Bitwig absent
+
+	if _, ok := store.nameFor(chanKey("Live", "Bus 1")); ok {
+		t.Fatal("live channel's cleared name should be forgotten")
+	}
+	if n, _ := store.nameFor(chanKey("Bitwig", "Master")); n != "Gtr" {
+		t.Fatal("absent channel's name must be left alone")
 	}
 }

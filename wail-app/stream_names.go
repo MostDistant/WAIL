@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"maps"
 	"os"
@@ -47,12 +49,46 @@ func (s *StreamNameStore) put(k CaptureChannelKey, name string) {
 	s.ByChannel = append(s.ByChannel, StreamNameEntry{CaptureChannelKey: k, Name: name})
 }
 
+func (s *StreamNameStore) remove(k CaptureChannelKey) {
+	for i := range s.ByChannel {
+		if s.ByChannel[i].CaptureChannelKey == k {
+			s.ByChannel = append(s.ByChannel[:i], s.ByChannel[i+1:]...)
+			return
+		}
+	}
+}
+
+// Entries is the full set to persist. Saving is a whole-file overwrite, so this
+// must be the union the store holds — not just the channels live right now, or
+// a session with one DAW open would erase every name belonging to another.
+func (s *StreamNameStore) Entries() []StreamNameEntry { return s.ByChannel }
+
+// Reconcile folds this session's overrides back into the store: a name set or
+// changed is recorded, and a name *cleared* is forgotten. Only live channels
+// are considered — an absent channel's name is untouched, since "not on the LAN
+// today" must never read as "the user deleted it".
+func (s *StreamNameStore) Reconcile(channels []CaptureChannelInfo, overrides map[uint16]string) {
+	for _, cc := range channels {
+		key := CaptureChannelKey{PeerName: cc.PeerName, ChannelName: cc.Name}
+		if name, ok := overrides[cc.StreamID]; ok {
+			s.put(key, name)
+		} else {
+			s.remove(key)
+		}
+	}
+}
+
 // LoadStreamNames loads persisted stream names. Returns an empty store on any
 // failure, and falls back to reading the pre-re-key index-keyed format.
 func LoadStreamNames(dataDir string) *StreamNameStore {
 	store := &StreamNameStore{}
 	data, err := os.ReadFile(filepath.Join(dataDir, streamNamesFilename))
 	if err != nil {
+		// A missing file is the first run. Anything else (permissions, EIO) looks
+		// identical from here and would silently drop every name the user set.
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("[stream_names] Failed to read %s: %v", streamNamesFilename, err)
+		}
 		return store
 	}
 
@@ -108,22 +144,6 @@ func resolveStreamNames(channels []CaptureChannelInfo, store *StreamNameStore, o
 		}
 	}
 	return changed
-}
-
-// streamNameEntries projects the session's index-keyed overrides back onto
-// human-stable channel keys for persistence. Overrides with no capture channel
-// behind them (test tone, WAV, metronome) are session-scoped and skipped.
-func streamNameEntries(channels []CaptureChannelInfo, overrides map[uint16]string) []StreamNameEntry {
-	entries := make([]StreamNameEntry, 0, len(overrides))
-	for _, cc := range channels {
-		if name, ok := overrides[cc.StreamID]; ok {
-			entries = append(entries, StreamNameEntry{
-				CaptureChannelKey: CaptureChannelKey{PeerName: cc.PeerName, ChannelName: cc.Name},
-				Name:              name,
-			})
-		}
-	}
-	return entries
 }
 
 // effectiveStreamNames is the map receivers should label our streams with:

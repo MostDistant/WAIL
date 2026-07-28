@@ -235,18 +235,16 @@ func sessionLoop(
 	if nameStore == nil {
 		nameStore = &StreamNameStore{}
 	}
-	// persistStreamNames re-keys the session's index-keyed overrides onto their
-	// channels and hands them to the app. Called whenever either side moves: a
-	// user rename, or a persisted name resolving onto a newly discovered channel.
+	// persistStreamNames folds the session's index-keyed overrides back onto
+	// their channels and hands the app the whole store to write. Called whenever
+	// either side moves: a user rename, or a persisted name resolving onto a
+	// newly discovered channel.
 	persistStreamNames := func(channels []CaptureChannelInfo) {
 		if config.OnStreamNamesChanged == nil {
 			return
 		}
-		entries := streamNameEntries(channels, localStreamNames)
-		for _, e := range entries {
-			nameStore.put(e.CaptureChannelKey, e.Name)
-		}
-		config.OnStreamNamesChanged(entries, maps.Clone(localStreamNames))
+		nameStore.Reconcile(channels, localStreamNames)
+		config.OnStreamNamesChanged(nameStore.Entries(), maps.Clone(localStreamNames))
 	}
 	syncStreamNames := func() {
 		channels := audioEngine.CaptureChannels()
@@ -755,9 +753,16 @@ func sessionLoop(
 
 				if peers.MarkHelloSent(from) {
 					reply := NewHello(peerID, &displayName, &identity)
-					mesh.SendTo(from, reply)
-					if len(effStreamNames) > 0 {
-						mesh.SendTo(from, NewStreamNames(StreamNamesToWire(effStreamNames)))
+					if !mesh.SendTo(from, reply) {
+						// MarkHelloSent latches, so a dropped reply would never
+						// be retried and the peer would evict us at 15s for
+						// having no identity. Unlatch and let the watchdog go.
+						peers.ClearHelloSent(from)
+					}
+					if len(effStreamNames) > 0 && !mesh.SendTo(from, NewStreamNames(StreamNamesToWire(effStreamNames))) {
+						// Fall back to the broadcast path rather than leaving
+						// this peer on "stream N" for the session.
+						nameCast.Reset()
 					}
 				}
 

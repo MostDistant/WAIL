@@ -227,6 +227,11 @@ func (a *App) JoinRoom(
 		},
 	}
 
+	// Stream indices are minted per session, so last session's index→name map
+	// would land its names on whatever channels take those indices this time.
+	// The session re-resolves from streamNameStore, which is keyed by channel.
+	a.streamNames = make(map[uint16]string)
+
 	handle, err := SpawnSession(a.emitter, config)
 	if err != nil {
 		return nil, err

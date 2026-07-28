@@ -359,7 +359,15 @@ static void *mgr_main(void *arg) {
             s->channel_id = chans[c].id_u64;
             snprintf(s->chan_name, sizeof(s->chan_name), "%s", chans[c].name);
             s->source = lb_source_create(self->link, chans[c].id_u64);
-            if (!s->source) break;
+            if (!s->source) {
+               // Every success is logged; without this the one failure that
+               // matters looks like the channel was never discovered at all.
+               lbr_log(self, "subscribe FAILED: \"%s\" (lb_source_create returned NULL)",
+                       chans[c].name);
+               s->channel_id = 0;
+               s->chan_name[0] = '\0';
+               break;
+            }
             atomic_store_explicit(&s->assigned, true, memory_order_release);
             char disp[128];
             set_port_name(self, i, display_name(chans[c].name, disp, sizeof(disp)));
@@ -387,6 +395,7 @@ static bool CLAP_ABI lbr_activate(const clap_plugin_t *plugin, double sr, uint32
    lbr_recv *self = plugin->plugin_data;
    { char lp[512]; lb_temp_log_path("linkbridge-recv.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
    self->rate_ok = (sr == 48000.0);
+   self->logged_no_rescan = false; // the log file is per-activation; re-arm with it
    self->link = lb_create(120.0);
    lb_enable(self->link, true);
    lb_enable_audio(self->link, true);
