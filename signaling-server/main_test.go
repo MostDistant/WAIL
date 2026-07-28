@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
@@ -446,5 +449,158 @@ func TestLoopbackResetsOnRejoin(t *testing.T) {
 	}
 	if _, _, ok := readBinaryFrame(t, ws, 500*time.Millisecond); ok {
 		t.Fatal("unexpected echo after rejoin — loopback should reset")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Room password hashing tests
+// ---------------------------------------------------------------------------
+
+func TestHashPasswordIsSaltedBcrypt(t *testing.T) {
+	a, err := hashPassword("hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hashPassword("hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("two hashes of the same password are identical — hash is not salted")
+	}
+	if !strings.HasPrefix(a, "$2a$") {
+		t.Fatalf("expected a bcrypt hash, got %q", a)
+	}
+	cost, err := bcrypt.Cost([]byte(a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost < 12 {
+		t.Fatalf("bcrypt cost %d is below the minimum of 12", cost)
+	}
+}
+
+func TestCheckPasswordBcrypt(t *testing.T) {
+	stored, err := hashPassword("hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, legacy := checkPassword(stored, "hunter2"); !ok || legacy {
+		t.Fatalf("correct password: ok=%v legacy=%v, want true/false", ok, legacy)
+	}
+	if ok, _ := checkPassword(stored, "hunter3"); ok {
+		t.Fatal("wrong password accepted")
+	}
+	if ok, _ := checkPassword(stored, ""); ok {
+		t.Fatal("empty password accepted")
+	}
+}
+
+// Passwords beyond bcrypt's 72-byte input limit must still round-trip rather
+// than being silently truncated or rejected.
+func TestCheckPasswordLongerThanBcryptLimit(t *testing.T) {
+	long := strings.Repeat("a", 100)
+	stored, err := hashPassword(long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := checkPassword(stored, long); !ok {
+		t.Fatal("long password rejected by its own hash")
+	}
+	// Differs only past byte 72 — a truncating implementation would accept it.
+	if ok, _ := checkPassword(stored, strings.Repeat("a", 99)+"b"); ok {
+		t.Fatal("password differing past byte 72 accepted — input is being truncated")
+	}
+}
+
+func TestCheckPasswordLegacySHA256(t *testing.T) {
+	sum := sha256.Sum256([]byte("hunter2"))
+	stored := hex.EncodeToString(sum[:])
+	ok, legacy := checkPassword(stored, "hunter2")
+	if !ok || !legacy {
+		t.Fatalf("legacy hash: ok=%v legacy=%v, want true/true", ok, legacy)
+	}
+	if ok, _ := checkPassword(stored, "hunter3"); ok {
+		t.Fatal("wrong password accepted against legacy hash")
+	}
+}
+
+func joinWithPassword(t *testing.T, ws *websocket.Conn, room, peerID, password string) map[string]any {
+	t.Helper()
+	msg := map[string]any{
+		"type":           "join",
+		"room":           room,
+		"peer_id":        peerID,
+		"password":       password,
+		"stream_count":   1,
+		"client_version": "99.0.0",
+	}
+	if err := ws.WriteJSON(msg); err != nil {
+		t.Fatal(err)
+	}
+	var resp map[string]any
+	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if err := ws.ReadJSON(&resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func roomHash(t *testing.T, h *hub, room string) string {
+	t.Helper()
+	var stored sql.NullString
+	if err := h.db.QueryRow("SELECT password_hash FROM rooms WHERE room = ?", room).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	return stored.String
+}
+
+func TestJoinStoresBcryptHash(t *testing.T) {
+	h, srv := testServer(t)
+	if resp := joinWithPassword(t, dialWS(t, srv), "pw-room", "creator", "hunter2"); resp["type"] != "join_ok" {
+		t.Fatalf("expected join_ok, got %v", resp)
+	}
+
+	stored := roomHash(t, h, "pw-room")
+	if !strings.HasPrefix(stored, "$2") {
+		t.Fatalf("expected a bcrypt hash in the rooms table, got %q", stored)
+	}
+
+	if resp := joinWithPassword(t, dialWS(t, srv), "pw-room", "guest", "hunter2"); resp["type"] != "join_ok" {
+		t.Fatalf("correct password rejected: %v", resp)
+	}
+	resp := joinWithPassword(t, dialWS(t, srv), "pw-room", "intruder", "wrong")
+	if resp["type"] != "join_error" || resp["code"] != "unauthorized" {
+		t.Fatalf("expected unauthorized, got %v", resp)
+	}
+}
+
+// Rooms created before the bcrypt migration keep working, and their stored
+// digest is upgraded in place on the first successful join.
+func TestJoinUpgradesLegacyHash(t *testing.T) {
+	h, srv := testServer(t)
+	sum := sha256.Sum256([]byte("hunter2"))
+	legacy := hex.EncodeToString(sum[:])
+	if _, err := h.db.Exec("INSERT INTO rooms (room, password_hash, created_at) VALUES (?, ?, ?)",
+		"legacy-room", legacy, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp := joinWithPassword(t, dialWS(t, srv), "legacy-room", "intruder", "wrong"); resp["code"] != "unauthorized" {
+		t.Fatalf("expected unauthorized, got %v", resp)
+	}
+	if got := roomHash(t, h, "legacy-room"); got != legacy {
+		t.Fatal("failed join rewrote the stored hash")
+	}
+
+	if resp := joinWithPassword(t, dialWS(t, srv), "legacy-room", "member", "hunter2"); resp["type"] != "join_ok" {
+		t.Fatalf("legacy password rejected: %v", resp)
+	}
+	upgraded := roomHash(t, h, "legacy-room")
+	if !strings.HasPrefix(upgraded, "$2") {
+		t.Fatalf("expected the legacy hash to be upgraded to bcrypt, got %q", upgraded)
+	}
+	if resp := joinWithPassword(t, dialWS(t, srv), "legacy-room", "member2", "hunter2"); resp["type"] != "join_ok" {
+		t.Fatalf("join failed after upgrade: %v", resp)
 	}
 }

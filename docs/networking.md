@@ -101,7 +101,7 @@ All signaling happens over a single WebSocket connection per client. Messages ar
 
 On `join`, the server:
 1. Checks `client_version >= minVersion`. Older clients get `join_error` with code `version_outdated`.
-2. Checks/creates the room, verifies password (SHA-256 hash comparison).
+2. Checks/creates the room, verifies the password against the stored bcrypt hash (cost 12). Rooms still holding a pre-bcrypt unsalted SHA-256 digest are accepted and re-hashed in place on the first successful join.
 3. Checks room capacity: 32 total stream slots. Full rooms get `join_error` with code `room_full`.
 4. Upserts peer into `peers` table.
 5. Sends `peer_joined` to all existing peers in the room (instant push).
