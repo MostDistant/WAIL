@@ -50,9 +50,9 @@ const (
 
 	// emitCushionMs is how far ahead of the playhead each sink is kept fed —
 	// stall tolerance for the emit loop. It stamps audio into the future, which
-	// some Link Audio receivers stall on (the VOID DAW-bridge plugin chokes on
-	// any feed-ahead), so the default was briefly 0 — floored to one ~5ms write
-	// chunk, the minimum that still emits. Field testing (2026-07-23) showed
+	// some Link Audio receivers stall on (a third-party DAW bridge was measured
+	// with ~0 tolerance), so the default was briefly 0 — floored to one ~5ms
+	// write chunk, the minimum that still emits. Field testing (2026-07-23) showed
 	// that floor gives the emit loop zero jitter tolerance: the playhead
 	// overtakes the cursor on ordinary scheduling noise and every tick logged
 	// sink underruns with audible dropouts (~150 events/s). 100ms absorbs that
