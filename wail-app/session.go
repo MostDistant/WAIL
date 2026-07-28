@@ -720,11 +720,7 @@ func sessionLoop(
 						emitter.Emit("peer:left", PeerLeftEvent{PeerID: oldPID})
 					}
 
-					peers.WithPeer(msg.PeerID, func(p *PeerState) {
-						p.Identity = msg.Identity
-					})
-					peers.RekeyPeerSlots(msg.PeerID, rid)
-					peers.AssignSlot(msg.PeerID, 0)
+					peers.AdoptIdentity(msg.PeerID, rid)
 				}
 
 				if peers.MarkHelloSent(from) {
