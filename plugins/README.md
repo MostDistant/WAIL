@@ -16,6 +16,16 @@ or `WAIL_IPC_ADDR`).
 Both implement `clap.state` (Stream Index persists in project files for send; recv
 saves a version marker), so hosts can save projects/presets containing them.
 
+Alongside them are the **Link Bridge** plugins (ADR-0007), for DAWs that are native
+Link *sync* peers but lack Link Audio (Live pre-12.3, Bitwig-class hosts). These speak
+Link Audio directly instead of IPC — each instance joins the LAN Link session as its
+own audio-only peer, so the app needs no changes:
+
+- **`wail-linkbridge-send`** — publishes the track as a Link Audio channel named from
+  the DAW track name.
+- **`wail-linkbridge-recv`** — 16 stereo ports subscribed to the room-published
+  `WAIL · {peer} · {stream}` channels, auto-named as peers arrive.
+
 ## Build
 
 Requires a C11 compiler, CMake ≥ 3.15, and the vendored CLAP headers:
@@ -27,7 +37,10 @@ cmake --build build/plugins
 ctest --test-dir build/plugins --output-on-failure   # clap.state roundtrip tests
 ```
 
-Outputs `wail-send.clap` and `wail-recv.clap` in the build dir:
+Outputs the four product bundles in the build dir — `wail-send.clap`,
+`wail-recv.clap`, `wail-linkbridge-send.clap`, `wail-linkbridge-recv.clap` (the
+`transport-probe` and `linkbridge-spike` targets build alongside but are dev tools and
+are never shipped):
 - **macOS** — a `.clap` bundle (`Contents/MacOS/<name>` + `Info.plist`).
 - **Linux / Windows** — a single `.clap` shared object / DLL.
 

@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +33,45 @@ func clapDestDir(t *testing.T) string {
 	default:
 		t.Skipf("unsupported test platform: %s", runtime.GOOS)
 		return ""
+	}
+}
+
+// staleLinkBridgeName matches an unprefixed linkbridge-send/-recv bundle name —
+// the pre-rename spelling. The leading class rejects "wail-linkbridge-send" and
+// the underscore source filenames (linkbridge_send.c).
+var staleLinkBridgeName = regexp.MustCompile(`(?m)(^|[^-\w])linkbridge-(send|recv)`)
+
+// The bundle list is duplicated across the build, the two installers, and the
+// release workflow. A rename that misses one of them ships silently: the Homebrew
+// formula's brace glob dropped both renamed Link Bridge bundles and still
+// succeeded, so macOS users got two of four plugins with no error anywhere.
+func TestPluginBundleListsInSync(t *testing.T) {
+	files := []string{
+		"homebrew/wail.rb",
+		"scripts/wail-install-plugins.sh",
+		"plugins/CMakeLists.txt",
+		".github/workflows/release.yml",
+	}
+	for _, rel := range files {
+		t.Run(rel, func(t *testing.T) {
+			// ".." is the repo root; absent when the module is extracted alone.
+			data, err := os.ReadFile(filepath.Join("..", rel))
+			if err != nil {
+				t.Skipf("not in a repo checkout: %v", err)
+			}
+			body := string(data)
+			for _, bundle := range pluginBundles {
+				// CMake targets and the workflow's shell loop name bundles without
+				// the extension, so match on the base name.
+				name := strings.TrimSuffix(bundle, ".clap")
+				if !strings.Contains(body, name) {
+					t.Errorf("%s does not mention bundle %q", rel, name)
+				}
+			}
+			if m := staleLinkBridgeName.FindString(body); m != "" {
+				t.Errorf("%s uses the pre-rename bundle name %q; expected the wail- prefix", rel, strings.TrimSpace(m))
+			}
+		})
 	}
 }
 
