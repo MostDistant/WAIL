@@ -204,9 +204,57 @@ static void CLAP_ABI lbs_track_info_changed(const clap_plugin_t *plugin) {
 }
 static const clap_plugin_track_info_t lbs_track_info = {lbs_track_info_changed};
 
+// --- clap.state ---
+// Nothing to persist: Send names its channel from clap.track-info and Recv
+// derives its ports from LAN discovery. Bitwig refuses to save a project
+// containing a plugin that can't save state, so both write a version marker
+// and reject anything they don't recognise.
+#define LBS_STATE_MAGIC 0x4C425343u /* 'LBSC' */
+#define LBS_STATE_VERSION 1u
+
+static void lbs_put_u32(uint8_t *p, uint32_t v) {
+   p[0] = (uint8_t)(v & 0xFF);
+   p[1] = (uint8_t)((v >> 8) & 0xFF);
+   p[2] = (uint8_t)((v >> 16) & 0xFF);
+   p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+static uint32_t lbs_get_u32(const uint8_t *p) {
+   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static bool CLAP_ABI lbs_state_save(const clap_plugin_t *p, const clap_ostream_t *os) {
+   (void)p;
+   uint8_t buf[8];
+   lbs_put_u32(buf, LBS_STATE_MAGIC);
+   lbs_put_u32(buf + 4, LBS_STATE_VERSION);
+   uint32_t off = 0;
+   while (off < sizeof(buf)) {
+      int64_t n = os->write(os, buf + off, sizeof(buf) - off);
+      if (n <= 0) return false;
+      off += (uint32_t)n;
+   }
+   return true;
+}
+
+static bool CLAP_ABI lbs_state_load(const clap_plugin_t *p, const clap_istream_t *is) {
+   (void)p;
+   uint8_t buf[8];
+   uint32_t off = 0;
+   while (off < sizeof(buf)) {
+      int64_t n = is->read(is, buf + off, sizeof(buf) - off);
+      if (n <= 0) return false; // truncated or errored
+      off += (uint32_t)n;
+   }
+   return lbs_get_u32(buf) == LBS_STATE_MAGIC &&
+          lbs_get_u32(buf + 4) <= LBS_STATE_VERSION;
+}
+
+static const clap_plugin_state_t lbs_state = {.save = lbs_state_save, .load = lbs_state_load};
+
 static const void *CLAP_ABI lbs_get_extension(const clap_plugin_t *p, const char *id) {
    (void)p;
    if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &lbs_audio_ports;
+   if (!strcmp(id, CLAP_EXT_STATE)) return &lbs_state;
    if (!strcmp(id, CLAP_EXT_TRACK_INFO)) return &lbs_track_info;
    if (!strcmp(id, CLAP_EXT_TRACK_INFO_COMPAT)) return &lbs_track_info;
    return NULL;

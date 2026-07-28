@@ -489,9 +489,57 @@ static bool CLAP_ABI lbr_ap_get(const clap_plugin_t *plugin, uint32_t idx, bool 
 }
 static const clap_plugin_audio_ports_t lbr_audio_ports = {lbr_ap_count, lbr_ap_get};
 
+// --- clap.state ---
+// Nothing to persist: Send names its channel from clap.track-info and Recv
+// derives its ports from LAN discovery. Bitwig refuses to save a project
+// containing a plugin that can't save state, so both write a version marker
+// and reject anything they don't recognise.
+#define LBR_STATE_MAGIC 0x4C425243u /* 'LBRC' */
+#define LBR_STATE_VERSION 1u
+
+static void lbr_put_u32(uint8_t *p, uint32_t v) {
+   p[0] = (uint8_t)(v & 0xFF);
+   p[1] = (uint8_t)((v >> 8) & 0xFF);
+   p[2] = (uint8_t)((v >> 16) & 0xFF);
+   p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+static uint32_t lbr_get_u32(const uint8_t *p) {
+   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static bool CLAP_ABI lbr_state_save(const clap_plugin_t *p, const clap_ostream_t *os) {
+   (void)p;
+   uint8_t buf[8];
+   lbr_put_u32(buf, LBR_STATE_MAGIC);
+   lbr_put_u32(buf + 4, LBR_STATE_VERSION);
+   uint32_t off = 0;
+   while (off < sizeof(buf)) {
+      int64_t n = os->write(os, buf + off, sizeof(buf) - off);
+      if (n <= 0) return false;
+      off += (uint32_t)n;
+   }
+   return true;
+}
+
+static bool CLAP_ABI lbr_state_load(const clap_plugin_t *p, const clap_istream_t *is) {
+   (void)p;
+   uint8_t buf[8];
+   uint32_t off = 0;
+   while (off < sizeof(buf)) {
+      int64_t n = is->read(is, buf + off, sizeof(buf) - off);
+      if (n <= 0) return false; // truncated or errored
+      off += (uint32_t)n;
+   }
+   return lbr_get_u32(buf) == LBR_STATE_MAGIC &&
+          lbr_get_u32(buf + 4) <= LBR_STATE_VERSION;
+}
+
+static const clap_plugin_state_t lbr_state = {.save = lbr_state_save, .load = lbr_state_load};
+
 static const void *CLAP_ABI lbr_get_extension(const clap_plugin_t *p, const char *id) {
    (void)p;
    if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &lbr_audio_ports;
+   if (!strcmp(id, CLAP_EXT_STATE)) return &lbr_state;
    return NULL;
 }
 

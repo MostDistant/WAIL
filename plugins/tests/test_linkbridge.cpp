@@ -538,3 +538,66 @@ TEST(linkbridge_recv_resubscribes_after_reactivate) {
    inst.teardown();
    lb_destroy(pub);
 }
+
+// Bitwig refuses to save a project containing a plugin that can't save its
+// state, so both bundles ship a version-marker blob even though they have
+// nothing to persist (Send names its channel from clap.track-info, Recv derives
+// its ports from LAN discovery). Verifies the extension exists, save writes
+// bytes, load round-trips, and a truncated stream is rejected without crashing.
+namespace {
+struct MemStream {
+   std::vector<uint8_t> bytes;
+   size_t readPos = 0;
+   clap_ostream_t out{};
+   clap_istream_t in{};
+
+   MemStream() {
+      out.ctx = this;
+      out.write = [](const clap_ostream_t *s, const void *buf, uint64_t n) -> int64_t {
+         auto *m = (MemStream *)s->ctx;
+         auto *p = (const uint8_t *)buf;
+         m->bytes.insert(m->bytes.end(), p, p + n);
+         return (int64_t)n;
+      };
+      in.ctx = this;
+      in.read = [](const clap_istream_t *s, void *buf, uint64_t n) -> int64_t {
+         auto *m = (MemStream *)s->ctx;
+         uint64_t avail = m->bytes.size() - m->readPos;
+         uint64_t take = n < avail ? n : avail;
+         memcpy(buf, m->bytes.data() + m->readPos, (size_t)take);
+         m->readPos += (size_t)take;
+         return (int64_t)take;
+      };
+   }
+};
+
+void checkStateRoundtrip(const char *path, const char *id) {
+   wailtest::ClapInstance inst;
+   std::string err;
+   CHECK_MSG(inst.load(path, id, 48000.0, 256, 256, &err), err.c_str());
+   if (!inst.plugin) return;
+
+   auto *st = (const clap_plugin_state_t *)inst.plugin->get_extension(inst.plugin, CLAP_EXT_STATE);
+   CHECK_MSG(st != nullptr, std::string(id) + " must expose clap.state");
+   if (st) {
+      MemStream ms;
+      CHECK_MSG(st->save(inst.plugin, &ms.out), std::string(id) + " save failed");
+      CHECK_MSG(!ms.bytes.empty(), std::string(id) + " saved zero bytes");
+      CHECK_MSG(st->load(inst.plugin, &ms.in), std::string(id) + " load failed");
+
+      MemStream truncated;
+      truncated.bytes.assign(ms.bytes.begin(), ms.bytes.begin() + (ms.bytes.size() / 2));
+      CHECK_MSG(!st->load(inst.plugin, &truncated.in),
+                std::string(id) + " accepted a truncated state blob");
+   }
+   inst.teardown();
+}
+} // namespace
+
+TEST(linkbridge_send_state_roundtrip) {
+   checkStateRoundtrip(WAIL_LINKBRIDGE_SEND_PATH, "software.wail.linkbridge.send");
+}
+
+TEST(linkbridge_recv_state_roundtrip) {
+   checkStateRoundtrip(WAIL_LINKBRIDGE_RECV_PATH, "software.wail.linkbridge.recv");
+}
