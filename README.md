@@ -129,6 +129,8 @@ Built on the shoulders of great open-source projects:
 
 Thanks to early supporters [Jeff Hopkins](https://www.youtube.com/@JeffHopkinsMusic) and [Geren M](https://www.youtube.com/@GerenM63) for testing, feedback, and encouragement.
 
+WAIL's docs are written against ASD-STE100 Simplified Technical English, using the skill and linter from [Ege Çelebi](https://www.chele.bi)'s [*The cure for AI slop is a 1986 aircraft manual*](https://github.com/woosal1337/blog/tree/main/videos/ep01-the-cure-for-ai-slop) (MIT). See `.claude/skills/ste-writing/`.
+
 ## License
 
 MIT

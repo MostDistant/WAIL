@@ -37,6 +37,8 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 ├── filelog.go            Rotating file logger
 ├── wslog.go              WebSocket log broadcaster
 ├── honeybadger.go        Honeybadger crash reporting
+├── cmd/ste-lint/         Docs-only prose linter (pure Go, no cgo). Not part of the
+│                         app — see "Writing docs" below
 ├── internal/
 │   ├── abllink/          cgo binding to Ableton Link's abl_link C API (sync + Link
 │   │                     Audio), compiled against vendor/link. capture.c holds the
@@ -205,6 +207,19 @@ scripts/pair-debug.sh stop     # graceful SIGTERM + archive all logs to debug-ru
 - Remote prereqs (already done for andrews-laptop): Remote Login + authorized key, `brew install opus opusfile`. Env overrides: `PAIR_REMOTE`, `PAIR_LOCAL_INSTANCE`, `PAIR_REMOTE_INSTANCE`, `PAIR_RELAY_PORT`, `PAIR_JOIN_TIMEOUT`.
 
 **Skip tests for docs-only changes.** If a PR only modifies `.md` files (or other non-code docs), do not run the test suite — building the audio path requires the Link SDK/cgo and is slow. Tests are not needed when no code paths change.
+
+## Writing docs
+
+Prose in this repo — READMEs, ADRs, `docs/`, PR descriptions, release notes, error strings — follows ASD-STE100 Simplified Technical English. The rules and WAIL's own vocabulary rules live in the `ste-writing` skill (`.claude/skills/ste-writing/SKILL.md`); invoke it when writing or rewriting prose.
+
+`bin/ste-lint` scores the mechanical subset in violations per 100 words. Lint before, rewrite, lint again — the delta is the signal, not the absolute number.
+
+```sh
+bin/ste-lint                 # every doc in the repo
+bin/ste-lint -v README.md    # each violation as file:line:col, so it can be fixed
+```
+
+The tool is docs-only. It gates nothing, no CI job runs it, and it never touches code — fenced blocks and inline backticks are stripped before scoring. Its source is `wail-app/cmd/ste-lint` (pure Go, no cgo, so it builds without the Link SDK); `go test ./...` in `wail-app` covers it. Do not lint or rewrite `CHANGELOG.md` (knope generates it) or commit subject lines (the conventional-commit prefix controls the version bump).
 
 ## Code Conventions
 

@@ -1,0 +1,23 @@
+{
+  "words": 34,
+  "sentences": 15,
+  "violations": {
+    "long_sentence(>20w)": 1,
+    "semicolon": 3,
+    "contraction": 0,
+    "passive_voice": 0,
+    "ing_main_verb": 0,
+    "nominalization": 0,
+    "phrasal_verb": 0,
+    "banned_word": 0,
+    "marketing_adjective": 0,
+    "modal_hedge": 0,
+    "long_paragraph(>6s)": 1
+  },
+  "total": 5,
+  "total_per100w": 14.71,
+  "em_dash(slop-marker)": 0,
+  "longest_sentence_words": 21,
+  "sample_marketing": [],
+  "sample_banned": []
+}

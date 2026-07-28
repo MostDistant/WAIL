@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#
+# Score WAIL's prose in violations per 100 words. Lower is cleaner, and the
+# delta between two runs is the signal — the absolute number is not. Lint a
+# draft, apply the ste-writing skill (.claude/skills/ste-writing), then lint it
+# again.
+#
+#   bin/ste-lint                   # the repo's own docs
+#   bin/ste-lint README.md         # one file
+#   bin/ste-lint -v README.md      # every violation, as file:line:col
+#   bin/ste-lint -json docs/*.md   # machine-readable
+#
+# The tool gates nothing. No CI job runs it.
+#
+# It needs no cgo and no Link SDK, so it runs anywhere Go does.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+
+args=()
+have_files=0
+want_value=0
+for a in "$@"; do
+	if [[ $want_value -eq 1 ]]; then
+		# The value of the previous flag, not a path.
+		args+=("$a")
+		want_value=0
+		continue
+	fi
+	case "$a" in
+	-max | --max)
+		args+=("$a")
+		want_value=1
+		;;
+	-*)
+		args+=("$a")
+		;;
+	*)
+		# Paths are resolved against the caller's directory, not wail-app.
+		have_files=1
+		if [[ "$a" = /* ]]; then args+=("$a"); else args+=("$PWD/$a"); fi
+		;;
+	esac
+done
+
+# With no file arguments, lint the repo's own prose. CHANGELOG.md is generated
+# by knope, vendor/ is a submodule, and .changeset/ files are throwaway.
+if [[ $have_files -eq 0 ]]; then
+	while IFS= read -r f; do
+		args+=("$root/$f")
+	done < <(cd "$root" && git ls-files '*.md' ':!:CHANGELOG.md' ':!:vendor/**' ':!:.changeset/**')
+fi
+
+cd "$root/wail-app" && exec go run ./cmd/ste-lint "${args[@]}"

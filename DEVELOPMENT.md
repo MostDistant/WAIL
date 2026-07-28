@@ -25,6 +25,7 @@ wail-app/                Go/Wails desktop app: session orchestration, Link + Lin
 ├── session.go           Session state machine
 ├── signaling.go         WebSocket signaling/relay client
 ├── wire.go              WAIF binary wire format
+├── cmd/ste-lint/        Docs prose linter (pure Go, no cgo; not part of the app)
 └── internal/
     ├── abllink/         cgo binding to Ableton Link (abl_link C API: sync + Link
     │                    Audio); capture.c holds the pure-C realtime callback + ring
@@ -112,6 +113,30 @@ cd signaling-server && go test ./...            # relay server
 ```
 
 Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOCACHE write access; in a sandbox you may need to disable it.
+
+### Docs linting (prose, not code)
+
+`bin/ste-lint` scores prose against the machine-checkable subset of ASD-STE100
+Simplified Technical English, in **violations per 100 words**. Lower is cleaner.
+Fenced blocks and inline backticks are stripped first, so code never counts.
+
+```sh
+bin/ste-lint                 # every doc in the repo
+bin/ste-lint README.md       # one file
+bin/ste-lint -v README.md    # each violation as file:line:col
+bin/ste-lint -json docs/*.md # machine-readable
+```
+
+Read the delta, not the number. Lint a draft, rewrite it with the `ste-writing`
+skill (`.claude/skills/ste-writing/SKILL.md`), then lint it again — a score that
+halves means the rewrite worked. The eleven categories are long sentences,
+semicolons, contractions, passive voice, `-ing` main verbs, nominalizations,
+phrasal verbs, banned words, marketing adjectives, modal hedges, and long
+paragraphs.
+
+Nothing gates on this. No CI job runs it, and it never rewrites a file. The
+source is `wail-app/cmd/ste-lint` — pure Go, no cgo, so it needs no Link SDK,
+and its tests run inside the normal `cd wail-app && go test ./...`.
 
 ### CLAP plugin integration tests (no DAW)
 

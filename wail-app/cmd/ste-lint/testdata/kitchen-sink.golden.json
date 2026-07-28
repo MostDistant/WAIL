@@ -1,0 +1,34 @@
+{
+  "words": 119,
+  "sentences": 37,
+  "violations": {
+    "long_sentence(>20w)": 0,
+    "semicolon": 1,
+    "contraction": 10,
+    "passive_voice": 7,
+    "ing_main_verb": 2,
+    "nominalization": 2,
+    "phrasal_verb": 2,
+    "banned_word": 9,
+    "marketing_adjective": 7,
+    "modal_hedge": 1,
+    "long_paragraph(>6s)": 2
+  },
+  "total": 43,
+  "total_per100w": 36.13,
+  "em_dash(slop-marker)": 0,
+  "longest_sentence_words": 9,
+  "sample_marketing": [
+    "seamless",
+    "robust",
+    "powerful"
+  ],
+  "sample_banned": [
+    "utilize",
+    "utilizes",
+    "utilizing",
+    "prior to",
+    "additionally",
+    "furthermore"
+  ]
+}
