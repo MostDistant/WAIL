@@ -1,10 +1,10 @@
 // Link Bridge Recv (ADR-0007) — a 16-port Link Audio receiver for WAIL room
 // streams. Subscribes only to room-published channels (names starting with
 // "WAIL " — remote streams "WAIL · {peer} · {stream}" and the WAIL Metronome),
-// one port per channel, auto-assigned and live-renamed (first-wins dedupe on
-// the channel name, so two WAILs on one LAN publishing the same room don't
-// double a port). A peer joining the jam appears as a named sub-chain with no
-// user action.
+// one port per channel, auto-assigned and live-renamed. Dedupe is first-wins on
+// channel id (which survives the app's in-place rename), falling back to the
+// channel name so two WAILs on one LAN publishing the same room don't double a
+// port. A peer joining the jam appears as a named sub-chain with no user action.
 //
 // Rendering is stamp-aligned: per-slot anchor ring (chunk start frame ↔ begin
 // beat / play-at µs), pad when early, skip when late, 32-frame deadband. Two
@@ -83,6 +83,7 @@ typedef struct {
    wail_mutex   names_mu;
    char         name[LBR_SLOTS][CLAP_NAME_SIZE];
    _Atomic bool names_dirty;
+   bool logged_no_rescan; // main thread only
 
    wail_thread  mgr_thread;
    _Atomic bool running;
@@ -316,15 +317,36 @@ static void *mgr_main(void *arg) {
          }
       }
 
-      // Assign new room-published channels (first-wins dedupe on the name).
+      // Assign new room-published channels. Dedupe in two tiers: the channel id
+      // is the identity that survives a rename (the app renames a room sink in
+      // place once StreamNames arrives), so an id match is the SAME channel —
+      // follow its new name. A name match with a *different* id is a second
+      // WAIL republishing the same room stream on this LAN: first wins, don't
+      // double the port. Two passes, because a lower-indexed name match must
+      // not shadow a higher-indexed id match.
       for (size_t c = 0; c < nch; c++) {
          if (strncmp(chans[c].name, LBR_NAME_PREFIX, strlen(LBR_NAME_PREFIX)) != 0) continue;
-         bool have = false;
-         for (int i = 0; i < LBR_SLOTS; i++)
-            if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire) &&
-                strcmp(self->slots[i].chan_name, chans[c].name) == 0)
-               have = true;
-         if (have) continue;
+         int idSlot = -1, nameSlot = -1;
+         for (int i = 0; i < LBR_SLOTS; i++) {
+            if (!atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire)) continue;
+            if (self->slots[i].channel_id == chans[c].id_u64) {
+               idSlot = i;
+               break;
+            }
+            if (nameSlot < 0 && strcmp(self->slots[i].chan_name, chans[c].name) == 0) nameSlot = i;
+         }
+         if (idSlot >= 0) {
+            if (strcmp(self->slots[idSlot].chan_name, chans[c].name) != 0) {
+               lbr_log(self, "renamed: \"%s\" → \"%s\" (port %d)", self->slots[idSlot].chan_name,
+                       chans[c].name, idSlot + 1);
+               snprintf(self->slots[idSlot].chan_name, sizeof(self->slots[idSlot].chan_name), "%s",
+                        chans[c].name);
+               char disp[128];
+               set_port_name(self, idSlot, display_name(chans[c].name, disp, sizeof(disp)));
+            }
+            continue;
+         }
+         if (nameSlot >= 0) continue;
          for (int i = 0; i < LBR_SLOTS; i++) {
             if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire)) continue;
             lbr_slot *s = &self->slots[i];
@@ -413,9 +435,16 @@ static void CLAP_ABI lbr_on_main_thread(const clap_plugin_t *plugin) {
    lbr_recv *self = plugin->plugin_data;
    if (!atomic_exchange(&self->names_dirty, false)) return;
    const clap_host_audio_ports_t *hap = self->host->get_extension(self->host, CLAP_EXT_AUDIO_PORTS);
-   if (hap && hap->rescan && hap->is_rescan_flag_supported &&
-       hap->is_rescan_flag_supported(self->host, CLAP_AUDIO_PORTS_RESCAN_NAMES))
+   bool ok = hap && hap->rescan && hap->is_rescan_flag_supported &&
+             hap->is_rescan_flag_supported(self->host, CLAP_AUDIO_PORTS_RESCAN_NAMES);
+   if (ok) {
       hap->rescan(self->host, CLAP_AUDIO_PORTS_RESCAN_NAMES);
+   } else if (!self->logged_no_rescan) {
+      // Once: otherwise a field log can't tell "host refused" from "never asked".
+      self->logged_no_rescan = true;
+      lbr_log(self, "host does not support CLAP_AUDIO_PORTS_RESCAN_NAMES — port names "
+                    "will only refresh when the host re-queries audio ports");
+   }
 }
 
 // --- audio ports: 1 stereo input (ignored) + 16 stereo outputs ---

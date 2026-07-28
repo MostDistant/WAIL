@@ -5,16 +5,31 @@
 // prove the bundle loads, activates, enables Link, and processes without
 // crashing.
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <thread>
+
+#include <clap/clap.h>
 
 namespace {
 constexpr double kSampleRate = 48000.0;
 constexpr int kPorts = 16; // LBR_SLOTS in linkbridge_recv.c
+
+// Host-side clap.audio-ports, so a test can see the plugin's rescan requests.
+// Tests run sequentially (main.cpp), so file-scope state is safe.
+std::atomic<int> g_rescanNames{0};
+bool CLAP_ABI testApRescanSupported(const clap_host_t *, uint32_t flag) {
+   return (flag & CLAP_AUDIO_PORTS_RESCAN_NAMES) != 0;
+}
+void CLAP_ABI testApRescan(const clap_host_t *, uint32_t flags) {
+   if (flags & CLAP_AUDIO_PORTS_RESCAN_NAMES) g_rescanNames++;
+}
+const clap_host_audio_ports_t g_hostAudioPorts = {testApRescanSupported, testApRescan};
 }
 
 #include "linkbridge_link.h"
@@ -312,6 +327,125 @@ TEST(linkbridge_recv_hears_only_room_published) {
 
    lb_sink_destroy(room);
    lb_sink_destroy(raw);
+   inst.teardown();
+   lb_destroy(pub);
+}
+
+// The WAIL app mints a room sink on the first audio frame, before the sender's
+// name has arrived, so it is called "WAIL · {peer} · stream N"; once Hello and
+// StreamNames land it renames the SAME sink in place. link_audio::Sink::setName
+// touches only the name — the channel id is const — so Recv must follow the
+// rename on the port it already assigned, not treat it as a new channel.
+//
+// This also exercises lbr_on_main_thread: clap-trap's host only flips a flag on
+// request_callback, so the pump calls on_main_thread the way a real DAW would,
+// and the host serves clap.audio-ports to count RESCAN_NAMES requests.
+TEST(linkbridge_recv_follows_channel_rename) {
+   g_rescanNames.store(0);
+
+   wailtest::ClapInstance inst;
+   std::string err;
+   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_RECV_PATH, "software.wail.linkbridge.recv", 48000.0, 256, 256, &err,
+                       [](clap_trap::TestHost *h) {
+                          h->setExtensionCallback([](const char *id) -> const void * {
+                             if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) return &g_hostAudioPorts;
+                             return nullptr;
+                          });
+                       }),
+             err.c_str());
+   if (!inst.plugin) return;
+
+   lb_link *pub = lb_create(120.0);
+   lb_enable(pub, true);
+   lb_enable_audio(pub, true);
+   lb_sink *room = lb_sink_create(pub, "WAIL · renametest · stream 3", 16384);
+
+   const uint32_t kBlock = 256;
+   std::vector<float> outL[kPorts], outR[kPorts];
+   float *ch[kPorts][2];
+   clap_audio_buffer_t outs[kPorts];
+   for (int p = 0; p < kPorts; p++) {
+      outL[p].assign(kBlock, 0.0f);
+      outR[p].assign(kBlock, 0.0f);
+      ch[p][0] = outL[p].data();
+      ch[p][1] = outR[p].data();
+      outs[p] = clap_audio_buffer_t{};
+      outs[p].channel_count = 2;
+      outs[p].data32 = ch[p];
+   }
+
+   uint64_t frame = 0;
+   auto pump = [&]() {
+      float l[kBlock], r[kBlock];
+      for (uint32_t i = 0; i < kBlock; i++)
+         l[i] = r[i] = 0.5f * sinf(2.0f * 3.14159265f * 440.0f * (float)(frame + i) / 48000.0f);
+      frame += kBlock;
+      lb_state *st = lb_capture(pub);
+      double beat = lb_beat_at_time(st, lb_clock_micros(pub) + 10000, 4.0);
+      lb_sink_commit(room, st, beat, 4.0, l, r, kBlock, 48000);
+      lb_release(st);
+      clap_process_t p{};
+      p.steady_time = -1;
+      p.frames_count = kBlock;
+      p.audio_outputs_count = kPorts;
+      p.audio_outputs = outs;
+      inst.plugin->process(inst.plugin, &p);
+      // A real host drains request_callback on its main thread; clap-trap only
+      // records it, so without this lbr_on_main_thread would never run.
+      inst.plugin->on_main_thread(inst.plugin);
+   };
+
+   auto portName = [&](uint32_t idx) -> std::string {
+      auto *ap = (const clap_plugin_audio_ports_t *)inst.plugin->get_extension(inst.plugin, CLAP_EXT_AUDIO_PORTS);
+      clap_audio_port_info_t info{};
+      if (!ap || !ap->get(inst.plugin, idx, false, &info)) return {};
+      return info.name;
+   };
+   // A WAIL app on the dev LAN can occupy port 0, so search every port.
+   auto findPort = [&](const std::string &want) -> int {
+      for (int i = 0; i < kPorts; i++)
+         if (portName((uint32_t)i) == want) return i;
+      return -1;
+   };
+   auto pumpUntil = [&](const std::function<bool()> &done, int seconds) {
+      auto t0 = std::chrono::steady_clock::now();
+      auto next = t0;
+      while (!done() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(seconds)) {
+         next += std::chrono::microseconds((int64_t)((double)kBlock * 1000000.0 / kSampleRate));
+         std::this_thread::sleep_until(next - std::chrono::milliseconds(2));
+         while (std::chrono::steady_clock::now() < next) {
+         }
+         pump();
+      }
+   };
+
+   pumpUntil([&] { return findPort("renametest · stream 3") >= 0; }, 15);
+   int slot = findPort("renametest · stream 3");
+   CHECK_MSG(slot >= 0, "initial subscribe never named a port");
+   if (slot < 0) {
+      lb_sink_destroy(room);
+      inst.teardown();
+      lb_destroy(pub);
+      return;
+   }
+   CHECK_MSG(g_rescanNames.load() > 0, "plugin never asked the host to rescan port names");
+   int rescansAfterAssign = g_rescanNames.load();
+
+   // The app's in-place rename once StreamNames arrives.
+   lb_sink_set_name(room, "WAIL · renametest · Bass DI");
+
+   pumpUntil([&] { return portName((uint32_t)slot) == "renametest · Bass DI"; }, 20);
+   CHECK_MSG(portName((uint32_t)slot) == "renametest · Bass DI",
+             "port " + std::to_string(slot) + " kept the stale name \"" + portName((uint32_t)slot) + "\"");
+   CHECK_MSG(g_rescanNames.load() > rescansAfterAssign, "rename did not trigger a RESCAN_NAMES");
+
+   // The rename must not spawn a second slot for the same channel id.
+   int dupes = 0;
+   for (int i = 0; i < kPorts; i++)
+      if (i != slot && portName((uint32_t)i).find("renametest") != std::string::npos) dupes++;
+   CHECK_MSG(dupes == 0, "rename allocated " + std::to_string(dupes) + " duplicate port(s)");
+
+   lb_sink_destroy(room);
    inst.teardown();
    lb_destroy(pub);
 }
