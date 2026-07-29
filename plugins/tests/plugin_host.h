@@ -1,6 +1,6 @@
 // Shared CLAP hosting helpers for the WAIL plugin test binaries: load a plugin
 // via clap-trap and drive its lifecycle. Used by the test runner
-// (test_linkbridge.cpp) and the mini-DAW driver (minidaw_main.cpp). No
+// (test_plugins.cpp) and the mini-DAW driver (minidaw_main.cpp). No
 // test-framework dependencies — errors are returned, not asserted.
 #pragma once
 

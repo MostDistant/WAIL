@@ -2,7 +2,7 @@
 
 WAIL synchronizes [Ableton Link](https://www.ableton.com/link/) sessions across the internet using a WebSocket relay server. Musicians on different networks can sync tempo, phase, and interval boundaries as if they were on the same LAN, with intervalic audio (NINJAM-style) captured, Opus-encoded, and transmitted via the server.
 
-WAIL is an Ableton **Link Audio** peer — it captures and plays audio directly over Link, so with a Link-Audio-capable DAW there are no WAIL plugins to install. Ableton Live 12.3+ supports Link Audio natively. For any other CLAP-capable DAW, load the first-party **WAIL Link Bridge** CLAP plugins (bundled with the app — see below), which bring Link Audio into hosts that don't speak it yet.
+WAIL is an Ableton **Link Audio** peer — it captures and plays audio directly over Link, so with a Link-Audio-capable DAW there are no WAIL plugins to install. Ableton Live 12.3+ supports Link Audio natively. For any other CLAP-capable DAW, load the first-party **WAIL Send** and **WAIL Receive** CLAP plugins (bundled with the app — see below), which bring Link Audio into hosts that don't speak it yet.
 
 ## Install
 
@@ -29,7 +29,7 @@ tar -xzf wail-linux-x64-*.tar.gz
 
 ### DAW plugins (only for DAWs without Link Audio)
 
-For DAWs that don't support Ableton Link Audio, load the **WAIL Link Bridge Send** and **WAIL Link Bridge Recv** CLAP plugins. Each is a Link Audio peer in its own right: put Link Bridge Send on a track to publish it to the LAN, and Link Bridge Recv on a track to hear the room's streams on its output ports. Ableton Live 12.3+ users don't need either.
+For DAWs that don't support Ableton Link Audio, load the **WAIL Send** and **WAIL Receive** CLAP plugins. Each is a Link Audio peer in its own right: put WAIL Send on a track to publish it to the LAN, and WAIL Receive on a track to hear the room's streams on its output ports. Ableton Live 12.3+ users don't need either.
 
 Two requirements: your DAW must load **CLAP** plugins (Bitwig, REAPER, Studio One, Qtractor; not Logic or Pro Tools), and the project must run at **48 kHz** — Link Audio is 48 kHz only, so at any other rate Send publishes nothing and Recv outputs silence.
 
@@ -41,7 +41,7 @@ On the Windows and Linux release builds the plugins auto-install on first launch
 
 2. **Enable Ableton Link (tempo/phase) and Link Audio (the audio exchange) in your DAW.** These are two separate things: Link sync is widely supported; Link Audio is newer.
    - *Ableton Live 12.3+* — the only DAW with **native Link Audio** today. Preferences > Link, Tempo, MIDI > turn on "Show Link Toggle", then enable Link in the transport bar.
-   - *Any other DAW (Bitwig, REAPER, etc.)* — enable Ableton **Link** for tempo/phase sync (Bitwig: Settings > Synchronization; REAPER: install [ReaBlink](https://github.com/ak5k/reablink)). For audio, load the first-party **WAIL Link Bridge Send / WAIL Link Bridge Recv** CLAP plugins (see Install) — Link Bridge Send publishes a track as a Link Audio channel WAIL captures, Link Bridge Recv plays the room's streams on its output ports.
+   - *Any other DAW (Bitwig, REAPER, etc.)* — enable Ableton **Link** for tempo/phase sync (Bitwig: Settings > Synchronization; REAPER: install [ReaBlink](https://github.com/ak5k/reablink)). For audio, load the first-party **WAIL Send / WAIL Receive** CLAP plugins (see Install) — WAIL Send publishes a track as a Link Audio channel WAIL captures, WAIL Receive plays the room's streams on its output ports.
 
 3. **Route audio to Link Audio.** Send the tracks or busses you want to share to Link Audio output channels in your DAW. WAIL captures those channels, so anything you route there is streamed to your peers. You can share several independent streams (e.g. drums on one channel, synth on another).
 
@@ -110,7 +110,7 @@ WAIL has two components that work together:
 
 **No sync / peers not connecting** — Make sure Ableton Link is enabled in your DAW. WAIL relies on Link for tempo and phase sync.
 
-**No audio from remote peers** — Make sure the WAIL app is running and connected to the same room, and that your project is at 48 kHz. With native Link Audio (Ableton Live 12.3+), check you've routed audio to a Link Audio output channel and added a track taking its input from WAIL's published Link Audio channels. With the WAIL Link Bridge plugins, the plugins are that routing — check Link Bridge Send is on the track you want to share and Link Bridge Recv is on a track you can hear.
+**No audio from remote peers** — Make sure the WAIL app is running and connected to the same room, and that your project is at 48 kHz. With native Link Audio (Ableton Live 12.3+), check you've routed audio to a Link Audio output channel and added a track taking its input from WAIL's published Link Audio channels. With the WAIL Send / WAIL Receive plugins, the plugins are that routing — check WAIL Send is on the track you want to share and WAIL Receive is on a track you can hear.
 
 **Changing tempo mid-jam** — Not recommended. WAIL uses NINJAM-style intervals, so audio is recorded and played back in full interval chunks. If you change the tempo, the current interval must finish before the new tempo takes effect. If you do need to change tempo, agree on it beforehand and have one person change it **in their DAW** (WAIL shows BPM read-only and just follows Link) — Link will propagate it to all peers within a few seconds.
 

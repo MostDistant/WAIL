@@ -1,4 +1,4 @@
-// Link Bridge Recv (ADR-0007) — a 16-port Link Audio receiver for WAIL room
+// WAIL Recv (ADR-0007) — a 16-port Link Audio receiver for WAIL room
 // streams. Subscribes only to room-published channels (names starting with
 // "WAIL " — remote streams "WAIL · {peer} · {stream}" and the WAIL Metronome),
 // one port per channel, auto-assigned and live-renamed (first-wins dedupe on
@@ -29,7 +29,7 @@
 #include <string.h>
 
 #include "clap/clap.h"
-#include "linkbridge_link.h"
+#include "wail_link.h"
 #include "wail_thread.h" // wail_thread / wail_mutex / wail_sleep_ms
 
 #define LBR_SLOTS 16
@@ -363,7 +363,7 @@ static bool CLAP_ABI lbr_activate(const clap_plugin_t *plugin, double sr, uint32
    (void)minf;
    (void)maxf;
    lbr_recv *self = plugin->plugin_data;
-   { char lp[512]; lb_temp_log_path("linkbridge-recv.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
+   { char lp[512]; lb_temp_log_path("wail-recv.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
    self->rate_ok = (sr == 48000.0);
    self->link = lb_create(120.0);
    lb_enable(self->link, true);
@@ -442,7 +442,7 @@ static bool CLAP_ABI lbr_ap_get(const clap_plugin_t *plugin, uint32_t idx, bool 
    if (self->name[idx][0])
       snprintf(info->name, sizeof(info->name), "%s", self->name[idx]);
    else
-      snprintf(info->name, sizeof(info->name), "Link Bridge %u", idx + 1);
+      snprintf(info->name, sizeof(info->name), "WAIL Recv %u", idx + 1);
    wail_mutex_unlock(&self->names_mu);
    info->flags = idx == 0 ? CLAP_AUDIO_PORT_IS_MAIN : 0;
    info->channel_count = 2;
@@ -461,8 +461,8 @@ static const void *CLAP_ABI lbr_get_extension(const clap_plugin_t *p, const char
 static const char *lbr_features[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY, NULL};
 static const clap_plugin_descriptor_t lbr_desc = {
     .clap_version = CLAP_VERSION_INIT,
-    .id = "software.wail.linkbridge.recv",
-    .name = "WAIL Link Bridge Recv",
+    .id = "software.wail.recv",
+    .name = "WAIL Receive",
     .vendor = "WAIL",
     .url = "https://github.com/nicholasgasior/wail",
     .version = "0.1.0",

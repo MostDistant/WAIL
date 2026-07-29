@@ -11,12 +11,12 @@ import (
 )
 
 // pluginBundles are the CLAP plugins WAIL ships and auto-installs on first launch
-// (ADR-0007 Link Bridge). CLAP-only: VST3/AU are a future clap-wrapper target,
-// not shipped here. Dev tools (transport-probe, linkbridge-spike) are built but
-// deliberately NOT shipped or installed.
+// (ADR-0007: WAIL Send / WAIL Receive). CLAP-only: VST3/AU are a future
+// clap-wrapper target, not shipped here. Dev tools (transport-probe,
+// linkbridge-spike) are built but deliberately NOT shipped or installed.
 var pluginBundles = []string{
-	"wail-linkbridge-send.clap",
-	"wail-linkbridge-recv.clap",
+	"wail-send.clap",
+	"wail-recv.clap",
 }
 
 // SystemPluginDir returns the per-user CLAP directory DAWs scan by default. The

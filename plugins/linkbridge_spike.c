@@ -16,7 +16,7 @@
 #include <string.h>
 
 #include "clap/clap.h"
-#include "linkbridge_link.h"
+#include "wail_link.h"
 
 
 typedef struct {

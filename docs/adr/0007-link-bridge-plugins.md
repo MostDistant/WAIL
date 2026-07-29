@@ -1,6 +1,6 @@
 # Link Bridge: Link-Audio-native CLAP plugins (amends ADR-0005)
 
-Status: accepted and implemented; ADR-0005's PCM bridge removed 2026-07-28
+Status: accepted and implemented; ADR-0005's PCM bridge removed 2026-07-28; the plugin pair renamed **WAIL Send** / **WAIL Receive** 2026-07-29 (freeing up ADR-0005's old bundle IDs/filenames, now reused here). This document keeps the "Link Bridge" name for the architecture pattern; "Send"/"Recv" below refer to today's WAIL Send/WAIL Receive.
 
 ADR-0005's thin PCM bridge solved the install-surface problem but left two things on
 the table: timing precision is structurally bounded on its FIFO path (delivery time IS

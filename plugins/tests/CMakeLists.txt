@@ -1,4 +1,4 @@
-# DAW-less integration tests for the WAIL Link Bridge plugins (ADR-0007).
+# DAW-less integration tests for the WAIL Send / WAIL Receive plugins (ADR-0007).
 # Hosts the built plugins via clap-trap alongside a second in-process Link peer,
 # so the publish/subscribe and room-filter behaviour is exercised without a DAW.
 
@@ -22,7 +22,7 @@ FetchContent_MakeAvailable(clap-trap)
 function(add_wail_harness name)
   add_executable(${name} ${ARGN})
   target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/..") # wail_thread.h
-  target_link_libraries(${name} PRIVATE clap-trap Threads::Threads linkbridge-link)
+  target_link_libraries(${name} PRIVATE clap-trap Threads::Threads wail-link)
   target_compile_features(${name} PRIVATE cxx_std_20)
   if(WIN32)
     target_link_libraries(${name} PRIVATE ws2_32)
@@ -31,13 +31,13 @@ function(add_wail_harness name)
   # resolves it directly; bundle layout itself is already verified by CI packaging).
   target_compile_definitions(${name} PRIVATE
     WAIL_LINKBRIDGE_SPIKE_PATH="$<TARGET_FILE:linkbridge-spike>"
-    WAIL_LINKBRIDGE_SEND_PATH="$<TARGET_FILE:wail-linkbridge-send>"
-    WAIL_LINKBRIDGE_RECV_PATH="$<TARGET_FILE:wail-linkbridge-recv>"
+    WAIL_SEND_PATH="$<TARGET_FILE:wail-send>"
+    WAIL_RECV_PATH="$<TARGET_FILE:wail-recv>"
   )
-  add_dependencies(${name} linkbridge-spike wail-linkbridge-send wail-linkbridge-recv)
+  add_dependencies(${name} linkbridge-spike wail-send wail-recv)
 endfunction()
 
-add_wail_harness(wail-plugin-tests main.cpp test_linkbridge.cpp)
+add_wail_harness(wail-plugin-tests main.cpp test_plugins.cpp)
 
 # Mini-DAW system simulator (not a ctest: needs a live app + relay, see
 # scripts/minidaw-e2e.sh).

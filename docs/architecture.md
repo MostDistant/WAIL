@@ -119,17 +119,17 @@ DAW / Link-Audio app B plays WAIL B's published channel — Peer A's previous in
 
 `audio_engine.go` defines the `AudioEngine` interface; `audio_engine_real.go` (`//go:build !linkstub`) is the implementation, with a no-op `audio_engine_stub.go` for stub builds. The engine owns the capture drain goroutines (one per bridged channel), the emit loop (boundary detection + paced sink writes), and Link Audio channel discovery. It wraps the pure, unit-tested packages above plus the `internal/abllink` cgo binding. The realtime capture callback stays pure C (`internal/abllink/capture.c`) and never enters the Go runtime, so a GC pause can never drop incoming Link Audio UDP (ADR-0002).
 
-### Optional CLAP bridge (Link Bridge, ADR-0007)
+### Optional CLAP bridge (WAIL Send / WAIL Receive, ADR-0007)
 
-For DAWs that are Link *sync* peers but lack Link Audio (Live pre-12.3, Bitwig-class hosts), two first-party CLAP plugins (`plugins/linkbridge_send.c`, `plugins/linkbridge_recv.c`) make the DAW a Link Audio citizen outright. They carry **no room intelligence** — no codec, no intervals, no relay, no room clock — and require no app changes at all: each plugin instance joins the LAN Link session as its own audio-only peer, so the WAIL app sees it as an ordinary Link Audio channel.
+For DAWs that are Link *sync* peers but lack Link Audio (Live pre-12.3, Bitwig-class hosts), two first-party CLAP plugins (`plugins/wail_send.c`, `plugins/wail_recv.c`) make the DAW a Link Audio citizen outright. They carry **no room intelligence** — no codec, no intervals, no relay, no room clock — and require no app changes at all: each plugin instance joins the LAN Link session as its own audio-only peer, so the WAIL app sees it as an ordinary Link Audio channel.
 
-- **Send:** publishes its track as a Link Audio channel, named from the DAW track (host `clap.track-info`, re-queried on `changed()`). The app's normal capture discovery picks it up; from there the usual capture → assemble → Opus → WAIF → relay path runs unchanged. Deliberately publishes *without* the `WAIL · ` room prefix, so the app captures it rather than excluding it as room content.
-- **Recv:** subscribes only to channels carrying the `WAIL · ` room prefix (`affinity.RoomChannelPrefix`) — the app's republished remote streams — and renders them onto 16 stereo output ports, renamed live to `{peer} · {stream}` via CLAP's `RESCAN_NAMES`. A manager thread polls channel discovery off the audio thread; `process()` only touches lock-free rings (ADR-0002).
+- **WAIL Send:** publishes its track as a Link Audio channel, named from the DAW track (host `clap.track-info`, re-queried on `changed()`). The app's normal capture discovery picks it up; from there the usual capture → assemble → Opus → WAIF → relay path runs unchanged. Deliberately publishes *without* the `WAIL · ` room prefix, so the app captures it rather than excluding it as room content.
+- **WAIL Receive:** subscribes only to channels carrying the `WAIL · ` room prefix (`affinity.RoomChannelPrefix`) — the app's republished remote streams — and renders them onto 16 stereo output ports, renamed live to `{peer} · {stream}` via CLAP's `RESCAN_NAMES`. A manager thread polls channel discovery off the audio thread; `process()` only touches lock-free rings (ADR-0002).
 - The engine's `captureSource` / `emitSink` interfaces (`audio_engine_ports.go`) remain, but Link Audio (`*abllink.Source` / `*abllink.Sink`) is now their only implementation.
 
-The C-facing Link session/audio API the plugins compile against (`plugins/linkbridge_link.{h,cpp}`) mirrors the app's own `internal/abllink/wrap.cpp`.
+The C-facing Link session/audio API the plugins compile against (`plugins/wail_link.{h,cpp}`) mirrors the app's own `internal/abllink/wrap.cpp`.
 
-> **History:** ADR-0005 shipped a different bridge — `wail_send.c` / `wail_recv.c` moving raw PCM to and from the app over loopback TCP. Its floor was structural (the DAW's block pull bounded delivery lead), so ADR-0007 superseded it and the IPC path was removed. See `docs/adr/0005-clap-thin-pcm-bridge.md` for the reasoning.
+> **History:** ADR-0005 shipped a different bridge under the same bundle IDs (`software.wail.send`/`software.wail.recv`, reused here) — raw PCM moved to and from the app over loopback TCP. Its floor was structural (the DAW's block pull bounded delivery lead), so ADR-0007 superseded it and the IPC path was removed. See `docs/adr/0005-clap-thin-pcm-bridge.md` for the reasoning.
 
 ### Wire Format (AudioFrameWire / WAIF)
 
@@ -272,7 +272,7 @@ Two independent time domains exist in the system:
 
 8. **Pure engine logic in `internal/` packages**: interval math, scheduler, loss, affinity, and interval assembly/reassembly are cgo- and network-free, so they are fully unit-tested; the cgo Link Audio layer and the relay wrap that proven logic.
 
-9. **Link Audio is the only local audio interface** (ADR-0001/0002): no in-app plugin transport and no TCP IPC. Audio enters and leaves the process as Link Audio; the realtime capture callback is pure C with a lock-free ring so a Go GC pause can't drop UDP. The optional Link Bridge plugins (ADR-0007) are separate Link peers, not an app front end.
+9. **Link Audio is the only local audio interface** (ADR-0001/0002): no in-app plugin transport and no TCP IPC. Audio enters and leaves the process as Link Audio; the realtime capture callback is pure C with a lock-free ring so a Go GC pause can't drop UDP. The optional WAIL Send/Receive plugins (ADR-0007) are separate Link peers, not an app front end.
 
 10. **JSON sync protocol**: Readable for debugging. Bandwidth is negligible for small sync messages.
 

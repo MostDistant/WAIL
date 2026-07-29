@@ -63,11 +63,11 @@ signaling-server/         Go WebSocket relay server (deployed to fly.io)
 │                         wrong (WAIF label vs room index → unicast fresh anchor)
 └── cmd/wail-metrics/     CLI metrics client
 
-plugins/                  Link Bridge CLAP plugins for DAWs without Link Audio (ADR-0007).
+plugins/                  WAIL Send / WAIL Receive CLAP plugins for DAWs without Link Audio (ADR-0007).
 │                         Each instance is its own LAN Link Audio peer; the app is unchanged.
-├── linkbridge_send.c     Publishes the track as a Link Audio channel (named from track-info)
-├── linkbridge_recv.c     Subscribes to room-published "WAIL · " channels → 16 stereo ports
-├── linkbridge_link.{h,cpp}  C-facing Link session/audio API (mirrors internal/abllink/wrap.cpp)
+├── wail_send.c           Publishes the track as a Link Audio channel (named from track-info)
+├── wail_recv.c           Subscribes to room-published "WAIL · " channels → 16 stereo ports
+├── wail_link.{h,cpp}     C-facing Link session/audio API (mirrors internal/abllink/wrap.cpp)
 ├── wail_thread.h         Thread/mutex/sleep shim (Win32 API vs pthreads)
 ├── tests/                DAW-less harness: clap-trap host + a second in-process Link peer
 │                         (ctest via -DWAIL_PLUGIN_TESTS=ON) + minidaw E2E driver
@@ -99,7 +99,7 @@ cd wail-app && go test -tags linkstub ./...
 # Signaling server
 cd signaling-server && go build ./... && go test ./...
 
-# Link Bridge CLAP plugins (ADR-0007) — optional, for DAWs without Link Audio;
+# WAIL Send / WAIL Receive CLAP plugins (ADR-0007) — optional, for DAWs without Link Audio;
 # needs vendor/clap and vendor/link
 cmake -S plugins -B build/plugins && cmake --build build/plugins
 
@@ -185,7 +185,7 @@ cd signaling-server && go test ./...            # relay server
 
 Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOCACHE write access; in a sandbox you may need to disable it. `-tags linkstub` swaps Link for a stub so the app and its pure logic packages build without the SDK.
 
-`go test` is all in-process. To exercise the real Link Audio Sink/Source path + relay round trip end-to-end on one machine (no DAW), run `./scripts/tier2-e2e.sh` (local relay + WAV-sweep sender + receiver + `linkaudio-probe`; exit 0 = PASS). See DEVELOPMENT.md → "Tier 2 audio E2E". For the Link Bridge path (ADR-0007), `./scripts/minidaw-e2e.sh` does the equivalent through the plugin: a clap-trap-hosted wail-linkbridge-recv wired to a real headless app over a local relay, checking the looped-back metronome click lands on the session grid within ±5ms (exit 0 = PASS).
+`go test` is all in-process. To exercise the real Link Audio Sink/Source path + relay round trip end-to-end on one machine (no DAW), run `./scripts/tier2-e2e.sh` (local relay + WAV-sweep sender + receiver + `linkaudio-probe`; exit 0 = PASS). See DEVELOPMENT.md → "Tier 2 audio E2E". For the WAIL Send/Receive path (ADR-0007), `./scripts/minidaw-e2e.sh` does the equivalent through the plugin: a clap-trap-hosted wail-recv wired to a real headless app over a local relay, checking the looped-back metronome click lands on the session grid within ±5ms (exit 0 = PASS).
 
 ### Two-machine debugging (pair-debug)
 
@@ -299,7 +299,7 @@ Ableton Link 4.0 (final, May 2026) introduces Link Audio — real-time uncompres
 - `LinkAudioSource`: subscribe to remote audio channels
 - Channel discovery via `channels()` and `setChannelsChangedCallback()`
 
-Decided direction (see `CONTEXT.md` pillars and `docs/adr/0001`): WAIL interacts with local audio primarily as a Link peer — capture subscribes to local Link Audio channels, playback publishes remote streams as Link Audio channels one interval late. The original Rust Send/Recv plugins, their TCP IPC, and the entire Rust workspace were retired. **Amended by ADR-0007:** a first-party CLAP bridge (WAIL Link Bridge Send/Recv, in `plugins/`) is back as an *optional* path for DAWs without Link Audio — but each instance is simply another LAN Link Audio peer, so the app is unchanged and all codec/interval/relay logic stays in Go. ADR-0005's raw-PCM-over-loopback-IPC bridge was superseded and removed.
+Decided direction (see `CONTEXT.md` pillars and `docs/adr/0001`): WAIL interacts with local audio primarily as a Link peer — capture subscribes to local Link Audio channels, playback publishes remote streams as Link Audio channels one interval late. The original Rust Send/Recv plugins, their TCP IPC, and the entire Rust workspace were retired. **Amended by ADR-0007:** a first-party CLAP bridge (WAIL Send / WAIL Receive, in `plugins/`) is back as an *optional* path for DAWs without Link Audio — but each instance is simply another LAN Link Audio peer, so the app is unchanged and all codec/interval/relay logic stays in Go. ADR-0005's raw-PCM-over-loopback-IPC bridge was superseded and removed.
 
 `vendor/link` is pinned to the final `Link-4.0` tag. Research: `docs/link-4-research.md`, `docs/link-audio-research.md`.
 

@@ -44,15 +44,16 @@ class Wail < Formula
     end
     bin.install "wail-app/wail"
 
-    # Build the Link Bridge CLAP plugins (for DAWs without native Link Audio,
-    # ADR-0007) and stage them under lib/. Homebrew can't write into the user's
-    # plugin folder, so `wail-install-plugins` (below) copies them there on demand.
+    # Build the WAIL Send / WAIL Receive CLAP plugins (for DAWs without native
+    # Link Audio, ADR-0007) and stage them under lib/. Homebrew can't write into
+    # the user's plugin folder, so `wail-install-plugins` (below) copies them
+    # there on demand.
     system "cmake", "-S", "plugins", "-B", "build/plugins", "-DCMAKE_BUILD_TYPE=Release"
     system "cmake", "--build", "build/plugins"
     # Product bundles only: dev tools (transport-probe, linkbridge-spike) build
     # alongside but must not be installed. Named explicitly rather than brace-globbed
     # — a glob silently drops renamed bundles instead of failing the build.
-    %w[wail-linkbridge-send wail-linkbridge-recv].each do |bundle|
+    %w[wail-send wail-recv].each do |bundle|
       lib.install "build/plugins/#{bundle}.clap"
     end
     bin.install "scripts/wail-install-plugins.sh" => "wail-install-plugins"
@@ -60,7 +61,7 @@ class Wail < Formula
 
   def caveats
     <<~EOS
-      The WAIL Link Bridge CLAP plugins were built but not copied into your DAW plugin folder
+      The WAIL Send / WAIL Receive CLAP plugins were built but not copied into your DAW plugin folder
       (Homebrew can't write there). Install them with:
         wail-install-plugins
       Then rescan plugins in your DAW. You only need them for DAWs without native

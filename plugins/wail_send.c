@@ -1,4 +1,4 @@
-// Link Bridge Send (ADR-0007) — publishes the DAW track this instance sits on
+// WAIL Send (ADR-0007) — publishes the DAW track this instance sits on
 // as a Link Audio channel. One channel per instance, named from the host's
 // track-info (no "WAIL · " prefix — the prefix marks room-published channels;
 // this is a raw LAN channel any Link Audio app can hear, including the WAIL
@@ -21,7 +21,7 @@
 #include <string.h>
 
 #include "clap/clap.h"
-#include "linkbridge_link.h"
+#include "wail_link.h"
 
 #define LB_QUANTUM 4.0 // phase lens for buffer stamps (beats; beat values are absolute)
 // Stamp-ahead: the block being committed now reaches the sender's DAC one
@@ -128,13 +128,13 @@ static bool CLAP_ABI lbs_activate(const clap_plugin_t *plugin, double sr, uint32
    (void)minf;
    (void)maxf;
    lb_send *self = plugin->plugin_data;
-   { char lp[512]; lb_temp_log_path("linkbridge-send.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
+   { char lp[512]; lb_temp_log_path("wail-send.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
    self->rate_ok = (sr == 48000.0);
    self->link = lb_create(120.0);
    lb_enable(self->link, true);
    lb_enable_audio(self->link, true);
    refresh_track_name(self);
-   const char *name = self->track_name[0] ? self->track_name : "Link Bridge Send";
+   const char *name = self->track_name[0] ? self->track_name : "WAIL Send";
    if (self->rate_ok) {
       self->sink = lb_sink_create(self->link, name, 16384);
       lbs_log(self, "=== send activated: host=\"%s %s\" sr=%.0f channel=\"%s\" ===",
@@ -218,8 +218,8 @@ static void CLAP_ABI lbs_main_thread(const clap_plugin_t *p) {
 static const char *lbs_features[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY, NULL};
 static const clap_plugin_descriptor_t lbs_desc = {
     .clap_version = CLAP_VERSION_INIT,
-    .id = "software.wail.linkbridge.send",
-    .name = "WAIL Link Bridge Send",
+    .id = "software.wail.send",
+    .name = "WAIL Send",
     .vendor = "WAIL",
     .url = "https://github.com/nicholasgasior/wail",
     .version = "0.1.0",

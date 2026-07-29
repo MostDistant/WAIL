@@ -1,14 +1,14 @@
 # WAIL CLAP plugins
 
-The **Link Bridge** plugins (ADR-0007), for DAWs that are native Link *sync* peers but
-lack Link Audio (Live pre-12.3, Bitwig-class hosts). Each instance joins the LAN Link
-session as its own audio-only peer and speaks Link Audio directly, so the WAIL app
-needs no changes and no room intelligence (codec, intervals, relay, room clock) ever
-enters a plugin.
+**WAIL Send** and **WAIL Receive** (ADR-0007), for DAWs that are native Link *sync*
+peers but lack Link Audio (Live pre-12.3, Bitwig-class hosts). Each instance joins the
+LAN Link session as its own audio-only peer and speaks Link Audio directly, so the
+WAIL app needs no changes and no room intelligence (codec, intervals, relay, room
+clock) ever enters a plugin.
 
-- **`wail-linkbridge-send`** — publishes the track as a Link Audio channel named from
-  the DAW track name (host `clap.track-info`).
-- **`wail-linkbridge-recv`** — 16 stereo ports subscribed to the room-published
+- **`wail-send`** ("WAIL Send") — publishes the track as a Link Audio channel named
+  from the DAW track name (host `clap.track-info`).
+- **`wail-recv`** ("WAIL Receive") — 16 stereo ports subscribed to the room-published
   `WAIL · {peer} · {stream}` channels, auto-named as peers arrive.
 
 ## Build
@@ -23,8 +23,8 @@ cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
 cmake --build build/plugins
 ```
 
-Outputs the two product bundles in the build dir — `wail-linkbridge-send.clap` and
-`wail-linkbridge-recv.clap` (the `transport-probe` and `linkbridge-spike` targets
+Outputs the two product bundles in the build dir — `wail-send.clap` and
+`wail-recv.clap` (the `transport-probe` and `linkbridge-spike` targets
 build alongside but are dev tools and are never shipped):
 - **macOS** — a `.clap` bundle (`Contents/MacOS/<name>` + `Info.plist`).
 - **Linux / Windows** — a single `.clap` shared object / DLL.
@@ -56,7 +56,7 @@ subscribes only to room-published (`WAIL · `-prefixed) channels and renders the
 audio. Runs in CI.
 
 `minidaw` (same build) is the driver for `scripts/minidaw-e2e.sh`: it hosts
-`wail-linkbridge-recv` against a real headless WAIL app over a local relay and checks
+`wail-recv` against a real headless WAIL app over a local relay and checks
 audio through the full Opus/WAIF/playout path — the DAW-less end-to-end check for the
 bridge (manual, ~1 min, like `scripts/tier2-e2e.sh`).
 

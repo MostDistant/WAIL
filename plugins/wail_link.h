@@ -1,7 +1,7 @@
-// linkbridge_link.h — C-facing Link session API for the Link Bridge plugins
-// (ADR-0007). Each plugin instance owns one abl_link handle (one LAN peer):
-// session membership and timeline math only in the spike; Link Audio
-// sink/source wraps come with the Send/Recv halves.
+// wail_link.h — C-facing Link session API shared by the WAIL Send / WAIL
+// Receive CLAP plugins (ADR-0007). Each plugin instance owns one abl_link
+// handle (one LAN peer): session membership and timeline math only in the
+// spike; Link Audio sink/source wraps come with the Send/Recv halves.
 //
 // Threading: create/enable/disable/destroy from the plugin's main or activate
 // path (never the audio thread — they spawn/join Link's threads). The state

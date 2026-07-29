@@ -115,7 +115,7 @@ Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOC
 
 ### CLAP plugin integration tests (no DAW)
 
-`plugins/tests/` hosts the built Link Bridge plugins via
+`plugins/tests/` hosts the built WAIL Send / WAIL Receive plugins via
 [clap-trap](https://github.com/dfl/clap-trap) alongside a second in-process Link
 peer, verifying publish/subscribe and the room-channel filter without a DAW or
 the Go app:
@@ -126,10 +126,10 @@ cmake --build build/plugins
 ctest --test-dir build/plugins --output-on-failure
 ```
 
-### Mini-DAW E2E (Link Bridge Recv ⇄ real app ⇄ relay, no DAW)
+### Mini-DAW E2E (WAIL Receive ⇄ real app ⇄ relay, no DAW)
 
 `scripts/minidaw-e2e.sh` goes one step further: the same clap-trap harness hosts
-`wail-linkbridge-recv` as a mini-DAW, wired to a **real headless WAIL app** in a
+`wail-recv` as a mini-DAW, wired to a **real headless WAIL app** in a
 local relay room. The app broadcasts its metronome with `-loopback`, so the click
 comes back through the relay and is republished as a `WAIL · …` channel; the
 harness measures each click's onset against the session grid and PASSes when the

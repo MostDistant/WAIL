@@ -259,7 +259,8 @@ future loopback test double on macOS will hit the same pair of gotchas
 
 ### Stamp-aligned recv-plugin playback: deadband wander, legacy threshold, unmeasured output-path constant
 **Status:** Historical (path removed with ADR-0005) — the design survives in
-`plugins/linkbridge_recv.c`, which is where this reasoning now lives
+`plugins/wail_recv.c` (ADR-0007's WAIL Receive, a different plugin reusing this
+filename), which is where this reasoning now lives
 **Files:** `plugins/wail_recv.c` (`recv_align`), `plugins/wail_ipc.h` + `wail-app/internal/abllink/wrap.cpp` (`wail_mono_micros`), `wail-app/ipc_sink.go` + `audio_engine_real.go` (Link→mono bridge)
 **Context:** After #438 (cushion leak) and the `WAIL_IPC_LEAD_MS` knob, the residual was the lead itself: both peers heard the remote ~20 ms *early*, because under FIFO playback delivery lead IS playback offset, and the lead's floor is the DAW's block pull. The fix makes the plugin a stamp-aligned renderer (the Link Audio receiver contract over IPC): the app bridges each chunk's Link-beat stamp into machine-monotonic µs (`TimeAtBeat − D`, D measured per tick), the plugin aligns its ring head to the frame due *now* every block.
 **Decisions + accepted costs:**
@@ -272,7 +273,7 @@ future loopback test double on macOS will hit the same pair of gotchas
 
 ### Link Bridge Send stamp-ahead: output latency as delivery margin
 **Status:** Decided (implemented; `LBS_STAMP_AHEAD_US = 10000` fixed, not configurable)
-**Files:** `plugins/linkbridge_send.c`, `plugins/linkbridge_recv.c`
+**Files:** `plugins/wail_send.c`, `plugins/wail_recv.c`
 **Context:** The first Recv roundtrip played almost nothing — every chunk arrived ~3 ms *after* its stamped play time and the renderer (correctly, honestly) skipped it. Stamping the session beat at callback time understamps: the block reaches the sender's DAC one output pipeline later, and that DAC time IS the audio's correct session-grid play time.
 **Decision:** stamps run 10 ms ahead of the callback clock, approximating callback→DAC latency. The stamp-ahead is simultaneously the correctness fix (audio plays at its true grid time) and the receiver's delivery margin (network + drain cadence). It is NOT an artificial lead like the old IPC cushion: the aligned receiver renders at the stamp, so the only error is (10 ms − the sender's true output latency) — one constant per setup, field-measurable with the record-and-compare ritual.
 **Reopen when:** field measurement shows a constant offset on the bridge path (then make it configurable or calibrate per host), or LANs noisier than loopback eat the 10 ms margin (then raise it).

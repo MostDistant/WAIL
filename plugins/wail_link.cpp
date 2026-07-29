@@ -1,7 +1,8 @@
-// linkbridge_link.cpp — Link SDK compilation unit + C API impl for the Link
-// Bridge plugins (ADR-0007). Mirrors the Go app's abllink/wrap.cpp: pulls in
-// the vendored abl_link C wrapper (which instantiates the header-only SDK) and
-// exposes the small C surface linkbridge_link.h declares.
+// wail_link.cpp — Link SDK compilation unit + C API impl shared by the WAIL
+// Send / WAIL Receive plugins (ADR-0007). Mirrors the Go app's
+// abllink/wrap.cpp: pulls in the vendored abl_link C wrapper (which
+// instantiates the header-only SDK) and exposes the small C surface
+// wail_link.h declares.
 //
 // Windows/MinGW gets the same accommodations as the app's cgo build (NOMINMAX,
 // winsock2 before windows.h); the `interface` param collision in Link's
@@ -13,7 +14,7 @@
 #endif
 
 #include "abl_link.cpp"
-#include "linkbridge_link.h"
+#include "wail_link.h"
 
 #include <atomic>
 #include <cmath>
