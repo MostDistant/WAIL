@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.0.0 (2026-07-30)
+
+### Breaking Changes
+
+- wail-send.clap and wail-recv.clap are no longer built or
+shipped. Existing copies in a user's CLAP folder are not removed and will
+no longer connect to anything — delete them manually. Use the WAIL Link
+Bridge plugins instead.
+- the CLAP plugin id changed alongside the display name
+(software.wail.linkbridge.{send,recv} -> software.wail.{send,recv}), not
+just cosmetic renaming. CLAP hosts resolve a saved plugin instance by id,
+not name, so any DAW project with an existing WAIL Link Bridge Send/Recv
+instance will show it as a missing/unresolvable plugin after upgrading;
+re-insert WAIL Send / WAIL Receive in that project to restore it.
+
+### Fixes
+
+- rename the Link Bridge plugins to WAIL Send / WAIL Receive (#490)
+
 ## 3.19.3 (2026-07-28)
 
 ### Fixes
