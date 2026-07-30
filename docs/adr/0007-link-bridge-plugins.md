@@ -1,6 +1,6 @@
 # Link Bridge: Link-Audio-native CLAP plugins (amends ADR-0005)
 
-Status: accepted (pre-implementation; sequencing and verification gates below)
+Status: accepted and implemented; ADR-0005's PCM bridge removed 2026-07-28; the plugin pair renamed **WAIL Send** / **WAIL Receive** 2026-07-29 (freeing up ADR-0005's old bundle IDs/filenames, now reused here). This document keeps the "Link Bridge" name for the architecture pattern; "Send"/"Recv" below refer to today's WAIL Send/WAIL Receive.
 
 ADR-0005's thin PCM bridge solved the install-surface problem but left two things on
 the table: timing precision is structurally bounded on its FIFO path (delivery time IS
@@ -27,8 +27,8 @@ bridge ships in parallel (see Consequences).
   **room-published channels** (named `WAIL · {peer} · {stream}` — the app adopts this
   prefix at publish time; the room metronome passes naturally). Ports auto-assign per
   channel and live-rename via `RESCAN_NAMES`; a peer joining the jam appears as a named
-  sub-chain with no user action. First-wins dedupe on stream name keeps a multi-WAIL
-  LAN benign.
+  sub-chain with no user action. Dedupe is first-wins on channel id, falling back to
+  stream name across publishers, which keeps a multi-WAIL LAN benign.
 - **Send: one channel per track instance**, named from the DAW track name, **no
   prefix** — the prefix marks room content, not WAIL adjacency (a prefixed Send channel
   would be heard raw *and* one-interval-late via the room, doubled, on every Recv in
@@ -63,11 +63,17 @@ bridge ships in parallel (see Consequences).
 
 ## Consequences
 
-- **ADR-0005 is amended, not replaced.** Both bridges ship; the PCM bridge is marked
-  legacy once the Link Bridge proves out in real sessions; deletion is a separate
-  decision one release cycle later, on evidence (e.g. hosts that sandbox plugin
-  networking may need the IPC path — Bitwig's per-process hosting is a verification
-  item).
+- **ADR-0005 is superseded.** *(Updated 2026-07-28.)* This originally said the PCM
+  bridge would stay until deletion could be decided on evidence, with Bitwig's
+  per-process plugin hosting as the open question — if it sandboxed plugin networking,
+  the IPC path would still be needed. It does not: the Link Bridge plugins run and
+  reach the LAN Link session from inside Bitwig. With the gate cleared, both PCM
+  bundles, their loopback IPC, and the app-side IPC stack were removed. Reopen if a
+  DAW turns up that blocks a plugin's UDP.
+- **The Link Bridge pair is deliberately stateless** — no `clap.state`, no
+  `clap.params`. Send derives its channel name from `clap.track-info` and Recv derives
+  its ports from LAN discovery, so a project file has nothing to persist. This is why
+  ADR-0005's `test_state` roundtrip harness was retired rather than re-pointed.
 - **Pillar 6 narrows** (CONTEXT.md): room intelligence (codec, intervals, relay, room
   clock) never enters any plugin; Link Audio rendering is legitimately plugin-resident.
 - **A channel-name semantic enters the protocol surface**: `WAIL · ` means

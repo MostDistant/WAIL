@@ -41,9 +41,6 @@ type SessionConfig struct {
 	// OnCaptureEnabledChanged fires after a user capture-toggle with the full
 	// enabled set, so the app can persist it (gated on "Remember settings").
 	OnCaptureEnabledChanged func([]CaptureChannelKey)
-	// IPCPort is the loopback-TCP port the CLAP plugin bridge listens on
-	// (ADR-0005); 9191 + app instance. 0 means the default instance's 9191.
-	IPCPort uint16
 	// LogSource, when set, is pumped to the room as LogBroadcast messages
 	// (peer log sharing, #440). Entries flow only when the writer is armed
 	// (debug room / -log-sharing / GUI toggle).
@@ -195,11 +192,6 @@ func sessionLoop(
 	}
 	defer audioEngine.Stop()
 	logInfo("Link Audio engine enabled (interval offset D=%d)", offsetD)
-
-	// CLAP plugin bridge: loopback-TCP IPC server for Send/Recv plugins (ADR-0005).
-	// No-op under -tags linkstub. Closes with the session context / this deferral.
-	stopIPC := maybeStartIPCServer(ctx, config.IPCPort, audioEngine)
-	defer stopIPC()
 
 	// State
 	clock := NewClockSync()

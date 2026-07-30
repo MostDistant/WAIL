@@ -115,10 +115,10 @@ Building or testing the audio path needs cgo (a C++ toolchain + libopus) and GOC
 
 ### CLAP plugin integration tests (no DAW)
 
-`plugins/tests/` hosts the built `wail-send`/`wail-recv` bridges via
-[clap-trap](https://github.com/dfl/clap-trap) and plays the app's role on the
-loopback IPC socket, verifying the wire contract (`wail-app/ipc.go`) end to end
-without a DAW or the Go app:
+`plugins/tests/` hosts the built WAIL Send / WAIL Receive plugins via
+[clap-trap](https://github.com/dfl/clap-trap) alongside a second in-process Link
+peer, verifying publish/subscribe and the room-channel filter without a DAW or
+the Go app:
 
 ```sh
 cmake -S plugins -B build/plugins -DWAIL_PLUGIN_TESTS=ON   # fetches clap-trap
@@ -126,17 +126,18 @@ cmake --build build/plugins
 ctest --test-dir build/plugins --output-on-failure
 ```
 
-### Plugin-chain E2E (plugins ⇄ real apps ⇄ relay, no DAW)
+### Mini-DAW E2E (WAIL Receive ⇄ real app ⇄ relay, no DAW)
 
-`scripts/plugin-e2e.sh` goes one step further: the same clap-trap harness hosts
-`wail-send`/`wail-recv`, but wired to **two real headless WAIL apps** in a local
-relay room (one app per IPC port via `-instance`). A log sweep is pumped into
-wail-send in real time; what returns on wail-recv port 0 is measured per second
-(RMS + zero-crossing frequency, same scheme as `linkaudio-probe`). Exit 0 = PASS.
-Like tier2, it builds the app with cgo and runs in real time (~1 min); manual, not CI.
+`scripts/minidaw-e2e.sh` goes one step further: the same clap-trap harness hosts
+`wail-recv` as a mini-DAW, wired to a **real headless WAIL app** in a
+local relay room. The app broadcasts its metronome with `-loopback`, so the click
+comes back through the relay and is republished as a `WAIL · …` channel; the
+harness measures each click's onset against the session grid and PASSes when the
+median offset is within `MDE2E_THRESHOLD_MS` (default 5 ms). Like tier2, it builds
+the app with cgo and runs in real time (~1 min); manual, not CI.
 
 ```sh
-scripts/plugin-e2e.sh            # PLUGE2E_KEEP=1 keeps app/chain logs on exit
+scripts/minidaw-e2e.sh
 ```
 
 ### Tier 2 audio E2E (real Link Audio path, no DAW)

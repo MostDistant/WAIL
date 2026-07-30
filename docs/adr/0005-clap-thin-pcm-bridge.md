@@ -1,5 +1,9 @@
 # First-party CLAP bridge as a thin PCM transport (amends ADR-0001)
 
+Status: **superseded by ADR-0007** (2026-07-28). The plugins, their loopback IPC, and
+the app-side IPC stack were removed; the body below is kept verbatim as the record of
+why the path existed and what it taught.
+
 ADR-0001 made Link Audio WAIL's only audio interface and retired the CLAP/VST3
 plugins, accepting the consequence that "DAWs without Link Audio support have no WAIL
 path anymore." That gap is real: outside Ableton Live 12.3+, users must bridge audio

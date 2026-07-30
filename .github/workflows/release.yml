@@ -209,8 +209,8 @@ jobs:
 
       - name: Build & stage CLAP plugins
         shell: bash
-        # Bundle the thin CLAP bridge plugins under dist/lib so the app's
-        # first-launch auto-installer (FindPluginDir → {exe}/../lib) finds them.
+        # Bundle the WAIL Send / WAIL Receive CLAP plugins under dist/lib so the
+        # app's first-launch auto-installer (FindPluginDir → {exe}/../lib) finds them.
         run: |
           cmake -S plugins -B build/plugins
           cmake --build build/plugins --config Release
@@ -223,12 +223,12 @@ jobs:
           # Bash runner; the missing-bundle guard below caught it loudly).
           src="build/plugins"
           if [ -d "build/plugins/Release" ]; then src="build/plugins/Release"; fi
-          for b in wail-send wail-recv wail-linkbridge-send wail-linkbridge-recv; do
+          for b in wail-send wail-recv; do
             cp -R "${src}/${b}.clap" dist/lib/
           done
           # Fail loudly: a failed platform doesn't block the release by design,
           # so silent plugin-less installers ship unless staging itself errors.
-          for b in wail-send wail-recv wail-linkbridge-send wail-linkbridge-recv; do
+          for b in wail-send wail-recv; do
             test -e "dist/lib/${b}.clap" || { echo "::error::missing staged bundle ${b}.clap"; exit 1; }
           done
 
@@ -328,15 +328,15 @@ jobs:
           EOF
 
       - name: Build & stage CLAP plugins
-        # Bundle the thin CLAP bridge plugins under dist/lib so the app's
-        # first-launch auto-installer (FindPluginDir → {exe}/../lib) finds them.
+        # Bundle the WAIL Send / WAIL Receive CLAP plugins under dist/lib so the
+        # app's first-launch auto-installer (FindPluginDir → {exe}/../lib) finds them.
         run: |
           cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
           cmake --build build/plugins
           mkdir -p dist/lib
           # Product bundles only — dev tools (transport-probe, linkbridge-spike) are
           # built but never shipped.
-          for b in wail-send wail-recv wail-linkbridge-send wail-linkbridge-recv; do
+          for b in wail-send wail-recv; do
             cp -R "build/plugins/${b}.clap" dist/lib/
           done
 

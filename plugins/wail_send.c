@@ -1,62 +1,67 @@
-// WAIL Send — a thin CLAP plugin that captures its track's audio and streams it as
-// raw PCM to the WAIL app over loopback TCP (ADR-0005). No codec, no networking
-// beyond local IPC: the app does all Opus/WAIF/interval/relay work. Insert it on a
-// track; it passes audio through and taps a copy to WAIL.
+// WAIL Send (ADR-0007) — publishes the DAW track this instance sits on
+// as a Link Audio channel. One channel per instance, named from the host's
+// track-info (no "WAIL · " prefix — the prefix marks room-published channels;
+// this is a raw LAN channel any Link Audio app can hear, including the WAIL
+// app's capture).
 //
-// Threading (ADR-0002 discipline): process() only does lock-free ring writes +
-// memcpy — never a syscall, lock, or allocation. A dedicated IPC thread owns the
-// socket and drains the ring.
+// Audio path (process()): passthrough, then commit the input block to the
+// Link Audio sink, stamped with the session beat at commit time. Link Audio
+// is 48kHz-only: at any other host rate the instance passes audio through
+// but publishes nothing, and says so loudly (log + port name). Realtime
+// discipline: process() only calls the SDK's realtime-safe retain/commit
+// (plus float→int16 conversion); peer/sink lifecycle lives on the activate
+// path. Full factory + vtable (Bitwig scan discipline).
+
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "clap/clap.h"
-#include "clap/ext/track-info.h"
-#include "wail_ipc.h"
+#include "wail_link.h"
 
-#define SEND_RING_SLOTS 64
-#define SEND_CHANNELS 2
-
-typedef struct {
-   uint64_t begin_frame; // plugin frame counter at this block's first sample
-   uint32_t nframes;
-   uint8_t  playing;
-   float   *pcm; // interleaved stereo, capacity max_frames*SEND_CHANNELS
-} send_slot;
+#define LB_QUANTUM 4.0 // phase lens for buffer stamps (beats; beat values are absolute)
+// Stamp-ahead: the block being committed now reaches the sender's DAC one
+// output pipeline later — that IS the audio's correct session-grid play time,
+// so stamps run ahead of the callback clock. It doubles as the receiver's
+// delivery margin (network + drain cadence). 10ms approximates the typical
+// callback→DAC latency; the residual error is one constant, field-measurable
+// per setup (same class as the recv path's output-path constant).
+#define LBS_STAMP_AHEAD_US 10000
 
 typedef struct {
    clap_plugin_t      plugin;
    const clap_host_t *host;
-   double             sample_rate;
-   uint32_t           max_frames;
 
-   // SPSC ring: audio thread (tail) → IPC thread (head).
-   send_slot        slots[SEND_RING_SLOTS];
-   _Atomic uint32_t head;
-   _Atomic uint32_t tail;
-   _Atomic uint64_t dropped;
+   lb_link *link;
+   lb_sink *sink;
+   bool     rate_ok; // host runs at 48k
 
-   uint64_t     frame_counter; // audio-thread owned
-   _Atomic int  stream_index;  // from the "Stream Index" param; read by IPC thread
+   // Track name: written on the main thread (activate / track_info.changed),
+   // read on the same thread for sink naming — sink_set_name is main-thread
+   // anyway, so no cross-thread handoff is needed.
+   char track_name[CLAP_NAME_SIZE];
 
-   // DAW track name from the host's clap.track-info. Written only on the main
-   // thread (init / track_info.changed), read by the IPC thread through a
-   // seqlock (name_seq odd = write in progress); name_dirty tells the IPC
-   // thread to (re)send a TrackName frame. The host is never called off the
-   // main thread.
-   char             track_name[CLAP_NAME_SIZE];
-   _Atomic uint32_t name_seq;
-   _Atomic bool     name_dirty;
+   FILE *log;
+   bool  logged_commit;
+} lb_send;
 
-   wail_thread  ipc_thread;
-   _Atomic bool running;
-} wail_send;
+static void lbs_log(lb_send *self, const char *fmt, ...) {
+   if (!self->log) return;
+   va_list ap;
+   va_start(ap, fmt);
+   vfprintf(self->log, fmt, ap);
+   va_end(ap);
+   fputc('\n', self->log);
+   fflush(self->log);
+}
 
-// send_refresh_track_name queries the host's clap.track-info for the name of
-// the track this instance sits on and caches it for the IPC thread.
-// [main-thread]
-static void send_refresh_track_name(wail_send *self) {
+// refresh_track_name queries clap.track-info for this instance's track and
+// renames the sink channel to match. [main thread]
+static void refresh_track_name(lb_send *self) {
    const clap_host_track_info_t *ti = self->host->get_extension(self->host, CLAP_EXT_TRACK_INFO);
    if (!ti || !ti->get)
       ti = self->host->get_extension(self->host, CLAP_EXT_TRACK_INFO_COMPAT);
@@ -70,400 +75,188 @@ static void send_refresh_track_name(wail_send *self) {
       return;
    if (strncmp(self->track_name, info.name, CLAP_NAME_SIZE - 1) == 0)
       return;
-   atomic_fetch_add_explicit(&self->name_seq, 1, memory_order_acq_rel); // odd: write in progress
-   strncpy(self->track_name, info.name, CLAP_NAME_SIZE - 1);
-   self->track_name[CLAP_NAME_SIZE - 1] = '\0';
-   atomic_fetch_add_explicit(&self->name_seq, 1, memory_order_release); // even: stable
-   atomic_store_explicit(&self->name_dirty, true, memory_order_release);
+   snprintf(self->track_name, sizeof(self->track_name), "%s", info.name);
+   if (self->sink) {
+      lb_sink_set_name(self->sink, self->track_name);
+      lbs_log(self, "channel renamed to \"%s\"", self->track_name);
+   }
 }
 
-// --- audio-thread capture ---
-
-static void send_ring_push(wail_send *self, const float *inL, const float *inR, uint32_t n, uint8_t playing) {
-   uint32_t tail = atomic_load_explicit(&self->tail, memory_order_relaxed);
-   uint32_t head = atomic_load_explicit(&self->head, memory_order_acquire);
-   if (tail - head >= SEND_RING_SLOTS) { // full — drop, stay RT-safe
-      atomic_fetch_add_explicit(&self->dropped, 1, memory_order_relaxed);
-      return;
-   }
-   send_slot *s = &self->slots[tail % SEND_RING_SLOTS];
-   if (n > self->max_frames) n = self->max_frames;
-   for (uint32_t i = 0; i < n; i++) {
-      s->pcm[2 * i] = inL ? inL[i] : 0.0f;
-      s->pcm[2 * i + 1] = inR ? inR[i] : 0.0f;
-   }
-   s->begin_frame = self->frame_counter;
-   s->nframes = n;
-   s->playing = playing;
-   atomic_store_explicit(&self->tail, tail + 1, memory_order_release);
-}
-
-static clap_process_status CLAP_ABI send_process(const clap_plugin_t *plugin, const clap_process_t *p) {
-   wail_send *self = plugin->plugin_data;
+static clap_process_status CLAP_ABI lbs_process(const clap_plugin_t *plugin, const clap_process_t *p) {
+   lb_send *self = plugin->plugin_data;
    uint32_t n = p->frames_count;
-   uint8_t playing = (p->transport && (p->transport->flags & CLAP_TRANSPORT_IS_PLAYING)) ? 1 : 0;
 
-   const float *inL = NULL, *inR = NULL;
-   if (p->audio_inputs_count > 0 && p->audio_inputs[0].data32) {
-      inL = p->audio_inputs[0].data32[0];
-      inR = p->audio_inputs[0].channel_count > 1 ? p->audio_inputs[0].data32[1] : inL;
+   // Passthrough: input 0 → output 0 (inline insert stays audible).
+   if (p->audio_inputs_count > 0 && p->audio_outputs_count > 0) {
+      const clap_audio_buffer_t *in = &p->audio_inputs[0];
+      clap_audio_buffer_t *out = &p->audio_outputs[0];
+      for (uint32_t ch = 0; ch < out->channel_count && ch < in->channel_count; ch++)
+         if (out->data32[ch] && in->data32[ch] && out->data32[ch] != in->data32[ch])
+            memcpy(out->data32[ch], in->data32[ch], n * sizeof(float));
    }
-   send_ring_push(self, inL, inR, n, playing);
 
-   // Passthrough so inserting the plugin doesn't mute the track.
-   if (p->audio_outputs_count > 0 && p->audio_outputs[0].data32) {
-      float *outL = p->audio_outputs[0].data32[0];
-      float *outR = p->audio_outputs[0].channel_count > 1 ? p->audio_outputs[0].data32[1] : NULL;
-      for (uint32_t i = 0; i < n; i++) {
-         if (outL) outL[i] = inL ? inL[i] : 0.0f;
-         if (outR) outR[i] = inR ? inR[i] : 0.0f;
-      }
-   }
-   self->frame_counter += n;
+   if (!self->sink || !self->rate_ok || p->audio_inputs_count == 0)
+      return CLAP_PROCESS_CONTINUE;
 
-   if (p->in_events) {
-      uint32_t ne = p->in_events->size(p->in_events);
-      for (uint32_t i = 0; i < ne; i++) {
-         const clap_event_header_t *h = p->in_events->get(p->in_events, i);
-         if (h->space_id == CLAP_CORE_EVENT_SPACE_ID && h->type == CLAP_EVENT_PARAM_VALUE) {
-            const clap_event_param_value_t *ev = (const clap_event_param_value_t *)h;
-            if (ev->param_id == 0)
-               atomic_store_explicit(&self->stream_index, (int)ev->value, memory_order_relaxed);
-         }
-      }
+   const clap_audio_buffer_t *in = &p->audio_inputs[0];
+   if (!in->data32 || !in->data32[0])
+      return CLAP_PROCESS_CONTINUE;
+
+   // Stamp the block with the session beat at its *play* time (stamp-ahead —
+   // see LBS_STAMP_AHEAD_US).
+   lb_state *st = lb_capture(self->link);
+   double beat = lb_beat_at_time(st, lb_clock_micros(self->link) + LBS_STAMP_AHEAD_US, LB_QUANTUM);
+   bool ok = lb_sink_commit(self->sink, st, beat, LB_QUANTUM,
+                            in->data32[0], in->channel_count > 1 ? in->data32[1] : NULL, n, 48000);
+   lb_release(st);
+   if (!self->logged_commit) {
+      self->logged_commit = true;
+      lbs_log(self, "first commit: %s (frames=%u)", ok ? "ok" : "WITHHELD (no source subscribed?)", n);
    }
    return CLAP_PROCESS_CONTINUE;
 }
 
-// send_track_name_frame snapshots the cached track name (seqlock read) and
-// sends it as a TrackName frame. A no-op (success) when the host gave no name.
-// [IPC thread]
-static int send_track_name_frame(wail_send *self, wail_sock sock) {
-   char name[CLAP_NAME_SIZE];
-   for (;;) {
-      uint32_t s1 = atomic_load_explicit(&self->name_seq, memory_order_acquire);
-      if (s1 & 1u)
-         continue; // main thread mid-write; it only does a short memcpy
-      memcpy(name, self->track_name, CLAP_NAME_SIZE);
-      atomic_thread_fence(memory_order_acquire);
-      uint32_t s2 = atomic_load_explicit(&self->name_seq, memory_order_acquire);
-      if (s1 == s2)
-         break;
-   }
-   if (name[0] == '\0')
-      return 0;
-   uint8_t buf[1 + 2 + 2 + CLAP_NAME_SIZE];
-   size_t off = 0;
-   buf[off++] = WAIL_TAG_TRACKNAME;
-   wail_put_u16(buf, &off, (uint16_t)atomic_load_explicit(&self->stream_index, memory_order_relaxed));
-   size_t n = strnlen(name, CLAP_NAME_SIZE);
-   wail_put_u16(buf, &off, (uint16_t)n);
-   memcpy(buf + off, name, n);
-   off += n;
-   return wail_send_frame(sock, buf, (uint32_t)off);
-}
-
-// --- IPC thread ---
-
-static void *send_ipc_thread(void *arg) {
-   wail_send *self = arg;
-   char host[128];
-   int port;
-   wail_ipc_resolve(host, sizeof(host), &port);
-   wail_sock sock = WAIL_INVALID_SOCK;
-   uint8_t *payload = NULL;
-   size_t payload_cap = 0;
-
-   while (atomic_load_explicit(&self->running, memory_order_acquire)) {
-      if (sock == WAIL_INVALID_SOCK) {
-         sock = wail_sock_connect(host, port);
-         if (sock == WAIL_INVALID_SOCK) {
-            wail_sleep_ms(500);
-            continue;
-         }
-         uint8_t hs[3];
-         size_t off = 0;
-         hs[off++] = WAIL_IPC_ROLE_SEND;
-         wail_put_u16(hs, &off, (uint16_t)atomic_load_explicit(&self->stream_index, memory_order_relaxed));
-         if (wail_sock_write_all(sock, hs, off) != 0) {
-            wail_sock_close(sock);
-            sock = WAIL_INVALID_SOCK;
-            continue;
-         }
-         // (Re)sent on every (re)connect: the app registers this stream fresh.
-         atomic_store_explicit(&self->name_dirty, true, memory_order_release);
-         // Flush stale ring slots held through the outage: re-sending them
-         // would arm the app's beat anchor with old frame counters and stamp
-         // all subsequent audio by the outage duration (field finding: an
-         // 11-minute outage put capture +82 intervals ahead). The slots are
-         // ~40ms of old audio at most — never worth a poisoned anchor.
-         atomic_store_explicit(&self->head,
-                               atomic_load_explicit(&self->tail, memory_order_acquire),
-                               memory_order_release);
-      }
-      if (atomic_exchange_explicit(&self->name_dirty, false, memory_order_acq_rel)) {
-         if (send_track_name_frame(self, sock) != 0) {
-            wail_sock_close(sock);
-            sock = WAIL_INVALID_SOCK;
-            continue;
-         }
-      }
-      uint32_t head = atomic_load_explicit(&self->head, memory_order_relaxed);
-      uint32_t tail = atomic_load_explicit(&self->tail, memory_order_acquire);
-      if (head == tail) {
-         wail_sleep_ms(2);
-         continue;
-      }
-      send_slot *s = &self->slots[head % SEND_RING_SLOTS];
-      size_t need = 17 + (size_t)s->nframes * SEND_CHANNELS * sizeof(float);
-      if (need > payload_cap) {
-         uint8_t *np = realloc(payload, need);
-         if (!np) break;
-         payload = np;
-         payload_cap = need;
-      }
-      size_t off = 0;
-      payload[off++] = WAIL_TAG_RAWPCM;
-      wail_put_u16(payload, &off, (uint16_t)atomic_load_explicit(&self->stream_index, memory_order_relaxed));
-      payload[off++] = (uint8_t)(s->playing ? WAIL_RAW_FLAG_PLAYING : 0); // float32 payload
-      payload[off++] = SEND_CHANNELS;
-      wail_put_u32(payload, &off, (uint32_t)self->sample_rate);
-      wail_put_u64(payload, &off, s->begin_frame);
-      size_t bytes = (size_t)s->nframes * SEND_CHANNELS * sizeof(float);
-      memcpy(payload + off, s->pcm, bytes);
-      off += bytes;
-      if (wail_send_frame(sock, payload, (uint32_t)off) != 0) {
-         wail_sock_close(sock);
-         sock = WAIL_INVALID_SOCK;
-         continue; // reconnect; don't advance head — the block is re-sent
-      }
-      atomic_store_explicit(&self->head, head + 1, memory_order_release);
-   }
-   if (sock != WAIL_INVALID_SOCK) wail_sock_close(sock);
-   free(payload);
-   return NULL;
-}
-
-// --- plugin lifecycle ---
-
-static bool CLAP_ABI send_init(const clap_plugin_t *plugin) {
-   wail_send *self = plugin->plugin_data;
-   send_refresh_track_name(self);
+static bool CLAP_ABI lbs_init(const clap_plugin_t *plugin) {
+   (void)plugin;
    return true;
 }
-static void CLAP_ABI send_destroy(const clap_plugin_t *plugin) { free(plugin->plugin_data); }
-
-static bool CLAP_ABI send_activate(const clap_plugin_t *plugin, double sr, uint32_t minf, uint32_t maxf) {
+static void CLAP_ABI lbs_destroy(const clap_plugin_t *plugin) {
+   lb_send *self = plugin->plugin_data;
+   free(self);
+}
+static bool CLAP_ABI lbs_activate(const clap_plugin_t *plugin, double sr, uint32_t minf, uint32_t maxf) {
    (void)minf;
-   wail_send *self = plugin->plugin_data;
-   self->sample_rate = sr;
-   self->max_frames = maxf;
-   for (int i = 0; i < SEND_RING_SLOTS; i++) {
-      self->slots[i].pcm = calloc((size_t)maxf * SEND_CHANNELS, sizeof(float));
-      if (!self->slots[i].pcm) {
-         for (int j = 0; j < i; j++) {
-            free(self->slots[j].pcm);
-            self->slots[j].pcm = NULL;
-         }
-         return false;
-      }
-   }
-   atomic_store(&self->head, 0);
-   atomic_store(&self->tail, 0);
-   self->frame_counter = 0;
-   send_refresh_track_name(self); // the track may only be known post-init
-   atomic_store(&self->running, true);
-   if (wail_thread_create(&self->ipc_thread, send_ipc_thread, self) != 0) {
-      atomic_store(&self->running, false);
-      return false;
+   (void)maxf;
+   lb_send *self = plugin->plugin_data;
+   { char lp[512]; lb_temp_log_path("wail-send.log", lp, sizeof(lp)); self->log = fopen(lp, "a"); }
+   self->rate_ok = (sr == 48000.0);
+   self->link = lb_create(120.0);
+   lb_enable(self->link, true);
+   lb_enable_audio(self->link, true);
+   refresh_track_name(self);
+   const char *name = self->track_name[0] ? self->track_name : "WAIL Send";
+   if (self->rate_ok) {
+      self->sink = lb_sink_create(self->link, name, 16384);
+      lbs_log(self, "=== send activated: host=\"%s %s\" sr=%.0f channel=\"%s\" ===",
+              self->host && self->host->name ? self->host->name : "?",
+              self->host && self->host->version ? self->host->version : "?", sr, name);
+   } else {
+      lbs_log(self, "!!! send activated at sr=%.0f — Link Audio is 48kHz-only; "
+                    "this instance passes audio but publishes NOTHING "
+                    "(host=\"%s %s\")", sr,
+              self->host && self->host->name ? self->host->name : "?",
+              self->host && self->host->version ? self->host->version : "?");
    }
    return true;
 }
-
-static void CLAP_ABI send_deactivate(const clap_plugin_t *plugin) {
-   wail_send *self = plugin->plugin_data;
-   if (atomic_exchange(&self->running, false)) wail_thread_join(self->ipc_thread);
-   for (int i = 0; i < SEND_RING_SLOTS; i++) {
-      free(self->slots[i].pcm);
-      self->slots[i].pcm = NULL;
+static void CLAP_ABI lbs_deactivate(const clap_plugin_t *plugin) {
+   lb_send *self = plugin->plugin_data;
+   if (self->sink) {
+      lb_sink_destroy(self->sink);
+      self->sink = NULL;
+   }
+   if (self->link) {
+      lb_enable(self->link, false);
+      lb_destroy(self->link);
+      self->link = NULL;
+   }
+   if (self->log) {
+      fprintf(self->log, "=== send deactivated ===\n");
+      fclose(self->log);
+      self->log = NULL;
    }
 }
-
-static bool CLAP_ABI send_start(const clap_plugin_t *p) {
+static bool CLAP_ABI lbs_start(const clap_plugin_t *p) {
    (void)p;
    return true;
 }
-static void CLAP_ABI send_stop(const clap_plugin_t *p) { (void)p; }
-static void CLAP_ABI send_reset(const clap_plugin_t *p) { (void)p; }
-static void CLAP_ABI send_main_thread(const clap_plugin_t *p) { (void)p; }
+static void CLAP_ABI lbs_stop(const clap_plugin_t *p) {
+   (void)p;
+}
+static void CLAP_ABI lbs_reset(const clap_plugin_t *p) {
+   (void)p;
+}
 
-// --- audio-ports extension: one stereo in, one stereo out ---
+// --- audio ports: 1 stereo in (main) + 1 stereo out (passthrough) ---
 
-static uint32_t CLAP_ABI send_ap_count(const clap_plugin_t *p, bool is_input) {
+static uint32_t CLAP_ABI lbs_ap_count(const clap_plugin_t *p, bool is_input) {
    (void)p;
    (void)is_input;
    return 1;
 }
-static bool CLAP_ABI send_ap_get(const clap_plugin_t *p, uint32_t idx, bool is_input, clap_audio_port_info_t *info) {
+static bool CLAP_ABI lbs_ap_get(const clap_plugin_t *p, uint32_t idx, bool is_input, clap_audio_port_info_t *info) {
    (void)p;
    if (idx != 0) return false;
    info->id = 0;
    snprintf(info->name, sizeof(info->name), "%s", is_input ? "Input" : "Output");
    info->flags = CLAP_AUDIO_PORT_IS_MAIN;
-   info->channel_count = SEND_CHANNELS;
+   info->channel_count = 2;
    info->port_type = CLAP_PORT_STEREO;
    info->in_place_pair = CLAP_INVALID_ID;
    return true;
 }
-static const clap_plugin_audio_ports_t send_audio_ports = {send_ap_count, send_ap_get};
+static const clap_plugin_audio_ports_t lbs_audio_ports = {lbs_ap_count, lbs_ap_get};
 
-// --- params extension: "Stream Index" (0..15) ---
+// --- track-info: rename the channel when the track renames ---
 
-static uint32_t CLAP_ABI send_pp_count(const clap_plugin_t *p) {
+static void CLAP_ABI lbs_track_info_changed(const clap_plugin_t *plugin) {
+   refresh_track_name(plugin->plugin_data);
+}
+static const clap_plugin_track_info_t lbs_track_info = {lbs_track_info_changed};
+
+static const void *CLAP_ABI lbs_get_extension(const clap_plugin_t *p, const char *id) {
    (void)p;
-   return 1;
-}
-static bool CLAP_ABI send_pp_info(const clap_plugin_t *p, uint32_t idx, clap_param_info_t *info) {
-   (void)p;
-   if (idx != 0) return false;
-   memset(info, 0, sizeof(*info));
-   info->id = 0;
-   info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
-   snprintf(info->name, sizeof(info->name), "Stream Index");
-   info->min_value = 0;
-   info->max_value = 15;
-   info->default_value = 0;
-   return true;
-}
-static bool CLAP_ABI send_pp_value(const clap_plugin_t *p, clap_id id, double *out) {
-   if (id != 0) return false;
-   wail_send *self = p->plugin_data;
-   *out = (double)atomic_load_explicit(&self->stream_index, memory_order_relaxed);
-   return true;
-}
-static bool CLAP_ABI send_pp_v2t(const clap_plugin_t *p, clap_id id, double v, char *buf, uint32_t cap) {
-   (void)p;
-   if (id != 0) return false;
-   snprintf(buf, cap, "%d", (int)v);
-   return true;
-}
-static bool CLAP_ABI send_pp_t2v(const clap_plugin_t *p, clap_id id, const char *txt, double *out) {
-   (void)p;
-   if (id != 0) return false;
-   *out = atof(txt);
-   return true;
-}
-static void CLAP_ABI send_pp_flush(const clap_plugin_t *p, const clap_input_events_t *in, const clap_output_events_t *out) {
-   (void)out;
-   if (!in) return;
-   wail_send *self = p->plugin_data;
-   uint32_t ne = in->size(in);
-   for (uint32_t i = 0; i < ne; i++) {
-      const clap_event_header_t *h = in->get(in, i);
-      if (h->space_id == CLAP_CORE_EVENT_SPACE_ID && h->type == CLAP_EVENT_PARAM_VALUE) {
-         const clap_event_param_value_t *ev = (const clap_event_param_value_t *)h;
-         if (ev->param_id == 0)
-            atomic_store_explicit(&self->stream_index, (int)ev->value, memory_order_relaxed);
-      }
-   }
-}
-static const clap_plugin_params_t send_params = {
-    send_pp_count, send_pp_info, send_pp_value, send_pp_v2t, send_pp_t2v, send_pp_flush};
-
-// --- state extension: persist "Stream Index" across project saves ---
-// Without CLAP_EXT_STATE hosts like Bitwig refuse to save projects containing
-// this plugin ("Plug-in does not support saving its state").
-
-#define SEND_STATE_MAGIC 0x57414C53u   // 'WALS'
-#define SEND_STATE_VERSION 1u
-
-static bool CLAP_ABI send_state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream) {
-   wail_send *self = plugin->plugin_data;
-   uint8_t buf[12];
-   size_t  off = 0;
-   wail_put_u32(buf, &off, SEND_STATE_MAGIC);
-   wail_put_u32(buf, &off, SEND_STATE_VERSION);
-   wail_put_u32(buf, &off, (uint32_t)atomic_load_explicit(&self->stream_index, memory_order_relaxed));
-   return wail_stream_write_all(stream, buf, off) != 0;
-}
-
-static bool CLAP_ABI send_state_load(const clap_plugin_t *plugin, const clap_istream_t *stream) {
-   wail_send *self = plugin->plugin_data;
-   uint8_t buf[12];
-   if (!wail_stream_read_all(stream, buf, sizeof(buf))) return false;
-   if (wail_get_u32(buf) != SEND_STATE_MAGIC) return false;
-   if (wail_get_u32(buf + 4) != SEND_STATE_VERSION) return false;
-   uint32_t idx = wail_get_u32(buf + 8);
-   if (idx > 15) idx = 15; // clamp, don't fail: a newer build may widen the range
-   atomic_store_explicit(&self->stream_index, (int)idx, memory_order_relaxed);
-   const clap_host_params_t *hp = self->host->get_extension(self->host, CLAP_EXT_PARAMS);
-   if (hp && hp->rescan) hp->rescan(self->host, CLAP_PARAM_RESCAN_VALUES);
-   return true;
-}
-static const clap_plugin_state_t send_state = {send_state_save, send_state_load};
-
-// --- track-info extension: the host tells us when our track's name changes ---
-
-static void CLAP_ABI send_track_info_changed(const clap_plugin_t *plugin) {
-   send_refresh_track_name(plugin->plugin_data);
-}
-static const clap_plugin_track_info_t send_track_info = {send_track_info_changed};
-
-static const void *CLAP_ABI send_get_extension(const clap_plugin_t *p, const char *id) {
-   (void)p;
-   if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &send_audio_ports;
-   if (!strcmp(id, CLAP_EXT_PARAMS)) return &send_params;
-   if (!strcmp(id, CLAP_EXT_STATE)) return &send_state;
-   if (!strcmp(id, CLAP_EXT_TRACK_INFO)) return &send_track_info;
-   if (!strcmp(id, CLAP_EXT_TRACK_INFO_COMPAT)) return &send_track_info;
+   if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &lbs_audio_ports;
+   if (!strcmp(id, CLAP_EXT_TRACK_INFO)) return &lbs_track_info;
+   if (!strcmp(id, CLAP_EXT_TRACK_INFO_COMPAT)) return &lbs_track_info;
    return NULL;
 }
+static void CLAP_ABI lbs_main_thread(const clap_plugin_t *p) {
+   (void)p;
+}
 
-// --- descriptor / factory / entry ---
-
-static const char *send_features[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY, NULL};
-static const clap_plugin_descriptor_t send_desc = {
+static const char *lbs_features[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY, NULL};
+static const clap_plugin_descriptor_t lbs_desc = {
     .clap_version = CLAP_VERSION_INIT,
     .id = "software.wail.send",
     .name = "WAIL Send",
     .vendor = "WAIL",
     .url = "https://github.com/nicholasgasior/wail",
     .version = "0.1.0",
-    .description = "Capture DAW audio into a WAIL room (thin PCM bridge to the WAIL app).",
-    .features = send_features,
+    .description = "Publish this track as a Link Audio channel (ADR-0007).",
+    .features = lbs_features,
 };
 
-static const clap_plugin_t *CLAP_ABI send_create(const clap_plugin_factory_t *f, const clap_host_t *host, const char *id) {
+static const clap_plugin_t *CLAP_ABI lbs_create(const clap_plugin_factory_t *f, const clap_host_t *host, const char *id) {
    (void)f;
-   if (strcmp(id, send_desc.id) != 0) return NULL;
-   wail_send *self = calloc(1, sizeof(wail_send));
+   if (strcmp(id, lbs_desc.id) != 0) return NULL;
+   lb_send *self = calloc(1, sizeof(lb_send));
    if (!self) return NULL;
    self->host = host;
-   atomic_store(&self->stream_index, 0);
-   self->plugin.desc = &send_desc;
+   self->plugin.desc = &lbs_desc;
    self->plugin.plugin_data = self;
-   self->plugin.init = send_init;
-   self->plugin.destroy = send_destroy;
-   self->plugin.activate = send_activate;
-   self->plugin.deactivate = send_deactivate;
-   self->plugin.start_processing = send_start;
-   self->plugin.stop_processing = send_stop;
-   self->plugin.reset = send_reset;
-   self->plugin.process = send_process;
-   self->plugin.get_extension = send_get_extension;
-   self->plugin.on_main_thread = send_main_thread;
+   self->plugin.init = lbs_init;
+   self->plugin.destroy = lbs_destroy;
+   self->plugin.activate = lbs_activate;
+   self->plugin.deactivate = lbs_deactivate;
+   self->plugin.start_processing = lbs_start;
+   self->plugin.stop_processing = lbs_stop;
+   self->plugin.reset = lbs_reset;
+   self->plugin.process = lbs_process;
+   self->plugin.get_extension = lbs_get_extension;
+   self->plugin.on_main_thread = lbs_main_thread;
    return &self->plugin;
 }
 
-static uint32_t CLAP_ABI send_factory_count(const clap_plugin_factory_t *f) {
+static uint32_t CLAP_ABI lbs_factory_count(const clap_plugin_factory_t *f) {
    (void)f;
    return 1;
 }
-static const clap_plugin_descriptor_t *CLAP_ABI send_factory_desc(const clap_plugin_factory_t *f, uint32_t idx) {
+static const clap_plugin_descriptor_t *CLAP_ABI lbs_factory_desc(const clap_plugin_factory_t *f, uint32_t idx) {
    (void)f;
-   return idx == 0 ? &send_desc : NULL;
+   return idx == 0 ? &lbs_desc : NULL;
 }
-static const clap_plugin_factory_t send_factory = {send_factory_count, send_factory_desc, send_create};
+static const clap_plugin_factory_t lbs_factory = {lbs_factory_count, lbs_factory_desc, lbs_create};
 
 static bool CLAP_ABI entry_init(const char *path) {
    (void)path;
@@ -471,7 +264,7 @@ static bool CLAP_ABI entry_init(const char *path) {
 }
 static void CLAP_ABI entry_deinit(void) {}
 static const void *CLAP_ABI entry_get_factory(const char *id) {
-   return strcmp(id, CLAP_PLUGIN_FACTORY_ID) == 0 ? &send_factory : NULL;
+   return strcmp(id, CLAP_PLUGIN_FACTORY_ID) == 0 ? &lbs_factory : NULL;
 }
 
 CLAP_EXPORT const clap_plugin_entry_t clap_entry = {

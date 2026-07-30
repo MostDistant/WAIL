@@ -59,8 +59,6 @@ install_bundle() {
 
 install_bundle "${SRC_DIR}/wail-send.clap"
 install_bundle "${SRC_DIR}/wail-recv.clap"
-install_bundle "${SRC_DIR}/wail-linkbridge-send.clap"
-install_bundle "${SRC_DIR}/wail-linkbridge-recv.clap"
 
 echo ""
 echo "Done. Rescan plugins in your DAW to pick up the changes."

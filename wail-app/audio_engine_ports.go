@@ -6,8 +6,8 @@ import "github.com/nicholasgasior/wail/wail-app/internal/abllink"
 
 // captureSource is the send-side transport the engine drains: it yields PCM
 // buffers already mapped to a local Link beat. *abllink.Source (Link Audio) is
-// one implementation; a future IPC-backed CLAP send plugin is another, feeding the
-// same capture→assemble→encode→relay path (ADR-0005).
+// the implementation; the interface keeps the capture→assemble→encode→relay
+// path testable without one.
 type captureSource interface {
 	// PopMapped drains the next buffer and resolves its begin beat in ss's local
 	// Link timeline at the given quantum. popped is false when the ring is empty;
@@ -56,25 +56,15 @@ func (l linkCaptureSource) Dropped() uint64 { return l.s.Dropped() }
 func (l linkCaptureSource) Close()          { l.s.Close() }
 
 // emitSink is the playback-side transport the emit loop feeds paced chunks to.
-// *abllink.Sink (Link Audio) satisfies it directly; a future IPC-backed CLAP recv
-// plugin is the other implementation (ADR-0005). Each emit stream fans its chunks to
-// all of its sinks.
+// *abllink.Sink (Link Audio) satisfies it directly. Each emit stream fans its
+// chunks to all of its sinks.
 type emitSink interface {
 	WriteInterleaved(samples []int16, ss *abllink.SessionState, beatsAtBegin, quantum float64, numFrames, numChannels int, sampleRate uint32) bool
 	SetName(name string)
 	Close()
 }
 
-// fifoFlusher is implemented by emitSinks that render arrival order (FIFO —
-// the CLAP recv plugin, ADR-0005) and therefore timed-release their queued
-// chunks: the emit loop calls Flush each tick with the current beat so
-// delivery time matches stamped time. Beat-stamped sinks (*abllink.Sink) don't
-// need it — their subscribers render at the stamp, not at arrival.
-type fifoFlusher interface {
-	Flush(nowBeat, leadBeats float64, playAt func(beat float64) int64)
-}
-
-// Compile-time checks that the Link Audio adapters satisfy the transport seams.
+// Compile-time checks that the Link Audio adapters satisfy the transport boundaries.
 var (
 	_ captureSource = linkCaptureSource{}
 	_ emitSink      = (*abllink.Sink)(nil)

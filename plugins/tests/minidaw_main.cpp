@@ -2,7 +2,7 @@
 //
 // One process = one Link peer + one hosted CLAP plugin + a Link-faithful
 // transport (rolling, song_pos from session beats, session tempo) + a
-// real-time block pump. Mode "recv": host Link Bridge Recv, wait for a
+// real-time block pump. Mode "recv": host WAIL Receive, wait for a
 // room-published ("WAIL · ") channel to be assigned a port, then measure the
 // phase offset of arriving click onsets against the local session grid.
 //
@@ -12,7 +12,7 @@
 // bridge filter, stamp alignment, output pipeline.
 //
 // Usage:
-//   minidaw recv --plugin <path-to-wail-linkbridge-recv> [--seconds 20]
+//   minidaw recv --plugin <path-to-wail-recv> [--seconds 20]
 //            [--threshold-ms 5] [--name-contains Metronome] [--verbose]
 //
 // Exit 0 = PASS (|median onset offset| <= threshold), 1 = FAIL/timeout.
@@ -26,9 +26,8 @@
 #include <thread>
 #include <vector>
 
-#include "linkbridge_link.h"
+#include "wail_link.h"
 #include "plugin_host.h"
-#include "wail_ipc.h"
 
 namespace {
 
@@ -137,7 +136,7 @@ int main(int argc, char **argv) {
 
    wailtest::ClapInstance inst;
    std::string err;
-   if (!inst.load(args.plugin.c_str(), "software.wail.linkbridge.recv", 0, kRate, kBlock, kBlock, &err)) {
+   if (!inst.load(args.plugin.c_str(), "software.wail.recv", kRate, kBlock, kBlock, &err)) {
       fprintf(stderr, "load failed: %s\n", err.c_str());
       return 1;
    }

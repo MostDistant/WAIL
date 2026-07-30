@@ -4,12 +4,12 @@ WAIL makes remote musicians feel like one Ableton Link session: on each LAN it i
 
 ## Pillars
 
-1. **WAIL is primarily a Link peer.** Audio enters WAIL as local Link Audio channels and leaves it as published Link Audio channels; time enters and leaves as Link sync. If an app speaks Link + Link Audio, it works with WAIL with nothing to install. For DAWs without Link Audio there are two **optional, opt-in** bridges: the thin PCM bridge (WAIL Send/Recv, raw PCM over loopback IPC, ADR-0005) and the Link Bridge (ADR-0007) — CLAP plugins that are themselves Link peers, making the DAW a Link Audio citizen outright. Both stay optional so "nothing to install" stays the norm.
+1. **WAIL is primarily a Link peer.** Audio enters WAIL as local Link Audio channels and leaves it as published Link Audio channels; time enters and leaves as Link sync. If an app speaks Link + Link Audio, it works with WAIL with nothing to install. For DAWs without Link Audio there is one **optional, opt-in** bridge: WAIL Send / WAIL Receive (ADR-0007) — CLAP plugins that are themselves Link peers, making the DAW a Link Audio citizen outright. It stays optional so "nothing to install" stays the norm.
 2. **Intervalic, not real-time.** The NINJAM model: everyone hears everyone else's *previous* interval, perfectly beat-aligned. The delay is a fixed, configured number of intervals (default one), by design. WAIL never chases sub-20ms streaming over the WAN.
 3. **The WAN leg is loss-free.** Everything WAIL captures is completely delivered to every peer — the interval offset buys the time to do it, and dropping samples to save milliseconds is never the right trade. The LAN hop is Link Audio's domain: best-effort by design; WAIL detects loss there, conceals what it can, and surfaces the rest as metrics rather than hiding it.
 4. **Ableton Link owns time.** WAIL never invents a musical clock — it participates as a Link peer, and the local Link session is authoritative for tempo, beat, and within-bar phase. Two deliberate, narrow exceptions keep each local interval grid physically aligned to the room grid (ADR-0006): a consented **entry conformance** snap at join/rejoin — transition moments only, and only when the measured alignment error exceeds the perceptual threshold — and a gated **grid slew** in steady state that closes drift with bounded tempo nudges, suppressed for a few seconds after any tempo change and never a `ForceBeat` outside entry. Peer RTT measurement feeds this alignment as well as diagnostics.
 5. **Boring transport.** One relay server carries everything across the WAN — JSON sync and binary audio — and owns the room interval clock (NINJAM-style); otherwise it is a dumb broadcast relay. No P2P, no ICE/STUN/TURN, no per-peer connection state. We pay an extra hop for a system one person can hold in their head.
-6. **One app is the whole system.** Session orchestration, Link bridging, codec, and networking live in a single app per musician (GUI or headless). The optional bridges are narrow exceptions: the PCM bridge (ADR-0005) moves raw PCM over loopback IPC and holds no logic at all; the Link Bridge (ADR-0007) is plugin-resident only for Link Audio rendering (it is a Link peer — sink/source and timeline mapping). Room intelligence — codec, intervals, relay, room clock — never enters any plugin.
+6. **One app is the whole system.** Session orchestration, Link bridging, codec, and networking live in a single app per musician (GUI or headless). The optional WAIL Send / WAIL Receive plugins (ADR-0007) are a narrow exception: they are plugin-resident only for Link Audio rendering (each is a Link peer — sink/source and timeline mapping). Room intelligence — codec, intervals, relay, room clock — never enters any plugin.
 7. **Real-time callbacks are sacred.** No allocation, locking, encoding, or blocking I/O on Link's audio delivery threads. Heavy work happens on background threads.
 8. **Degrade gracefully, stay observable.** Network blips must not ruin a jam: a reconnecting musician's streams reappear as the same published channels, late audio live-appends, joins fade in. Failures never crash and never happen silently.
 
@@ -85,21 +85,17 @@ A DAW-local setting (e.g. Live's Global Quantization) that aligns clip launches 
 **Channel affinity**:
 Republishing a reconnecting identity's streams under the same channel identities, so LAN apps' routing survives the blip.
 
-**PCM bridge**:
-The ADR-0005 WAIL Send/Recv CLAP plugins: raw PCM over loopback IPC between the DAW and the running WAIL app.
-_Avoid_: the bridge, unqualified (there are now two bridges)
-
-**Link Bridge**:
-The Link-Audio-native CLAP plugin pair (ADR-0007): each instance is a Link peer, making a Link-but-not-Link-Audio DAW a Link Audio citizen. Recv is a 16-port device auto-populated from room-published channels; Send publishes one channel per track instance, named from the track.
+**WAIL Send / WAIL Receive**:
+The Link-Audio-native CLAP plugin pair (ADR-0007), and the only bridge WAIL ships: each instance is a Link peer, making a Link-but-not-Link-Audio DAW a Link Audio citizen. WAIL Receive is a 16-port device auto-populated from room-published channels; WAIL Send publishes one channel per track instance, named from the track.
 
 **Room-published channel**:
 A Link Audio channel a WAIL app publishes from room content — one remote stream one interval late, or the room metronome. Named `WAIL · {peer} · {stream}`.
 
 **WAIL · prefix**:
-The channel-name marker meaning room-published. Link Bridge Recv subscribes only to prefixed channels (first-wins dedupe on the stream name when two local WAILs publish the same room); Link Bridge Send channels never carry it — the prefix marks room content, not WAIL adjacency.
+The channel-name marker meaning room-published. WAIL Receive subscribes only to prefixed channels (first-wins dedupe on the stream name when two local WAILs publish the same room); WAIL Send channels never carry it — the prefix marks room content, not WAIL adjacency.
 
 **Bridge port**:
-One of Link Bridge Recv's 16 stereo output ports, auto-assigned per room-published channel and live-renamed via CLAP `RESCAN_NAMES`, so a peer joining the jam appears as a named sub-chain with no user action.
+One of WAIL Receive's 16 stereo output ports, auto-assigned per room-published channel and live-renamed via CLAP `RESCAN_NAMES`, so a peer joining the jam appears as a named sub-chain with no user action.
 
 **LAN loss**:
 Samples lost on the Link Audio hop between a LAN app and WAIL. Detectable via sequence counters, never recoverable; concealed where possible and always surfaced in metrics.

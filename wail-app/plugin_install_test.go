@@ -36,10 +36,12 @@ func clapDestDir(t *testing.T) string {
 	}
 }
 
-// staleLinkBridgeName matches an unprefixed linkbridge-send/-recv bundle name —
-// the pre-rename spelling. The leading class rejects "wail-linkbridge-send" and
-// the underscore source filenames (linkbridge_send.c).
-var staleLinkBridgeName = regexp.MustCompile(`(?m)(^|[^-\w])linkbridge-(send|recv)`)
+// staleLinkBridgeName matches a linkbridge-send/-recv bundle name, with or
+// without the "wail-" prefix — both pre-rename spellings from before the
+// plugins became WAIL Send / WAIL Receive. Requiring a literal hyphen before
+// send/recv keeps it from matching the unrelated dev spike (linkbridge-spike,
+// linkbridge_spike.c) or the underscore source filenames.
+var staleLinkBridgeName = regexp.MustCompile(`(?m)(^|[^-\w])(wail-)?linkbridge-(send|recv)`)
 
 // The bundle list is duplicated across the build, the two installers, and the
 // release workflow. A rename that misses one of them ships silently: the Homebrew

@@ -14,9 +14,10 @@
 
 namespace {
 constexpr double kSampleRate = 48000.0;
+constexpr int kPorts = 16; // LBR_SLOTS in wail_recv.c
 }
 
-#include "linkbridge_link.h"
+#include "wail_link.h"
 #include "plugin_host.h"
 #include "test_framework.h"
 
@@ -28,7 +29,7 @@ TEST(linkbridge_spike_hosts_and_logs) {
 
    wailtest::ClapInstance inst;
    std::string err;
-   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SPIKE_PATH, "software.linkbridge.spike", 0, 48000.0, 256, 256, &err),
+   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SPIKE_PATH, "software.linkbridge.spike", 48000.0, 256, 256, &err),
              err.c_str());
    if (!inst.plugin) return;
 
@@ -80,14 +81,14 @@ TEST(linkbridge_spike_hosts_and_logs) {
    }
 }
 
-// Pub/sub roundtrip (Link Bridge Send): host the send plugin via clap-trap,
+// Pub/sub roundtrip (WAIL Send): host the send plugin via clap-trap,
 // feed a 440Hz sine, and a second Link peer in this process subscribes to the
 // published channel and measures what arrives — the whole Link Audio send
 // path, no DAW, no WAIL app.
-TEST(linkbridge_send_pubsub_roundtrip) {
+TEST(wail_send_pubsub_roundtrip) {
    wailtest::ClapInstance inst;
    std::string err;
-   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_SEND_PATH, "software.wail.linkbridge.send", 0, 48000.0, 256, 256, &err),
+   CHECK_MSG(inst.load(WAIL_SEND_PATH, "software.wail.send", 48000.0, 256, 256, &err),
              err.c_str());
    if (!inst.plugin) return;
 
@@ -133,12 +134,12 @@ TEST(linkbridge_send_pubsub_roundtrip) {
          lb_channel_info chans[LB_MAX_CHANNELS];
          size_t n = lb_channels(sub, chans, LB_MAX_CHANNELS);
          for (size_t i = 0; i < n; i++)
-            if (std::string(chans[i].name).find("Link Bridge Send") != std::string::npos)
+            if (std::string(chans[i].name).find("WAIL Send") != std::string::npos)
                chanId = chans[i].id_u64;
          wail_sleep_ms(20);
       }
    }
-   CHECK_MSG(chanId != 0, "Link Bridge Send channel never appeared on the LAN");
+   CHECK_MSG(chanId != 0, "WAIL Send channel never appeared on the LAN");
    if (!chanId) {
       inst.teardown();
       lb_destroy(sub);
@@ -185,15 +186,15 @@ TEST(linkbridge_send_pubsub_roundtrip) {
    lb_destroy(sub);
 }
 
-// Link Bridge Recv roundtrip: the test process publishes two channels — one
+// WAIL Receive roundtrip: the test process publishes two channels — one
 // room-published ("WAIL · tester · sweep", 440Hz) and one raw LAN channel
 // ("raw-channel", 220Hz). The hosted recv plugin must assign only the
 // prefixed channel, name its port with the prefix stripped, and render the
 // 440Hz audio (RMS + zero-crossing checks).
-TEST(linkbridge_recv_hears_only_room_published) {
+TEST(wail_recv_hears_only_room_published) {
    wailtest::ClapInstance inst;
    std::string err;
-   CHECK_MSG(inst.load(WAIL_LINKBRIDGE_RECV_PATH, "software.wail.linkbridge.recv", 0, 48000.0, 256, 256, &err),
+   CHECK_MSG(inst.load(WAIL_RECV_PATH, "software.wail.recv", 48000.0, 256, 256, &err),
              err.c_str());
    if (!inst.plugin) return;
 
@@ -205,10 +206,10 @@ TEST(linkbridge_recv_hears_only_room_published) {
    lb_sink *raw = lb_sink_create(pub, "raw-channel", 16384);
 
    const uint32_t kBlock = 256;
-   std::vector<float> outL[wailtest::RecvHost::kPorts], outR[wailtest::RecvHost::kPorts];
-   float *ch[wailtest::RecvHost::kPorts][2];
-   clap_audio_buffer_t outs[wailtest::RecvHost::kPorts];
-   for (int p = 0; p < wailtest::RecvHost::kPorts; p++) {
+   std::vector<float> outL[kPorts], outR[kPorts];
+   float *ch[kPorts][2];
+   clap_audio_buffer_t outs[kPorts];
+   for (int p = 0; p < kPorts; p++) {
       outL[p].assign(kBlock, 0.0f);
       outR[p].assign(kBlock, 0.0f);
       ch[p][0] = outL[p].data();
@@ -237,7 +238,7 @@ TEST(linkbridge_recv_hears_only_room_published) {
       clap_process_t p{};
       p.steady_time = -1;
       p.frames_count = kBlock;
-      p.audio_outputs_count = wailtest::RecvHost::kPorts;
+      p.audio_outputs_count = kPorts;
       p.audio_outputs = outs;
       inst.plugin->process(inst.plugin, &p);
    };
