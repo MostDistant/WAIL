@@ -366,28 +366,44 @@ func (a *App) SetTelemetry(enabled bool) error {
 	return nil
 }
 
-// DebugRoom joins the shared "wail-debug" room with all diagnostics armed:
-// the WAIL Metronome broadcast (a grid-rendered reference click every peer
-// can measure against), server-echo loopback, and peer log sharing (the room
-// collates everyone's logs). Built for offset/latency hunts: have the other
-// peer press it too, then compare their content against their own metronome
-// (linkaudio-probe -offset-ref).
+// DebugRoomName is the room the debug entry points join by default. One known
+// room means a collector (wail-logstore -room) watches a single place instead
+// of chasing per-session names; pass -room alongside -debug for an isolated one.
+const DebugRoomName = "wail-debug"
+
+// DebugRoom joins the shared debug room with all diagnostics armed. Built for
+// offset/latency hunts: have the other peer join it too, then compare their
+// content against their own metronome (linkaudio-probe -offset-ref).
 func (a *App) DebugRoom(displayName string, linkAudioName *string) (*JoinResult, error) {
-	res, err := a.JoinRoom("wail-debug", nil, displayName, nil, nil, nil, nil, nil, nil, nil, nil, linkAudioName)
+	res, err := a.JoinRoom(DebugRoomName, nil, displayName, nil, nil, nil, nil, nil, nil, nil, nil, linkAudioName)
 	if err != nil {
 		return nil, err
 	}
+	a.ArmDebugDiagnostics()
+	return res, nil
+}
+
+// ArmDebugDiagnostics turns on what a debug session is expected to carry: the
+// WAIL Metronome broadcast (a grid-rendered reference click every peer can
+// measure against), server-echo loopback, and peer log sharing. Shared by the
+// GUI button and -debug so a tester's capture is comparable however they
+// started it. Failures are logged rather than fatal — a session missing one
+// diagnostic is still worth more than no session.
+func (a *App) ArmDebugDiagnostics() {
 	if err := a.SetMetronomeBroadcast(true); err != nil {
-		log.Printf("[app] debug room: metronome broadcast failed: %v", err)
+		log.Printf("[app] debug: metronome broadcast failed: %v", err)
 	}
 	if err := a.SetLoopback(true); err != nil {
-		log.Printf("[app] debug room: loopback failed: %v", err)
+		log.Printf("[app] debug: loopback failed: %v", err)
 	}
 	if err := a.SetLogSharing(true); err != nil {
-		log.Printf("[app] debug room: log sharing failed: %v", err)
+		log.Printf("[app] debug: log sharing failed: %v", err)
 	}
-	log.Printf("[app] debug room joined: metronome broadcast + loopback + log sharing armed")
-	return res, nil
+	// Stated plainly because this ships the machine's log lines — which carry
+	// Link Audio channel names, i.e. the user's DAW track names — to everyone
+	// in the room. A tester should be able to see that they opted into it.
+	log.Printf("[app] debug diagnostics armed: metronome broadcast + loopback + log sharing " +
+		"(this machine's logs, including Link Audio channel names, are shared with the room)")
 }
 
 // logSource returns the session's log entry source when the writer exists

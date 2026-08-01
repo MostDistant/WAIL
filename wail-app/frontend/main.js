@@ -10,6 +10,7 @@ const sessionScreen = document.getElementById('session-screen');
 const joinForm = document.getElementById('join-form');
 const joinBtn = document.getElementById('join-btn');
 const joinError = document.getElementById('join-error');
+const debugRoomBtn = document.getElementById('debug-room-btn');
 const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
 const sessionBpmInput = document.getElementById('session-bpm');
@@ -649,6 +650,7 @@ sessionTabDebugBtn.addEventListener('click', () => switchSessionTab(sessionTabDe
 // Debug tab is active falls back to the Session tab.
 function applyDeveloperMode(on) {
   sessionTabDebugBtn.style.display = on ? '' : 'none';
+  debugRoomBtn.style.display = on ? '' : 'none';
   if (!on && sessionTabDebugBtn.classList.contains('active')) {
     switchSessionTab(sessionTabSessionBtn);
   }
@@ -753,6 +755,26 @@ joinForm.addEventListener('submit', async (e) => {
     showError(joinError, err);
     joinBtn.disabled = false;
     joinBtn.textContent = 'Join Room';
+  }
+});
+
+// --- Debug room (developer mode only; same arming as the -debug flag) ---
+debugRoomBtn.addEventListener('click', async () => {
+  joinError.style.display = 'none';
+  debugRoomBtn.disabled = true;
+  debugRoomBtn.textContent = 'Connecting...';
+  try {
+    const result = await invoke('debug_room', {
+      displayName: getDisplayName(),
+      linkAudioName: getLinkAudioName(),
+    });
+    showSession(result.room);
+    setupListeners();
+  } catch (err) {
+    showError(joinError, err);
+  } finally {
+    debugRoomBtn.disabled = false;
+    debugRoomBtn.textContent = 'Debug Room';
   }
 });
 

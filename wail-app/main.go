@@ -33,7 +33,14 @@ func main() {
 	loopback := flag.Bool("loopback", false, "Ask the relay to echo our own audio back; republished as a \"(loopback)\" Link Audio channel (headless mode)")
 	metronomeBroadcast := flag.Bool("metronome-broadcast", false, "Broadcast the WAIL Metronome click to the room as an audio stream (headless mode; debug reference)")
 	instance := flag.Int("instance", 0, "Instance number (separate data dir / identity)")
+	debugMode := flag.Bool("debug", false, "Join the shared \""+DebugRoomName+"\" room with all diagnostics armed (metronome broadcast, server-echo loopback, peer log sharing). Add -room to use a private debug room instead. Note: this shares this machine's logs, including Link Audio channel names, with everyone in the room")
 	flag.Parse()
+
+	// -debug picks the room so a tester needs one flag, not two; an explicit
+	// -room still wins, which is how you get an isolated debug session.
+	if *debugMode && *room == "" {
+		*room = DebugRoomName
+	}
 
 	// Initialize Honeybadger error reporting
 	InitHoneybadger()
@@ -70,7 +77,7 @@ func main() {
 	log.Printf("App initialized — identity: %s", appBackend.identity)
 
 	if *headless {
-		runHeadless(appBackend, *room, *password, *bpmFlag, *name, *wavFile, *testTone, *loopback, *metronomeBroadcast)
+		runHeadless(appBackend, *room, *password, *bpmFlag, *name, *wavFile, *testTone, *loopback, *metronomeBroadcast, *debugMode)
 		return
 	}
 
@@ -126,6 +133,9 @@ func main() {
 				return
 			}
 			log.Printf("Joined room %q as peer %s", result.Room, result.PeerID)
+			if *debugMode {
+				appBackend.ArmDebugDiagnostics()
+			}
 		}()
 	}
 
@@ -136,9 +146,9 @@ func main() {
 	}
 }
 
-func runHeadless(app *App, room, password string, bpm float64, name, wavFile string, testTone, loopback, metronomeBroadcast bool) {
+func runHeadless(app *App, room, password string, bpm float64, name, wavFile string, testTone, loopback, metronomeBroadcast, debugMode bool) {
 	if room == "" {
-		log.Fatal("-room is required in headless mode")
+		log.Fatal("-room is required in headless mode (or pass -debug to use the shared debug room)")
 	}
 
 	app.SetEmitter(&NoopEmitter{})
@@ -160,6 +170,11 @@ func runHeadless(app *App, room, password string, bpm float64, name, wavFile str
 		log.Fatalf("Failed to join room: %v", err)
 	}
 	log.Printf("Joined room %q as peer %s", result.Room, result.PeerID)
+
+	// Before the individual flags below, which are then just no-op re-sets.
+	if debugMode {
+		app.ArmDebugDiagnostics()
+	}
 
 	if wavFile != "" {
 		streamIdx := uint16(0)
