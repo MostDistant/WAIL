@@ -513,7 +513,12 @@ func sessionLoop(
 			case "SetLoopback":
 				loopbackEnabled = cmd.Enabled
 				mesh.SendLoopback(cmd.Enabled)
-				if !cmd.Enabled {
+				if cmd.Enabled {
+					// Undo any earlier drop: nothing else ever will, since the echo
+					// identity never sends StreamNames, and a drop left in force
+					// retires the monitor channels the next time frames pause.
+					audioEngine.ClearPeerIntent(identity + ":loopback")
+				} else {
 					// The echo stops, so no StreamNames or PeerLeft will ever reach
 					// these — retire them explicitly or the monitor channels stay
 					// published for the rest of the session.
@@ -613,8 +618,14 @@ func sessionLoop(
 				}
 				logInfo("Peer %s left", name)
 				// Their channels stay published through the retirement grace, so a
-				// rejoin inside it keeps the same channels (affinity).
+				// rejoin inside it keeps the same channels (affinity). Drop the peer
+				// id too: their queued frames arrive on a different channel than this
+				// event, and once the registry entry is gone those frames publish
+				// under the peer-id fallback instead of the identity.
 				audioEngine.DropPeer(goneIdentity)
+				if goneIdentity != ev.PeerID {
+					audioEngine.DropPeer(ev.PeerID)
+				}
 				peers.Remove(ev.PeerID)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: ev.PeerID})
 
@@ -1022,6 +1033,9 @@ func sessionLoop(
 				}
 				logWarn("Peer %s timed out", name)
 				audioEngine.DropPeer(deadIdentity)
+				if deadIdentity != deadID {
+					audioEngine.DropPeer(deadID) // late frames fall back to the peer id
+				}
 				peers.Remove(deadID)
 				mesh.RemovePeer(deadID)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: deadID})

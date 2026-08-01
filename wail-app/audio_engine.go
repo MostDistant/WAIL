@@ -25,6 +25,10 @@ type AudioEngine interface {
 	// publishing stops holding a port on every WAIL Receive on the LAN. An
 	// empty set means "sending nothing", not "unknown".
 	SetPeerStreams(identity string, keep map[uint16]bool)
+	// ClearPeerIntent forgets what an identity last told us, so nothing of
+	// theirs is retirable again until it does. Needed wherever a DropPeer can
+	// be undone by something other than a fresh StreamNames.
+	ClearPeerIntent(identity string)
 	// DropPeer marks everything an identity publishes for retirement on a
 	// longer grace — they left the room (or, for the loopback identity, the
 	// server echo was turned off). The grace is what lets affinity hold a
