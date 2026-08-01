@@ -11,6 +11,14 @@ set(CMAKE_C_VISIBILITY_PRESET hidden)
 
 find_package(Threads REQUIRED)
 
+# Stamp the repo version into the plugins so a running instance can say which
+# build it is. A DAW keeps a bundle mapped for the life of the process, so
+# reinstalling does not change the code already loaded — without this, telling a
+# stale instance from a current one means correlating process start times
+# against file mtimes.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" WAIL_VERSION_RAW)
+string(STRIP "${WAIL_VERSION_RAW}" WAIL_PLUGIN_VERSION)
+
 set(CLAP_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/clap/include")
 if(NOT EXISTS "${CLAP_INCLUDE}/clap/clap.h")
   message(FATAL_ERROR "CLAP headers not found at ${CLAP_INCLUDE}. Run: git submodule update --init vendor/clap")
@@ -78,6 +86,7 @@ endif()
 function(add_wail_link_plugin name)
   add_library(${name} MODULE ${ARGN})
   target_include_directories(${name} PRIVATE "${CLAP_INCLUDE}" "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_definitions(${name} PRIVATE WAIL_PLUGIN_VERSION="${WAIL_PLUGIN_VERSION}")
   set_target_properties(${name} PROPERTIES CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
   target_link_libraries(${name} PRIVATE wail-link)
   if(MSVC)
