@@ -1304,6 +1304,19 @@ func (e *linkAudioEngine) TakeGridJump() (GridJump, bool) {
 	return *j, true
 }
 
+// isGridJump reports whether the beat clock moved by more than elapsed time
+// can explain. bpm must be the tempo the beat is actually advancing at — the
+// session's, not the room's, which differ whenever a peer holds the session
+// elsewhere. A tick spaced further apart than jumpDetectMaxGapSec is not
+// judged at all: the loop stalled, so the expectation is guesswork, and a
+// false positive costs an audible re-entry snap.
+func isGridJump(deltaBeats, elapsedSec, bpm float64) bool {
+	if elapsedSec <= 0 || elapsedSec >= jumpDetectMaxGapSec || bpm <= 0 {
+		return false
+	}
+	return math.Abs(deltaBeats-elapsedSec*bpm/60.0) > 0.5
+}
+
 // noteGridJump hands a jump to the session — unless we caused it ourselves.
 // Our own snap moves the grid on purpose: re-entering conformance over it
 // would re-measure a grid we just aligned, and reporting it would send the
@@ -1472,12 +1485,23 @@ func (e *linkAudioEngine) emitLoop() {
 			// session merge/transport reset — which silently invalidates the
 			// labeler offset until the next anchor (the stable-multi-interval-
 			// delay failure mode seen in the field).
-			if haveLastBeat {
-				expected := (float64(clockMicros)/1e6 - lastBeatAt) * tempo / 60.0
-				if d := localBeat - lastBeat; math.Abs(d-expected) > 0.5 {
-					jump := e.classifyGridJump(d, tempo, sessionBPM, peers, ev, bpi, time.Now())
+			// Expected against the SESSION tempo, which is what the beat
+			// actually advances at — the room tempo can differ while a peer
+			// holds the session elsewhere, and then any delayed tick reads as
+			// a jump. A stalled tick is skipped outright rather than measured:
+			// after a GC pause or a starved scheduler on a loaded DAW machine
+			// the expectation is not trustworthy, and a false jump costs an
+			// audible re-entry snap.
+			elapsed := float64(clockMicros)/1e6 - lastBeatAt
+			beatBPM := sessionBPM
+			if beatBPM <= 0 {
+				beatBPM = tempo
+			}
+			if d := localBeat - lastBeat; haveLastBeat && isGridJump(d, elapsed, beatBPM) {
+				{
+					jump := e.classifyGridJump(d, beatBPM, sessionBPM, peers, ev, bpi, time.Now())
 					log.Printf("[audio] WARN: local Link beat jumped %+.2f beats (%+.0f ms, expected %+.2f from elapsed time) — cause: %s; %s",
-						jump.Beats, jump.Ms, expected, jump.Cause, jump.Detail)
+						jump.Beats, jump.Ms, elapsed*beatBPM/60.0, jump.Cause, jump.Detail)
 					// Our own snap moves the grid on purpose. Re-entering
 					// conformance over it would re-measure a grid we just
 					// aligned, and reporting it as a jump would send everyone

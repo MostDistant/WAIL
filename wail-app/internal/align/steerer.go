@@ -108,6 +108,7 @@ type Steerer struct {
 	lastState        string
 	lastEmittedUs    int64     // δ at the last emit — see emitState
 	lastEmitAt       time.Time // when that emit happened (same-bucket rate limit)
+	lastJumpEntryAt  time.Time // last jump-triggered re-entry (snaps are audible)
 	currentBPM       float64
 	anchorIndex      int64
 	haveRoomAnchor   bool
@@ -255,7 +256,7 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 	if s.slewTarget != 0 {
 		baseline = s.slewTarget
 	}
-	if st := s.link.State(); math.Abs(st.BPM-baseline) > tempoThreshold {
+	if st := s.link.State(); math.Abs(st.BPM-baseline) > sameRateBand(baseline) {
 		// Bucket only while the gate is shut. δ is a phase measurement between
 		// grids ticking at different rates, so it sweeps and wraps at ±period/2
 		// — publishing that at tick rate would trade a stale number for a
@@ -488,23 +489,33 @@ func (s *Steerer) measureDelta(bpi float64) (int64, bool) {
 }
 
 // emitState reports the bucketed alignment state on change only.
-// noteGateShut escalates a same-rate gate that has stayed shut too long.
+// sameRateBand is how far the session tempo may sit from the slew's baseline
+// before δ stops meaning anything. Proportional, not the flat adoption
+// threshold it used to share: the gate exists to avoid fighting a real tempo
+// move (120→122 is 1.7%), but at 0.01 BPM a peer whose clock wanders by a
+// tenth also tripped it — and then the slew went dormant and phase drifted
+// uncorrected for the rest of the session. At half a percent, δ is still a
+// sound measurement over the tens of seconds a slew episode takes.
+func sameRateBand(baselineBPM float64) float64 {
+	return math.Max(tempoThreshold, 0.005*baselineBPM)
+}
+
+// noteGateShut clears a slew target that has been holding the gate shut
+// against itself.
 //
-// The gate assumes whoever owns the tempo hands it back shortly. When the
-// session tempo instead settles somewhere else — an external Link peer
-// joining at its own tempo, a session merge — the stale slew target keeps the
-// gate shut, and the gate returns before the settle branch that would clear
-// that target. It cannot unstick itself, and nothing else clears it: the only
-// snap path is entry conformance, armed only on (re)join. Field case: a peer
-// joined at 120 while a slew held 119.94; alignment then did nothing at all
-// for sixteen minutes. Re-entry is the way out — entry conformance adopts the
-// room tempo outright and snaps the grid.
+// The gate compares the session tempo against the slew's target while a slew
+// is in flight, and returns before the settle branch that would clear that
+// target — so once something else moves the tempo, the stale target keeps the
+// gate shut and the gate prevents clearing the target. Sixteen minutes of no
+// alignment at all, in the field.
+//
+// Clearing the target is the whole fix: the baseline falls back to the room
+// tempo, and the gate re-evaluates honestly. If it opens, normal steering
+// resumes; if it stays shut, the tempo really has moved and waiting is
+// correct — the room adopts it shortly and the gate opens then. Deliberately
+// no tempo write and no forced re-entry here: both would fight whoever
+// legitimately owns the tempo, and a re-entry snap is audible.
 func (s *Steerer) noteGateShut(now time.Time, roomBPM, sessionBPM float64) {
-	// Only a stale slew target is a wedge. With no slew in flight the gate is
-	// shut because something else genuinely owns the tempo, which is the case
-	// the gate exists to respect — a DAW tempo ramp holds it shut for as long
-	// as the ramp lasts, and escalating there would yank the tempo back and
-	// snap the grid, audibly, every gateWedgeTimeout for the whole ramp.
 	if s.slewTarget == 0 {
 		s.gateShutSince = time.Time{}
 		return
@@ -517,9 +528,11 @@ func (s *Steerer) noteGateShut(now time.Time, roomBPM, sessionBPM float64) {
 		return
 	}
 	s.gateShutSince = time.Time{}
-	s.cancelSlew()
-	s.entryPending = true
-	s.logf("[align] same-rate gate shut %s (session %.4f BPM vs room %.4f) — re-running entry conformance",
+	// No restore: a shut gate is proof the session is not at our slew target,
+	// so there is nothing of ours still in force to put back.
+	s.slewTarget, s.slewDir = 0, 0
+	s.slewPendingDir, s.slewPendingCount = 0, 0
+	s.logf("[align] slew target abandoned after %s of a shut gate (session %.4f BPM vs room %.4f) — re-measuring against the room tempo",
 		gateWedgeTimeout, sessionBPM, roomBPM)
 }
 
@@ -532,6 +545,16 @@ func (s *Steerer) OnGridJump(beats float64, now time.Time) {
 	if !s.enabled {
 		return
 	}
+	// Re-entry snaps the grid, which is audible. Detection is a heuristic over
+	// a sampled beat clock, so one bad reading must not be able to snap the
+	// grid repeatedly on a peer whose machine is stalling — rate limit it to
+	// the settle window entry conformance already observes.
+	if !s.lastJumpEntryAt.IsZero() && now.Sub(s.lastJumpEntryAt) < snapSettle {
+		s.logf("[align] local grid jumped %+.2f beats — ignored, re-entered %s ago",
+			beats, now.Sub(s.lastJumpEntryAt).Round(time.Millisecond))
+		return
+	}
+	s.lastJumpEntryAt = now
 	s.gateShutSince = time.Time{}
 	s.cancelSlew()
 	s.entryPending = true

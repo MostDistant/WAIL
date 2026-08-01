@@ -869,17 +869,18 @@ func TestSnapshotAdoptionOscillator(t *testing.T) {
 
 // --- recovery from a grid that moved out from under us ---
 
-// The same-rate gate waits for whoever owns the tempo to hand it back. When
-// the session tempo simply settles somewhere else, the stale slew target keeps
-// the gate shut and the gate returns before the settle that would clear the
-// target — a wedge that cannot open itself. Field case: a Link peer joined at
-// 120 while a slew held 119.94, and alignment did nothing for 16 minutes.
-func TestGateShutTooLongReRunsEntryConformance(t *testing.T) {
+// The wedge: the gate compares the session tempo against the slew's target
+// while slewing, and returns before the settle that would clear that target,
+// so once something else moves the tempo the stale target holds the gate shut
+// against itself. Sixteen minutes of no alignment, in the field.
+//
+// The fix is to abandon the target so the baseline falls back to the room
+// tempo — not to seize the tempo or force an audible re-entry, either of
+// which would fight whoever legitimately owns it.
+func TestShutGateAbandonsAStaleSlewTarget(t *testing.T) {
 	now := time.Now()
-	s, f, _ := newSteerer(14_020_000) // 20ms late: past the deadband, slew territory
+	s, f, _ := newSteerer(14_020_000)
 	observe(s, now)
-
-	// Let a slew take hold, so slewTarget is set (persistence + tempo gate).
 	now = now.Add(snapSettle + time.Second)
 	for i := 0; i < slewPersistenceTicks; i++ {
 		s.Tick(16, now)
@@ -888,26 +889,38 @@ func TestGateShutTooLongReRunsEntryConformance(t *testing.T) {
 		t.Fatal("expected an active slew to set up the wedge")
 	}
 
-	// Something else moves the session tempo and leaves it there.
+	// A real tempo move, well outside the same-rate band, shuts the gate.
 	f.state.BPM = 130
-	f.snaps = nil
+	f.snaps, f.tempos = nil, nil
 
 	s.Tick(16, now)
-	if s.entryPending {
-		t.Fatal("re-entered conformance immediately — the gate must first wait out an ordinary tempo change")
-	}
-	s.Tick(16, now.Add(gateWedgeTimeout+time.Second))
-	if !s.entryPending {
-		t.Fatal("gate stayed shut past the timeout without re-running entry conformance")
-	}
-	if s.slewTarget != 0 {
-		t.Fatal("stale slew target survived — it would re-shut the gate against the room tempo")
+	if s.slewTarget == 0 {
+		t.Fatal("abandoned the target immediately — the gate must first wait out an ordinary tempo change")
 	}
 
-	// Entry conformance now adopts the room tempo and re-snaps.
-	observe(s, now.Add(gateWedgeTimeout+2*time.Second))
-	if lastTempo(f) != 120 {
-		t.Fatalf("entry did not adopt the room tempo: %v", f.tempos)
+	s.Tick(16, now.Add(gateWedgeTimeout+time.Second))
+	if s.slewTarget != 0 {
+		t.Fatal("stale slew target survived the timeout — it holds the gate shut against itself")
+	}
+	if len(f.tempos) != 0 {
+		t.Fatalf("wrote the tempo while another owner held it: %v", f.tempos)
+	}
+	if len(f.snaps) != 0 {
+		t.Fatalf("%d audible snaps over a tempo change we should have waited out", len(f.snaps))
+	}
+	if s.entryPending {
+		t.Fatal("forced a re-entry over a tempo nobody asked us to take")
+	}
+
+	// Once the room adopts the new tempo, the gate opens and steering resumes
+	// against the correct baseline.
+	f.timeAtBeat = 14_020_000
+	s.OnAnchor(8_000_000, 0, 130, 16, now.Add(gateWedgeTimeout+2*time.Second))
+	for i := 0; i < slewPersistenceTicks+1; i++ {
+		s.Tick(16, now.Add(gateWedgeTimeout+time.Duration(20+i)*time.Second))
+	}
+	if len(f.tempos) == 0 {
+		t.Fatal("still dormant after the room caught up to the new tempo")
 	}
 }
 
@@ -1056,10 +1069,10 @@ func TestWedgeTimerCountsOnlyEvaluatedTicks(t *testing.T) {
 	s.SetEnabled(true, 16, now.Add(time.Minute))
 	observe(s, now.Add(time.Minute)) // entry runs, clearing entryPending
 
-	// The very next evaluated tick must not escalate on a minute-old timer.
+	// The very next evaluated tick must not act on a minute-old timer.
 	s.Tick(16, now.Add(time.Minute+snapSettle+time.Second))
-	if s.entryPending {
-		t.Fatal("escalated instantly on a stale timer — the gate was not continuously shut")
+	if s.slewTarget == 0 {
+		t.Fatal("abandoned the slew instantly on a stale timer — the gate was not continuously shut")
 	}
 }
 
@@ -1189,5 +1202,107 @@ func TestRepeatedMergesOverAnHourEachRecover(t *testing.T) {
 
 	if s.gateShutSince != (time.Time{}) {
 		t.Fatal("wedge timer left running after an hour of recoveries")
+	}
+}
+
+// A peer on a jittery clock measures a noisy δ — the WAN offset estimate
+// teleports, which is what slewPersistenceTicks exists for. Over an hour that
+// noise must not turn into tempo flapping the whole room hears, and must never
+// snap the grid: a snap is audible, and noise is not evidence of a real move.
+func TestJitteryClockDoesNotFlapTempoOrSnap(t *testing.T) {
+	start := time.Now()
+	s, f, emits := newSteerer(14_000_000)
+	observe(s, start)
+	f.snaps, f.tempos, *emits = nil, nil, nil
+
+	// δ spikes alternating either side of the deadband, ±40ms, once a second
+	// for an hour — a teleporting offset estimate, not real drift.
+	offsets := []int64{40_000, -40_000, 30_000, -50_000, 45_000, -35_000}
+	for i := 0; i < 3600; i++ {
+		f.timeAtBeat = 14_000_000 + offsets[i%len(offsets)]
+		s.Tick(16, start.Add(snapSettle+time.Duration(i)*time.Second))
+	}
+
+	t.Logf("hour of jitter: %d snaps, %d tempo writes, %d UI events",
+		len(f.snaps), len(f.tempos), len(*emits))
+	if len(f.snaps) != 0 {
+		t.Fatalf("clock jitter snapped the grid %d times — audible, and on noise", len(f.snaps))
+	}
+	// The slew may act on a confirmed direction, but alternating noise must not
+	// keep it moving the tempo: real drift persists, spikes flip sign.
+	if len(f.tempos) > 60 {
+		t.Fatalf("tempo written %d times in an hour of jitter — flapping the room's tempo", len(f.tempos))
+	}
+	if len(*emits) > 3600/int(emitMinInterval/time.Second)+2 {
+		t.Fatalf("%d UI events over an hour of jitter", len(*emits))
+	}
+}
+
+// Detection is a heuristic over a sampled clock, so a single bad reading must
+// not be able to snap the grid over and over on a peer whose machine stalls.
+func TestRepeatedJumpReportsDoNotSnapRepeatedly(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(16_600_000) // 2.6s out, so entry would snap
+	observe(s, now)
+	f.snaps = nil
+
+	// Ten "jumps" in quick succession, as a stalling machine might report.
+	for i := 0; i < 10; i++ {
+		at := now.Add(time.Duration(i) * 200 * time.Millisecond)
+		s.OnGridJump(5.22, at)
+		observe(s, at)
+	}
+	if len(f.snaps) > 1 {
+		t.Fatalf("%d grid snaps from a burst of jump reports, want at most 1", len(f.snaps))
+	}
+
+	// Past the settle window a genuine new jump is still honoured.
+	f.snaps = nil
+	s.OnGridJump(5.22, now.Add(snapSettle+time.Second))
+	if !s.entryPending {
+		t.Fatal("a real jump after the window was ignored")
+	}
+}
+
+// A peer whose clock wanders around one intended tempo used to gate the slew
+// off entirely — the flat 0.01 BPM band treated a tenth of a BPM the same as a
+// deliberate 120→122 move — so phase drifted uncorrected for the whole hour.
+// With a proportional band the wobble is inside the noise and the slew keeps
+// working, without WAIL ever fighting the peer for the tempo knob.
+func TestWanderingPeerTempoStillLetsTheSlewCorrectPhase(t *testing.T) {
+	start := time.Now()
+	s, f, _ := newSteerer(14_020_000) // a real 20ms phase error to close
+	observe(s, start)
+	f.snaps, f.tempos = nil, nil
+
+	for i := 0; i < 120; i++ {
+		// The peer re-asserts their own wandering tempo every tick.
+		if i%2 == 0 {
+			f.state.BPM = 120.0
+		} else {
+			f.state.BPM = 119.9
+		}
+		s.Tick(16, start.Add(snapSettle+time.Duration(i)*time.Second))
+	}
+
+	if len(f.tempos) == 0 {
+		t.Fatal("the slew stayed dormant through the wobble — phase would drift all session")
+	}
+	if len(f.snaps) != 0 {
+		t.Fatalf("%d audible snaps during an ordinary clock wobble", len(f.snaps))
+	}
+	if s.entryPending {
+		t.Fatal("re-armed entry conformance over a wobble")
+	}
+
+	// A genuine tempo move must still gate the slew: 120→124 is 3.3%, far
+	// outside the band, and WAIL must not fight it.
+	f.tempos = nil
+	for i := 0; i < 30; i++ {
+		f.state.BPM = 124
+		s.Tick(16, start.Add(10*time.Minute+time.Duration(i)*time.Second))
+	}
+	if len(f.tempos) != 0 {
+		t.Fatalf("fought a real tempo change: %v", f.tempos)
 	}
 }

@@ -116,6 +116,11 @@ const (
 	// snapMatchToleranceMs is the floor on that magnitude agreement, for snaps
 	// small enough that a percentage would be tighter than measurement noise.
 	snapMatchToleranceMs = 50
+	// jumpDetectMaxGapSec bounds the tick spacing the jump detector will judge.
+	// Beyond it the loop stalled (GC, a starved scheduler on a loaded machine)
+	// and the expected-beat arithmetic is guesswork — and a false jump is not
+	// free, it costs an audible re-entry snap.
+	jumpDetectMaxGapSec = 1.0
 	// gridJumpEvidenceWindow is how far back peer/tempo movement still counts
 	// as the explanation. Link's peer discovery and the timeline merge it
 	// triggers are tens of milliseconds apart, so same-tick evidence misses it.

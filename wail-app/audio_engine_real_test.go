@@ -672,3 +672,42 @@ func TestGridJumpAttributesPeerAndTempoChanges(t *testing.T) {
 		t.Fatalf("4 beats at 120 BPM = %.0f ms, want 2000", j.Ms)
 	}
 }
+
+// The jump detector compares the beat clock against elapsed time. Two ways
+// that goes wrong on a peer whose machine stalls or whose session tempo has
+// been pulled away by another peer — both of which cost an audible re-entry
+// snap when they produce a false positive.
+func TestGridJumpDetectionIsRobustToStallsAndTempoMismatch(t *testing.T) {
+	const tick = 0.005 // the emit loop's spacing
+
+	// Normal advance at the session tempo: not a jump.
+	if isGridJump(tick*120/60, tick, 120) {
+		t.Fatal("a normal tick read as a jump")
+	}
+
+	// A real discontinuity: 5.22 beats out of nowhere.
+	if !isGridJump(5.22, tick, 120) {
+		t.Fatal("a genuine 5.22-beat jump was missed")
+	}
+
+	// A stalled loop (GC, a starved scheduler): the beat advanced honestly
+	// over 5 seconds, but the expectation across such a gap is guesswork, so
+	// the detector must decline to judge rather than manufacture a jump.
+	if isGridJump(5*120/60, 5, 120) {
+		t.Fatal("a stalled tick was judged")
+	}
+
+	// The case the room tempo got wrong: the beat advances at the SESSION
+	// tempo, so judging it against the room's manufactures a jump out of an
+	// honest advance. It takes a wide tempo gap to exceed 0.5 beats inside the
+	// window the stall guard allows — a peer whose DAW sits at 160 while the
+	// room is on 120 does it in under a second.
+	gap := 0.9
+	beatsAt160 := gap * 160 / 60
+	if isGridJump(beatsAt160, gap, 160) {
+		t.Fatal("honest advance at the session tempo read as a jump")
+	}
+	if !isGridJump(beatsAt160, gap, 120) {
+		t.Fatal("test premise wrong: judging against the room tempo should have misfired here")
+	}
+}
