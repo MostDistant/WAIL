@@ -22,6 +22,11 @@ const (
 	// snapSettle is the post-entry settling window during which the slew
 	// stays out of the way of the snap's aftershocks.
 	snapSettle = 5 * time.Second
+	// gateWedgeTimeout is how long the same-rate gate may stay shut before the
+	// steerer stops waiting for the tempo to come back and re-enters
+	// conformance. Long enough to sit out an ordinary tempo change and its
+	// re-anchor; short enough that a wedge is a blip, not a lost session.
+	gateWedgeTimeout = 10 * time.Second
 	// tempoGate suppresses the slew after any tempo commit (local user's
 	// hand, remote change, or entry adoption) so WAIL never fights a hand
 	// on the tempo knob. Deliberately longer than the 150ms echo guard.
@@ -80,11 +85,14 @@ type Steerer struct {
 	// audio — the jumped frames must skip silently, never count as underruns.
 	onSnapGrid func(deltaUs int64)
 
-	aligner          *interval.GridAligner
-	enabled          bool
-	entryPending     bool
-	lastSnapAt       time.Time
-	lastTempoAt      time.Time
+	aligner      *interval.GridAligner
+	enabled      bool
+	entryPending bool
+	lastSnapAt   time.Time
+	lastTempoAt  time.Time
+	// gateShutSince is when the same-rate gate last started blocking, zero
+	// while it is open — the wedge timer (see noteGateShut).
+	gateShutSince    time.Time
 	slewTarget       float64 // 0 = sitting at exact room tempo
 	slewDir          int     // sign of the active episode's δ (0 = not slewing)
 	slewPendingDir   int     // sign of the δ being confirmed (0 = none)
@@ -215,17 +223,25 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 	// and nudging would fight it (field finding: the slew chased a stale
 	// 120 anchor while the session moved to 122, preventing the settle the
 	// detector hold-down waits for — a live-lock).
+	// Measured before the gate: the gate suppresses *steering*, never
+	// *reporting*. Returning without emitting froze the UI on whatever δ was
+	// current when the state last changed — a reading minutes stale, shown as
+	// if it were live (field: a badge stuck at "drifted 2605ms" for a quarter
+	// of an hour while the grid sat at ~10ms).
+	delta, ok := s.measureDelta(bpi)
+	if !ok {
+		return
+	}
 	baseline := roomBPM
 	if s.slewTarget != 0 {
 		baseline = s.slewTarget
 	}
 	if st := s.link.State(); math.Abs(st.BPM-baseline) > tempoThreshold {
+		s.emitState(delta)
+		s.noteGateShut(now, roomBPM, st.BPM)
 		return
 	}
-	delta, ok := s.measureDelta(bpi)
-	if !ok {
-		return
-	}
+	s.gateShutSince = time.Time{}
 	periodUs := int64(bpi * 60.0 / roomBPM * 1e6)
 	target, active := interval.SlewTempo(roomBPM, delta, periodUs)
 	if s.slewTarget != 0 && !active {
@@ -448,6 +464,55 @@ func (s *Steerer) measureDelta(bpi float64) (int64, bool) {
 }
 
 // emitState reports the bucketed alignment state on change only.
+// noteGateShut escalates a same-rate gate that has stayed shut too long.
+//
+// The gate assumes whoever owns the tempo hands it back shortly. When the
+// session tempo instead settles somewhere else — an external Link peer
+// joining at its own tempo, a session merge — the stale slew target keeps the
+// gate shut, and the gate returns before the settle branch that would clear
+// that target. It cannot unstick itself, and nothing else clears it: the only
+// snap path is entry conformance, armed only on (re)join. Field case: a peer
+// joined at 120 while a slew held 119.94; alignment then did nothing at all
+// for sixteen minutes. Re-entry is the way out — entry conformance adopts the
+// room tempo outright and snaps the grid.
+func (s *Steerer) noteGateShut(now time.Time, roomBPM, sessionBPM float64) {
+	if s.gateShutSince.IsZero() {
+		s.gateShutSince = now
+		return
+	}
+	if now.Sub(s.gateShutSince) < gateWedgeTimeout {
+		return
+	}
+	s.gateShutSince = time.Time{}
+	s.cancelSlew()
+	s.entryPending = true
+	s.logf("[align] same-rate gate shut %s (session %.4f BPM vs room %.4f) — re-running entry conformance",
+		gateWedgeTimeout, sessionBPM, roomBPM)
+}
+
+// OnGridJump re-arms entry conformance after the local Link grid moved out
+// from under us — a session merge or transport reset, which the engine
+// detects as a beat discontinuity. The slew only closes small phase errors at
+// a bounded rate, so a jump of whole beats is not something it can walk back;
+// without a re-snap the grid stays off for the rest of the session.
+func (s *Steerer) OnGridJump(beats float64, now time.Time) {
+	if !s.enabled {
+		return
+	}
+	s.gateShutSince = time.Time{}
+	s.cancelSlew()
+	s.entryPending = true
+	s.logf("[align] local grid jumped %+.2f beats — re-running entry conformance", beats)
+}
+
+// cancelSlew abandons any in-flight slew without restoring a tempo: both
+// callers hand the grid to entry conformance, which commits the room tempo
+// itself. Leaving the target set would re-shut the same-rate gate against it.
+func (s *Steerer) cancelSlew() {
+	s.slewTarget, s.slewDir = 0, 0
+	s.slewPendingDir, s.slewPendingCount = 0, 0
+}
+
 func (s *Steerer) emitState(deltaUs int64) {
 	state := stateName(deltaUs)
 	if state == s.lastState {

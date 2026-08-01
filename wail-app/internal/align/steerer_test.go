@@ -866,3 +866,102 @@ func TestSnapshotAdoptionOscillator(t *testing.T) {
 		t.Fatalf("gated steady state drifted: a=%v b=%v", a, b)
 	}
 }
+
+// --- recovery from a grid that moved out from under us ---
+
+// The same-rate gate waits for whoever owns the tempo to hand it back. When
+// the session tempo simply settles somewhere else, the stale slew target keeps
+// the gate shut and the gate returns before the settle that would clear the
+// target — a wedge that cannot open itself. Field case: a Link peer joined at
+// 120 while a slew held 119.94, and alignment did nothing for 16 minutes.
+func TestGateShutTooLongReRunsEntryConformance(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_020_000) // 20ms late: past the deadband, slew territory
+	observe(s, now)
+
+	// Let a slew take hold, so slewTarget is set (persistence + tempo gate).
+	now = now.Add(snapSettle + time.Second)
+	for i := 0; i < slewPersistenceTicks; i++ {
+		s.Tick(16, now)
+	}
+	if s.slewTarget == 0 {
+		t.Fatal("expected an active slew to set up the wedge")
+	}
+
+	// Something else moves the session tempo and leaves it there.
+	f.state.BPM = 130
+	f.snaps = nil
+
+	s.Tick(16, now)
+	if s.entryPending {
+		t.Fatal("re-entered conformance immediately — the gate must first wait out an ordinary tempo change")
+	}
+	s.Tick(16, now.Add(gateWedgeTimeout+time.Second))
+	if !s.entryPending {
+		t.Fatal("gate stayed shut past the timeout without re-running entry conformance")
+	}
+	if s.slewTarget != 0 {
+		t.Fatal("stale slew target survived — it would re-shut the gate against the room tempo")
+	}
+
+	// Entry conformance now adopts the room tempo and re-snaps.
+	observe(s, now.Add(gateWedgeTimeout+2*time.Second))
+	if lastTempo(f) != 120 {
+		t.Fatalf("entry did not adopt the room tempo: %v", f.tempos)
+	}
+}
+
+// While the gate is shut the UI must still get a live δ. Emitting only after
+// the gate meant the badge froze on whatever δ was current when the state last
+// changed, presenting a minutes-old reading as if it were now.
+func TestGatedTicksStillReportState(t *testing.T) {
+	now := time.Now()
+	s, f, emits := newSteerer(14_000_000) // aligned
+	observe(s, now)
+	now = now.Add(snapSettle + time.Second)
+	s.Tick(16, now)
+
+	// Tempo moves away (gate shuts) AND the grid drifts badly.
+	f.state.BPM = 130
+	f.timeAtBeat = 16_600_000 // 2.6s late — the field's stuck badge
+	*emits = nil
+
+	s.Tick(16, now.Add(time.Second))
+	if len(*emits) == 0 {
+		t.Fatal("a gated tick reported nothing — the UI keeps showing a stale δ")
+	}
+	if got := lastEmit(emits); got != "drifted" {
+		t.Fatalf("state = %q, want \"drifted\"", got)
+	}
+	if errMs := (*emits)[len(*emits)-1].errMs; math.Abs(errMs-2600) > 1 {
+		t.Fatalf("reported δ = %.1f ms, want ~2600 (the live measurement)", errMs)
+	}
+}
+
+// A beat jump is past anything the slew can walk back, so it has to re-enter
+// conformance — the engine detects it, the session forwards it here.
+func TestGridJumpReRunsEntryConformance(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_020_000)
+	observe(s, now)
+	now = now.Add(snapSettle + time.Second)
+	for i := 0; i < slewPersistenceTicks; i++ {
+		s.Tick(16, now)
+	}
+
+	s.OnGridJump(5.22, now)
+	if !s.entryPending {
+		t.Fatal("a grid jump must re-arm entry conformance")
+	}
+	if s.slewTarget != 0 {
+		t.Fatal("a grid jump must abandon the in-flight slew")
+	}
+
+	// The re-entry snaps the grid onto the room again.
+	f.snaps = nil
+	f.timeAtBeat = 16_600_000 // the jump left us 2.6s late
+	observe(s, now.Add(time.Second))
+	if len(f.snaps) != 1 {
+		t.Fatalf("expected exactly one entry snap after the jump, got %v", f.snaps)
+	}
+}

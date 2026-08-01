@@ -15,6 +15,7 @@ func (s *stubAudioEngine) Start() error                                         
 func (s *stubAudioEngine) Stop()                                                 {}
 func (s *stubAudioEngine) HandleRemoteAudio(_, _, _ string, _ []byte)            {}
 func (s *stubAudioEngine) SetPeerStreams(_ string, _ map[uint16]bool)            {}
+func (s *stubAudioEngine) TakeGridJump() (float64, bool)                         { return 0, false }
 func (s *stubAudioEngine) DropPeer(_ string)                                     {}
 func (s *stubAudioEngine) ClearPeerIntent(_ string)                              {}
 func (s *stubAudioEngine) SetRoomAnchor(_ int64, _ float64, _ uint32, _ float64) {}

@@ -150,6 +150,13 @@ type linkAudioEngine struct {
 	metronome   *metronomeStream
 	metronomeOn atomic.Bool
 
+	// Local-grid jump handoff: the emit loop detects the beat discontinuity,
+	// the session goroutine consumes it (TakeGridJump) and re-arms grid
+	// alignment. Two atomics rather than a lock — the magnitude is only for
+	// the log, so reading it a tick stale would be harmless.
+	gridJumpBeats   atomic.Uint64 // math.Float64bits of the jump, in beats
+	gridJumpPending atomic.Bool
+
 	// curRoomIdx is the room index of the local interval currently in progress
 	// (emit loop publishes, HandleRemoteAudio reads) for label-offset
 	// confirmation. math.MinInt64 until the labeler is aligned.
@@ -1276,6 +1283,17 @@ func (e *linkAudioEngine) retireStreamLocked(key affinity.Key, st *emitStream) {
 		key.Identity, key.Stream)
 }
 
+// TakeGridJump reports a local Link grid jump detected since the last call,
+// clearing it. The session polls this rather than the engine calling into the
+// steerer directly: the detector runs on the emit loop, and alignment state
+// belongs to the session goroutine.
+func (e *linkAudioEngine) TakeGridJump() (beats float64, ok bool) {
+	if !e.gridJumpPending.Swap(false) {
+		return 0, false
+	}
+	return math.Float64frombits(e.gridJumpBeats.Load()), true
+}
+
 // Health sums the per-channel and per-stream diagnostic counters. Capture-side
 // values are drain-goroutine mirrors (atomics); emit-side counters are atomics
 // on their streams; the maps themselves are guarded by e.mu.
@@ -1379,6 +1397,12 @@ func (e *linkAudioEngine) emitLoop() {
 				if d := localBeat - lastBeat; math.Abs(d-expected) > 0.5 {
 					log.Printf("[audio] WARN: local Link beat jumped %+.2f beats (expected %+.2f from elapsed time) — room-label offset stale until the next anchor (≈%+d intervals of potential shift)",
 						d, expected, int64(math.Round(d/bpi)))
+					// Hand it to the session so grid alignment can re-enter
+					// conformance: a jump of beats is far past what the slew
+					// can walk back, so without a re-snap the grid stays off
+					// for the rest of the session.
+					e.gridJumpBeats.Store(math.Float64bits(d))
+					e.gridJumpPending.Store(true)
 				}
 			}
 			lastBeat, lastBeatAt, haveLastBeat = localBeat, float64(clockMicros)/1e6, true

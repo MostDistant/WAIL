@@ -34,6 +34,11 @@ type AudioEngine interface {
 	// server echo was turned off). The grace is what lets affinity hold a
 	// channel across a reconnect blip.
 	DropPeer(identity string)
+	// TakeGridJump reports (and clears) a local Link grid jump detected since
+	// the last call — a session merge or transport reset moved the beat
+	// timeline out from under us. The session re-arms grid alignment on it;
+	// the slew cannot walk back a jump of whole beats.
+	TakeGridJump() (beats float64, ok bool)
 	// SetRoomAnchor applies a fresh relay interval_anchor: aligns the local→room
 	// interval labeler and adopts the room tempo/config.
 	SetRoomAnchor(currentIndex int64, bpm float64, bars uint32, quantum float64)

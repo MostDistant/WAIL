@@ -1006,6 +1006,12 @@ func sessionLoop(
 		// against the room grid with bounded tempo nudges (gated against entry
 		// settling and tempo commits; never fires while entry is pending).
 		case <-alignTicker.C:
+			// A Link session merge or transport reset moves the local beat
+			// timeline bodily; the engine detects it, alignment has to act on
+			// it (the slew cannot walk back whole beats).
+			if beats, jumped := audioEngine.TakeGridJump(); jumped {
+				steer.OnGridJump(beats, time.Now())
+			}
 			steer.Tick(intervalCfg.BeatsPerInterval(), time.Now())
 
 		// --- Ping timer ---
