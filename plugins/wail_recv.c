@@ -81,7 +81,18 @@ typedef struct {
    bool        has_last;
    uint32_t    rate;
    uint64_t    align_dropped;
-   bool        logged_pop;
+   bool        logged_pop; // process(): first pop handed off already
+
+   // First-pop details, filled by process() and written out by the manager —
+   // logging from the audio thread is blocking I/O and is not allowed here.
+   // Published by pop_pending; process() writes the fields before the release
+   // store and never touches them again, so the manager reads them safely.
+   _Atomic bool pop_pending;
+   struct {
+      size_t   frames, channels;
+      uint32_t rate;
+      double   begin_beat;
+   } pop;
 } lbr_slot;
 
 typedef struct {
@@ -152,9 +163,17 @@ static void slot_drain(lbr_recv *self, lbr_slot *s) {
    lb_state *st = lb_capture(self->link);
    while (lb_source_pop(s->source, &b, LBR_QUANTUM)) {
       if (!s->logged_pop) {
+         // Hand the first-pop details to the manager to write. This runs on
+         // the audio thread, where lbr_log's buffered write + fflush is a
+         // blocking disk I/O the threading contract here forbids outright —
+         // and it shares its FILE with the manager, so it could block on
+         // another thread's write to /tmp inside the process deadline.
+         s->pop.frames = b.num_frames;
+         s->pop.channels = b.num_channels;
+         s->pop.rate = b.sample_rate;
+         s->pop.begin_beat = b.begin_beat;
+         atomic_store_explicit(&s->pop_pending, true, memory_order_release);
          s->logged_pop = true;
-         lbr_log(self, "first pop: frames=%zu ch=%zu rate=%u begin_beat=%.3f (0=unmapped)",
-                 b.num_frames, b.num_channels, b.sample_rate, b.begin_beat);
       }
       if (b.num_frames == 0 || b.begin_beat == 0) continue; // unmapped (cross-session) — skip
       uint32_t nf = (uint32_t)b.num_frames;
@@ -331,7 +350,14 @@ static uint64_t lbr_entry_hash(uint64_t id, const char *name) {
 // repetition and would bury them.
 static void log_snapshot(lbr_recv *self, const lb_channel_info *chans, size_t nch) {
    uint64_t sig = 0;
-   for (size_t c = 0; c < nch; c++) sig += lbr_entry_hash(chans[c].id_u64, chans[c].name);
+   for (size_t c = 0; c < nch; c++) {
+      // Only channels this plugin could carry. Every other Link Audio channel
+      // on the LAN — another app's tracks being renamed or armed — would
+      // otherwise churn the signature and dump the table for something we
+      // never act on.
+      if (strncmp(chans[c].name, LBR_ROOM_PREFIX, strlen(LBR_ROOM_PREFIX)) != 0) continue;
+      sig += lbr_entry_hash(chans[c].id_u64, chans[c].name);
+   }
    for (int i = 0; i < LBR_SLOTS; i++)
       if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire))
          sig += lbr_entry_hash(self->slots[i].channel_id ^ (uint64_t)(i + 1),
@@ -339,9 +365,11 @@ static void log_snapshot(lbr_recv *self, const lb_channel_info *chans, size_t nc
    if (sig == self->snapshot_sig) return;
    self->snapshot_sig = sig;
 
-   for (size_t c = 0; c < nch; c++)
+   for (size_t c = 0; c < nch; c++) {
+      if (strncmp(chans[c].name, LBR_ROOM_PREFIX, strlen(LBR_ROOM_PREFIX)) != 0) continue;
       lbr_log(self, "  chan id=%016llx name=\"%s\"", (unsigned long long)chans[c].id_u64,
               chans[c].name);
+   }
    for (int i = 0; i < LBR_SLOTS; i++)
       if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire))
          lbr_log(self, "  slot %d id=%016llx name=\"%s\"", i,
@@ -370,6 +398,15 @@ static void *mgr_main(void *arg) {
       wail_sleep_ms(500);
       lb_channel_info chans[LB_MAX_CHANNELS];
       size_t nch = lb_channels(self->link, chans, LB_MAX_CHANNELS);
+
+      // Write out any first-pop details process() handed over.
+      for (int i = 0; i < LBR_SLOTS; i++) {
+         lbr_slot *s = &self->slots[i];
+         if (!atomic_load_explicit(&s->pop_pending, memory_order_acquire)) continue;
+         atomic_store_explicit(&s->pop_pending, false, memory_order_relaxed);
+         lbr_log(self, "first pop on port %d: frames=%zu ch=%zu rate=%u begin_beat=%.3f (0=unmapped)",
+                 i + 1, s->pop.frames, s->pop.channels, s->pop.rate, s->pop.begin_beat);
+      }
 
       // Free slots whose channel has disappeared for a while.
       for (int i = 0; i < LBR_SLOTS; i++) {
@@ -482,6 +519,10 @@ static bool CLAP_ABI lbr_activate(const clap_plugin_t *plugin, double sr, uint32
            self->host && self->host->name ? self->host->name : "?",
            self->host && self->host->version ? self->host->version : "?", sr,
            self->rate_ok ? "" : " — NOT 48k: outputting silence");
+   // Fresh log file, so forget what the previous activation had recorded —
+   // otherwise an unchanged channel set means the reopened log never states
+   // the state it exists to record.
+   self->snapshot_sig = 0;
    atomic_store(&self->running, true);
    if (wail_thread_create(&self->mgr_thread, mgr_main, self) != 0) {
       atomic_store(&self->running, false);

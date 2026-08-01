@@ -16,8 +16,15 @@ find_package(Threads REQUIRED)
 # reinstalling does not change the code already loaded — without this, telling a
 # stale instance from a current one means correlating process start times
 # against file mtimes.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" WAIL_VERSION_RAW)
+set(WAIL_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+if(NOT EXISTS "${WAIL_VERSION_FILE}")
+  message(FATAL_ERROR "VERSION not found at ${WAIL_VERSION_FILE}. The plugins read the repo version from it; build from a full checkout.")
+endif()
+file(READ "${WAIL_VERSION_FILE}" WAIL_VERSION_RAW)
 string(STRIP "${WAIL_VERSION_RAW}" WAIL_PLUGIN_VERSION)
+# file(READ) is not a configure dependency on its own, so a version bump would
+# leave the stamp reporting the previous release — worse than no stamp.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${WAIL_VERSION_FILE}")
 
 set(CLAP_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/clap/include")
 if(NOT EXISTS "${CLAP_INCLUDE}/clap/clap.h")
