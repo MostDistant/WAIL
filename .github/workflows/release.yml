@@ -449,5 +449,9 @@ jobs:
           cd tap
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git commit -am "Update ${NAME} to v${VERSION}"
+          # Stage the formula explicitly: on a beta's first publish wail-beta.rb
+          # is a NEW file, and `git commit -a` only stages tracked files (works
+          # for both the new beta formula and an updated wail.rb).
+          git add "Formula/${FORMULA}"
+          git commit -m "Update ${NAME} to v${VERSION}"
           git push
