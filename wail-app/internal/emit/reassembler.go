@@ -222,6 +222,17 @@ func (r *Reassembler) MinIndex() (min int64, ok bool) {
 // sparse, so a span would claim 96 for two held intervals.
 func (r *Reassembler) Count() int { return len(r.partials) }
 
+// Indices returns the interval indices currently buffered, in no particular
+// order. The adaptive scheduler (ADR-0009) enumerates them each boundary to
+// pick the freshest ready round; ordering is its job, not the buffer's.
+func (r *Reassembler) Indices() []int64 {
+	out := make([]int64, 0, len(r.partials))
+	for idx := range r.partials {
+		out = append(out, idx)
+	}
+	return out
+}
+
 // Drop discards any partial for interval `index` and every earlier interval
 // (they can never be played once we've moved past them).
 func (r *Reassembler) Drop(upToInclusive int64) {

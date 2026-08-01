@@ -66,10 +66,8 @@ type LinkEvent struct {
 
 // LinkCommand represents commands sent to the Link bridge.
 type LinkCommand struct {
-	Type    string // "SetTempo", "ForceBeat", "GetState"
+	Type    string // "SetTempo", "GetState"
 	BPM     float64
-	Beat    float64
-	RTTUs   *int64
 	StateCh chan LinkState // for GetState
 }
 
@@ -277,16 +275,6 @@ func (d *TempoChangeDetector) observe(bpm float64, now time.Time) {
 	d.samples = d.samples[drop:]
 }
 
-// MeanTempo returns the mean observed session tempo over the window, or the
-// last reported tempo when nothing has been observed yet. This is what the grid
-// steer gates on: a wobble's mean sits inside the slew's authority even when
-// every individual excursion does not.
-func (d *TempoChangeDetector) MeanTempo() float64 {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.meanLocked()
-}
-
 // LastTempo returns the last known tempo.
 func (d *TempoChangeDetector) LastTempo() float64 {
 	d.mu.Lock()
@@ -323,8 +311,6 @@ func SpawnLinkPoller(ctx context.Context, lb LinkBridgeInterface) (chan<- LinkCo
 				switch cmd.Type {
 				case "SetTempo":
 					lb.SetTempo(cmd.BPM)
-				case "ForceBeat":
-					lb.ForceBeat(cmd.Beat, cmd.RTTUs)
 				case "GetState":
 					if cmd.StateCh != nil {
 						cmd.StateCh <- lb.State()
@@ -366,15 +352,7 @@ type LinkBridgeInterface interface {
 	Enable()
 	Disable()
 	SetTempo(bpm float64)
-	ForceBeat(beat float64, rttUs *int64)
 	State() LinkState
 	Detector() *TempoChangeDetector
 	SpawnPoller(ctx context.Context) (chan<- LinkCommand, <-chan LinkEvent)
-	// SnapGrid shifts the local interval grid earlier by deltaUs (positive =
-	// local grid runs late vs the room grid). ADR-0006 entry conformance;
-	// confined to join/rejoin, never steady state.
-	SnapGrid(deltaUs int64)
-	// TimeAtBeat returns the Link-clock time at which the given
-	// interval-quantum phase-encoded beat occurs (grid boundary math).
-	TimeAtBeat(beat float64) int64
 }

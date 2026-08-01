@@ -68,7 +68,7 @@ func MetronomeSenderTask(
 			return
 		case b := <-boundaryCh:
 			// New interval: flush the tail of the previous one, then render the
-			// click on the room grid and encode the whole interval up front.
+			// click on the local grid and encode the whole round up front.
 			flushRemaining()
 			pcm := metronome.RenderInterval(b.Cfg, b.BPM, metSampleRate, metChannels, b.Index)
 			fr, next, encErr := enc.EncodeInterval(pcm, b.Index, streamID, seq, b.BPM, b.Cfg.Quantum, b.Cfg.Bars)

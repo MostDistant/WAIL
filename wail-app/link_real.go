@@ -71,50 +71,6 @@ func (lb *LinkBridge) SetTempo(bpm float64) {
 	log.Printf("[link] Set tempo %.1f BPM", bpm)
 }
 
-// ForceBeat snaps the local beat clock to the given position.
-// rttUs compensates for one-way network transit time.
-func (lb *LinkBridge) ForceBeat(beat float64, rttUs *int64) {
-	lb.mu.Lock()
-	t := lb.link.ClockMicros()
-	lb.link.CaptureAppSessionState(lb.sessionState)
-	bpm := lb.sessionState.Tempo()
-	var compensation float64
-	if rttUs != nil {
-		compensation = float64(*rttUs) / 2_000_000.0 * bpm / 60.0
-	}
-	compensated := beat + compensation
-	lb.sessionState.ForceBeatAtTime(compensated, t, lb.quantum)
-	lb.link.CommitAppSessionState(lb.sessionState)
-	lb.mu.Unlock()
-	lb.detector.ArmEchoGuard(time.Now().Add(echoGuardDuration))
-	log.Printf("[link] Forced beat to %.2f (compensated=%.2f, rtt=%v)", beat, compensated, rttUs)
-}
-
-// SnapGrid shifts the local interval grid earlier by deltaUs (positive = the
-// local grid runs late vs the room grid): the current beat is force-mapped to
-// now−delta at the interval quantum, so every grid boundary moves by exactly
-// deltaUs. ADR-0006 entry conformance — consented, transition-moment only.
-func (lb *LinkBridge) SnapGrid(deltaUs int64) {
-	lb.mu.Lock()
-	t := lb.link.ClockMicros()
-	lb.link.CaptureAppSessionState(lb.sessionState)
-	beat := lb.sessionState.BeatAtTime(t, lb.intervalQuantum)
-	lb.sessionState.ForceBeatAtTime(beat, t-deltaUs, lb.intervalQuantum)
-	lb.link.CommitAppSessionState(lb.sessionState)
-	lb.mu.Unlock()
-	lb.detector.ArmEchoGuard(time.Now().Add(echoGuardDuration))
-	log.Printf("[link] grid snap: shifted interval grid %+.1f ms onto the room grid", float64(deltaUs)/1000)
-}
-
-// TimeAtBeat returns the Link-clock time at which the given beat occurs, at
-// the interval quantum (the lens State().Beat is phase-encoded at).
-func (lb *LinkBridge) TimeAtBeat(beat float64) int64 {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-	lb.link.CaptureAppSessionState(lb.sessionState)
-	return lb.sessionState.TimeAtBeat(beat, lb.intervalQuantum)
-}
-
 // State returns the current Link state. Beat is phase-encoded at the interval
 // quantum (BPI) so interval bucketing of it lands on the session-shared
 // interval grid; Phase stays the within-bar lens.

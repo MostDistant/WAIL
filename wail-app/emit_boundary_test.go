@@ -104,7 +104,11 @@ func runBoundaryPlayback(t *testing.T, reasm *emit.Reassembler, tempo float64, c
 		}
 	}
 
-	sched := playout.New(1) // D=1
+	// The adaptive scheduler (ADR-0009) is fed one round per boundary, the way a
+	// healthy real-time sender arrives: complete rounds release immediately, and
+	// presenting only the next unplayed round keeps freshest-wins from skipping
+	// ahead through the pre-filled reassembler (a batch pre-fill is not a stream).
+	var sched playout.Adaptive
 	feeder := emit.NewFeeder(testEmitCushion, testEmitChunk)
 	var out []emittedChunk
 	collect := func(samples []int16, beat float64) {
@@ -129,7 +133,15 @@ func runBoundaryPlayback(t *testing.T, reasm *emit.Reassembler, tempo float64, c
 			ws, we := cfg.BeatWindow(localIdx)
 			totalFrames := intervalPlayoutFrames(cfg, testEmitRate, tempo)
 			paddedFrames := intervalPaddedFrames(cfg, testEmitRate, tempo)
-			release, advanced := sched.OnBoundary(localIdx)
+			next := int64(0)
+			if playing, has := sched.Playing(); has {
+				next = playing + 1
+			}
+			var cands []playout.RoundState
+			if next < int64(nIntervals) {
+				cands = append(cands, playout.RoundState{Index: next, Complete: true, FirstSeen: localIdx})
+			}
+			release, _, advanced := sched.OnBoundary(localIdx, cands)
 			if advanced {
 				reasm.Drop(release - 1)
 				nextIdx := release + 1

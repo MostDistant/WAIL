@@ -26,7 +26,7 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 ├── interval_codec.go     Interval Opus↔WAIF codec (encode/decode + PLC, loopback-tested)
 ├── capture_dump.go       Debug GUI toggle: dump capture audio pre/post-Opus to WAV
 ├── clock.go              NTP-style RTT/clock sync
-├── protocol.go           SyncMessage + SignalMessage types (incl. interval_anchor)
+├── protocol.go           SyncMessage + SignalMessage types (incl. TempoDeclare)
 ├── wire.go               WAIF binary wire format
 ├── test_tone.go          Test tone generator (Opus sine wave) — GUI/headless injection
 ├── wav_sender.go         Headless WAV file sender (--wav)
@@ -44,11 +44,10 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 │   │                     pure-C capture callback + lock-free ring (ADR-0002: the
 │   │                     realtime callback is never a Go callback); sink.go/source.go
 │   │                     publish/subscribe Link Audio channels.
-│   ├── interval/         Interval/room-clock math: local↔room index mapping,
-│   │                     RoomClock, RoomLabeler (ADR-0003)
-│   ├── align/            Grid steer (ADR-0006): entry conformance, gated grid
-│   │                     slew, snapshot-tempo arbitration, committed-tempo record
-│   ├── playout/          Hold-until-N+D playout scheduler (interval offset D, default 1)
+│   ├── interval/         Interval math: beat↔index mapping, window placement,
+│   │                     the tempo de-noising bar (SlewAuthorityBPM)
+│   ├── playout/          Adaptive per-sender round scheduler (ADR-0009: next boundary
+│   │                     once ready, freshest-wins)
 │   ├── lanloss/          Link Audio count-gap loss detection (LAN capture hop)
 │   ├── affinity/         (identity, stream) → stable published Link Audio channel
 │   ├── capture/          Interval assembler: sample-contiguous placement + micro-slew
@@ -59,9 +58,10 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 signaling-server/         Go WebSocket relay server (deployed to fly.io)
 ├── main.go               Relay + room management (SQLite)
 ├── roomclock.go          Relay-authoritative room interval clock (ADR-0003)
-├── interval_clock.go     interval_anchor broadcast
-├── labelwatch.go         Label watchdog: heals peers whose room-label offset froze
-│                         wrong (WAIF label vs room index → unicast fresh anchor)
+├── interval_clock.go     interval_anchor broadcast (carries tempo/BPI to joiners;
+│                         its room index is ignored by ADR-0009 clients)
+├── labelwatch.go         Label watchdog (inert for ADR-0009 clients; retires with
+│                         the room clock after the beta soak)
 ├── cmd/wail-metrics/     CLI metrics client
 ├── cmd/wail-logtail/     Tails a room's peer-shared logs live (joins as an observer)
 └── cmd/wail-logstore/    Backfills relay logs from Fly's logs API (~7 days) into a
@@ -136,7 +136,7 @@ Each WAIL peer:
 3. Sync messages (tempo, phase, clock) are relayed through the server to all room peers
 4. Polls Link at 50Hz, broadcasts tempo/phase changes
 5. Applies remote tempo changes to local Link session
-6. The relay owns the authoritative room interval clock and broadcasts an `interval_anchor`; each peer maps its local interval index to the shared room index (ADR-0003)
+6. Tempo changes travel as priority-stamped declarations (`TempoDeclare`, ADR-0009); the relay's `interval_anchor` still carries tempo/BPI to joiners during the compat cycle
 
 ### Audio Flow (Link Audio)
 WAIL is an Ableton Link Audio peer. There are no plugins and no IPC — the whole audio path runs inside `wail-app`.
@@ -150,19 +150,19 @@ WAIL is an Ableton Link Audio peer. There are no plugins and no IPC — the whol
 **Playback (recv side):**
 1. Receive WAIF frames from the relay.
 2. `interval_codec.go` Opus-decodes; `internal/emit` reassembles frames into interval PCM.
-3. `internal/playout` holds each interval until the local boundary labeled N+D (interval offset D, default 1).
+3. `internal/playout` releases each sender's round at the next local boundary once ready — adaptive, freshest-wins (ADR-0009). Round indices are the sender's own; no shared numbering.
 4. `internal/emit` paces the interval into a Link Audio sink (`LinkAudioSink`); `internal/affinity` keeps a reconnecting peer's streams on stable channels.
 5. WAIL republishes remote streams as Link Audio channels — any Link-Audio-capable app plays them.
 
-Latency = the interval offset D (default 1 interval), by design like NINJAM.
+Latency = bounded by one interval and adaptive (each round plays at the listener's next boundary once delivered) — NINJAM's actual behavior.
 
 Two WebSocket message types via the relay server:
-- **sync** (text): JSON messages relayed to all room peers (tempo, beat, phase, clock sync, `interval_anchor`)
+- **sync** (text): JSON messages relayed to all room peers (tempo declarations, beat, phase, clock sync, `interval_anchor`)
 - **audio** (binary): WAIF wire-format frames broadcast to all room peers (Opus-encoded intervals)
 
 ```
 Link Audio (local channels)     → [capture] → interval → Opus → WAIF → WS relay → server → all peers
-Link Audio (published channels) ← [emit/sink] ← hold N+D ← reassemble ← Opus ← WAIF ← WS relay ← remote peer
+Link Audio (published channels) ← [emit/sink] ← adaptive round release ← reassemble ← Opus ← WAIF ← WS relay ← remote peer
 ```
 
 ### Wire Format (WAIF)
@@ -173,7 +173,7 @@ Streaming binary format in `wail-app/wire.go`: one WAIF frame per 20ms Opus pack
 ### Interval Model (Go engine)
 - Capture assembles fixed-length intervals from Link Audio buffers (`internal/capture`); gaps read as silence and are surfaced as LAN-loss metrics (`internal/lanloss`).
 - Playback reassembles decoded frames per room interval index (`internal/emit`), and the playout scheduler releases each interval one boundary late (offset D) into a Link Audio sink (`internal/playout`).
-- The relay owns the authoritative room interval clock and broadcasts an `interval_anchor`; `internal/interval` maps each peer's local index to the shared room index (ADR-0003).
+- Rounds are sender-relative (ADR-0009): senders stamp their local interval index, receivers pin nothing and play adaptively. The relay's `interval_anchor` survives only to carry tempo/BPI to joiners until its beta soak ends.
 
 ## Testing
 
@@ -282,7 +282,6 @@ There are two channels (see `docs/adr/0008-beta-channel.md`): **main is the beta
 - **Add a new sync message**: Add a variant to `SyncMessage` in `wail-app/protocol.go`, handle it in the `wail-app/session.go` select loop
 - **Change Link polling rate**: `linkPollInterval` in `wail-app/link_types.go`
 - **Change Opus bitrate**: `engineBitrateKbps` in `wail-app/audio_engine_real.go` (passed to `NewIntervalEncoder` in `interval_codec.go`)
-- **Change the interval offset D**: `WAIL_INTERVAL_OFFSET` env var (default 1), read in `wail-app/session.go` and applied via `playout.New` in `audio_engine_real.go`
 - **Change the emit cushion**: `WAIL_EMIT_CUSHION_MS` env var or the Debug-tab slider (default 100, clamped 100–500), read in `wail-app/audio_engine_real.go`; it adds directly to a Link Audio subscriber's reported buffering
 - **Modify wire format**: `wail-app/wire.go` (bump the flags/format)
 
@@ -320,9 +319,9 @@ Decided direction (see `CONTEXT.md` pillars and `docs/adr/0001`): WAIL interacts
 All steps of `docs/link-audio-migration-plan.md` are implemented: the Link Audio engine is the only audio path (no flag), and the plugins, TCP IPC, and Rust workspace are gone. New Go pieces:
 
 - `wail-app/internal/abllink` — cgo `abl_link` binding (sync + Link Audio; pure-C capture ring), against `vendor/link` (Link-4.0). Replaced the external `abletonlink-go`.
-- `wail-app/internal/{interval,playout,lanloss,affinity,capture,emit}` — pure, unit-tested engine logic (interval/room clock, hold-until-N+D scheduler, LAN loss, channel affinity, interval assembly/reassembly + paced playout).
+- `wail-app/internal/{interval,playout,lanloss,affinity,capture,emit}` — pure, unit-tested engine logic (interval math, adaptive round scheduler, LAN loss, channel affinity, interval assembly/reassembly + paced playout).
 - `wail-app/interval_codec.go` — interval Opus↔WAIF codec (loopback-tested).
 - `wail-app/audio_engine_real.go` — the capture + emit engine (`//go:build !linkstub`; no-op stub otherwise).
-- `signaling-server` — relay-authoritative room interval clock + `interval_anchor` broadcast.
+- `signaling-server` — room state + `interval_anchor` broadcast (joiner seeding; the clock role retires after the ADR-0009 beta soak).
 
-Remaining is hardware validation only: run two machines with a Link-Audio DAW to exercise the Source/Sink data path + real-time timing, and confirm the Windows (MinGW) / Linux cgo builds link. The interval offset D is env-configurable (`WAIL_INTERVAL_OFFSET`, default 1); a GUI control for it is a follow-up.
+Remaining is hardware validation only: run two machines with a Link-Audio DAW to exercise the Source/Sink data path + real-time timing, and confirm the Windows (MinGW) / Linux cgo builds link.
