@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.0.1 (2026-08-01)
+
+### Fixes
+
+- stop stale channels piling up on the receive side (#492)
+
 ## 4.0.0 (2026-07-30)
 
 ### Breaking Changes
