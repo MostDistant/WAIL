@@ -3,17 +3,28 @@ name: Build
 on:
   push:
     branches: [main, "claude/**"]
+  # Without this, nothing here ran before a merge — the Linux plugin job in
+  # particular, which is the only place a glibc-only build break can surface.
+  # One did (the dladdr fix in this PR): green on macOS, green through review,
+  # red the moment it landed on main.
+  pull_request:
   merge_group:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # ref_name, not ref, so a push to claude/** and the pull request from that
+  # same branch land in one group and the duplicate is cancelled rather than
+  # run twice: push gives refs/heads/claude/x where the PR gives claude/x.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   build-macos:
     runs-on: macos-latest
-    if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
+    # head_commit exists only on push; on a pull request it is null and the
+    # expression would rely on null-coercion to keep the job running. Say it
+    # outright instead — the skip is about release-prep pushes to main.
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: prepare release')"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -54,7 +65,10 @@ jobs:
     # MinGW GCC + CMake). windows-latest rolled over to the 2025/2026 image
     # whose newer toolchain breaks the CGo builds. See #329.
     runs-on: windows-2022
-    if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
+    # head_commit exists only on push; on a pull request it is null and the
+    # expression would rely on null-coercion to keep the job running. Say it
+    # outright instead — the skip is about release-prep pushes to main.
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: prepare release')"
     env:
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_NOHASHDIR: "true"
@@ -167,7 +181,10 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-22.04
-    if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
+    # head_commit exists only on push; on a pull request it is null and the
+    # expression would rely on null-coercion to keep the job running. Say it
+    # outright instead — the skip is about release-prep pushes to main.
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: prepare release')"
     env:
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_NOHASHDIR: "true"

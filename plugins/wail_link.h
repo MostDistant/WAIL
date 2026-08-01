@@ -9,6 +9,18 @@
 // lock-free by design).
 #pragma once
 
+// glibc hides dladdr behind __USE_GNU, so <dlfcn.h> only declares it when
+// _GNU_SOURCE is defined before the first libc header — and an implicit
+// declaration is an error, not a warning, on current GCC/Clang. It cannot be
+// defined here: every consumer includes <stdio.h> and friends before this
+// header, so by now it would be too late. The build system defines it
+// (plugins/CMakeLists.txt); this only catches a build that forgets, with a
+// legible message instead of an implicit-declaration error deep in a macro.
+// macOS declares dladdr unconditionally, which is why this was invisible here.
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#error "define _GNU_SOURCE for this translation unit — dladdr needs it on glibc"
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
