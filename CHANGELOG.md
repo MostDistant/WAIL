@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.1.0 (2026-08-01)
+
+### Features
+
+- stamp the recv plugin's build and log channel transitions (#496)
+
+### Fixes
+
+- don't let a mislabeled straggler pin a dead channel open (#495)
+
 ## 4.0.1 (2026-08-01)
 
 ### Fixes
