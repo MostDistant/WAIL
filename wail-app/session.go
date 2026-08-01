@@ -324,6 +324,26 @@ func sessionLoop(
 	reconnectTimer := time.NewTimer(time.Hour)
 	reconnectTimer.Stop()
 
+	// Tempo declarations (ADR-0009): the room's tempo state is a Link-style
+	// timeline — the value plus the priority stamp that arbitrates it. Ours
+	// updates on every declaration we make or adopt; conflicts resolve by
+	// tempoDeclareAdopts (strictly-greater origin, owner tie-break).
+	var tempoOrigin int64
+	var tempoOwner string
+	// declareTempo broadcasts a tempo the local musician (or their DAW, after
+	// de-noising) chose: intent by construction, no threshold, no hold-down.
+	// Dual-send during the compat cycle (#509): old clients adopt via the
+	// legacy TempoChange, and the relay room clock still re-anchors from it.
+	declareTempo := func(bpm float64) {
+		origin := time.Now().UnixMicro()
+		if origin <= tempoOrigin {
+			origin = tempoOrigin + 1
+		}
+		tempoOrigin, tempoOwner = origin, identity
+		mesh.Broadcast(NewTempoDeclare(bpm, origin, identity))
+		mesh.Broadcast(NewTempoChange(bpm, intervalCfg.Quantum, time.Now().UnixMicro()))
+	}
+
 	// handleBoundary fires on each Link event: if the given beat crossed into a
 	// new local interval, it logs the boundary, records timing drift, and hands
 	// the boundary to the in-app senders (test tone / WAV). It closes over
@@ -406,9 +426,14 @@ func sessionLoop(
 		case cmd := <-cmdCh:
 			switch cmd.Type {
 			case "ChangeBpm":
-				logInfo("BPM changed to %.1f", cmd.BPM)
+				// WAIL's own tempo control: intent by construction (ADR-0009).
+				// Broadcast it — this path used to stop at the local session,
+				// so a UI tempo change never reached the room at all.
+				logInfo("BPM changed to %.1f (declared)", cmd.BPM)
 				steer.NoteTempoCommitted(cmd.BPM, time.Now())
 				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: cmd.BPM}
+				declareTempo(cmd.BPM)
+				emitter.Emit("tempo:changed", TempoChangedEvent{BPM: cmd.BPM, Source: "local"})
 			case "SetInterval":
 				// ADR-0004: anyone may change the room interval; the relay
 				// reanchors at the next boundary, so the current interval
@@ -646,7 +671,7 @@ func sessionLoop(
 					// engine has no room labels and releases nothing — a solo peer
 					// monitoring their own loopback would hear silence.
 					foundedRoom = true
-					mesh.Broadcast(NewTempoChange(bpm, intervalCfg.Quantum, time.Now().UnixMicro()))
+					declareTempo(bpm)
 					mesh.Broadcast(NewIntervalConfig(intervalCfg.Bars, intervalCfg.Quantum))
 				}
 			}
@@ -821,7 +846,28 @@ func sessionLoop(
 					emitter.Emit("interval:prompt", IntervalPromptEvent{Bars: msg.Bars, Quantum: msg.Quantum, BPM: msg.BPM})
 				}
 
+			case "TempoDeclare":
+				// ADR-0009: a declared tempo, arbitrated by priority — no
+				// threshold, no hold-down. Our own dual-sent declaration echoes
+				// back with an equal (origin, owner) and is inert by the rule.
+				if tempoDeclareAdopts(msg.OriginMicros, msg.Owner, tempoOrigin, tempoOwner) {
+					tempoOrigin, tempoOwner = msg.OriginMicros, msg.Owner
+					if math.Abs(msg.BPM-steer.CurrentBPM()) > 0.01 {
+						logInfo("Tempo declared by %s: %.1f BPM", msg.Owner, msg.BPM)
+						steer.NoteTempoCommitted(msg.BPM, time.Now())
+						linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
+						emitter.Emit("tempo:changed", TempoChangedEvent{BPM: msg.BPM, Source: "remote"})
+					}
+				}
+
 			case "TempoChange":
+				// Legacy path (pre-ADR-0009 clients). A new client's dual-send
+				// arrives here too, already adopted via its TempoDeclare — the
+				// equal-BPM guard keeps it from double-applying or inflating
+				// the origin with a receipt-time stamp.
+				if math.Abs(msg.BPM-steer.CurrentBPM()) <= 0.01 {
+					break
+				}
 				var name string
 				peers.WithPeer(from, func(p *PeerState) {
 					if p.DisplayName != nil {
@@ -831,22 +877,18 @@ func sessionLoop(
 				if name == "" {
 					name = from
 				}
-				logInfo("Tempo change from %s: %.1f BPM", name, msg.BPM)
+				logInfo("Tempo change from %s: %.1f BPM (legacy)", name, msg.BPM)
+				if now := time.Now().UnixMicro(); now > tempoOrigin {
+					tempoOrigin, tempoOwner = now, from
+				}
 				steer.NoteTempoCommitted(msg.BPM, time.Now()) // record + slew gate: never fight tempo changes
 				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
 				emitter.Emit("tempo:changed", TempoChangedEvent{BPM: msg.BPM, Source: "remote"})
 
 			case "StateSnapshot":
-				// Passive peer (ADR-0003): adopt tempo but never ForceBeat the local
-				// transport. Within-bar alignment comes from the local LAN's Link
-				// phase; the room interval index comes from the relay anchor.
-				// ADR-0006: anchor-gated adoption — with a room anchor, snapshots
-				// diverging from the room tempo are stale and ignored (two-peer
-				// adoption oscillator: A drags B while B drags A every 200ms).
-				if steer.SnapshotTempoAdopt(msg.BPM) {
-					steer.NoteTempoCommitted(msg.BPM, time.Now())
-					linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
-				}
+				// Tempo adoption from snapshots is retired (ADR-0009): tempo
+				// crosses the WAN only as a declaration. Snapshots still flow
+				// for old receivers; nothing here reads them anymore.
 
 			case "IntervalConfig":
 				logInfo("Remote interval config: %d bars, quantum %.0f", msg.Bars, msg.Quantum)
@@ -998,11 +1040,13 @@ func sessionLoop(
 			switch ev.Type {
 			case "TempoChanged":
 				if math.Abs(ev.BPM-steer.CurrentBPM()) > 0.01 {
-					logInfo("Local tempo changed to %.1f BPM", ev.BPM)
-					// ADR-0004: carry the ADOPTED room quantum, not our join-time
-					// preference — the relay treats TempoChange.quantum as
-					// authoritative, so a mismatched joiner would reanchor (flap) it.
-					mesh.Broadcast(NewTempoChange(ev.BPM, intervalCfg.Quantum, ev.TimestampUs))
+					// An observed DAW change that survived the detector's
+					// de-noising: declared on the musician's behalf (ADR-0009).
+					// declareTempo dual-sends the legacy TempoChange with the
+					// ADOPTED room quantum (ADR-0004: the relay treats its
+					// quantum as authoritative — a joiner's own would flap it).
+					logInfo("Local tempo changed to %.1f BPM (declaring)", ev.BPM)
+					declareTempo(ev.BPM)
 					steer.NoteTempoCommitted(ev.BPM, time.Now()) // record + slew gate: the user owns the knob
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}

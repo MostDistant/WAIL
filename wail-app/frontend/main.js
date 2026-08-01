@@ -843,6 +843,41 @@ sessionBpiInput.addEventListener('keydown', (e) => {
 });
 sessionBpiInput.addEventListener('change', applyBpi);
 
+// --- Room tempo control (ADR-0009): a change made here is a declaration —
+// broadcast to the room directly, no inference. Display updates skip while
+// the field is focused so typing isn't clobbered by tempo events.
+let lastShownBpm = null;
+function setBpmDisplay(bpm) {
+  lastShownBpm = bpm;
+  if (document.activeElement === sessionBpmInput) return;
+  sessionBpmInput.value = bpm != null ? Number(bpm.toFixed(1)) : '';
+}
+
+async function applyBpm() {
+  const bpm = parseFloat(sessionBpmInput.value);
+  if (!(bpm >= 20 && bpm <= 999)) {
+    setBpmDisplay(lastShownBpm);
+    return;
+  }
+  if (lastShownBpm != null && Math.abs(bpm - lastShownBpm) < 0.05) return;
+  try {
+    await invoke('change_bpm', { bpm });
+    lastShownBpm = bpm; // optimistic; tempo:changed confirms shortly
+  } catch (err) {
+    showError(sessionError, err);
+    setBpmDisplay(lastShownBpm);
+  }
+}
+
+sessionBpmInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sessionBpmInput.blur();
+  }
+});
+sessionBpmInput.addEventListener('change', applyBpm);
+sessionBpmInput.addEventListener('blur', () => setBpmDisplay(lastShownBpm));
+
 // --- Stats mode toggle click handlers ---
 document.getElementById('stats-mode-btn').addEventListener('click', toggleStatsMode);
 
@@ -882,7 +917,7 @@ function updateSetupCallout(s) {
 }
 
 function renderStatus(s) {
-  sessionBpmInput.textContent = (typeof s.bpm === 'number') ? s.bpm.toFixed(1) : '—';
+  setBpmDisplay(typeof s.bpm === 'number' ? s.bpm : null);
   document.getElementById('session-link-peers').textContent = s.link_peers;
   updateSetupCallout(s);
 
@@ -1207,7 +1242,7 @@ async function setupListeners() {
   }));
 
   unlisten.push(await listen('tempo:changed', (event) => {
-    sessionBpmInput.textContent = event.payload.bpm.toFixed(1);
+    setBpmDisplay(event.payload.bpm);
   }));
 
   // Grid alignment with the room grid (ADR-0006): quiet header badge.
