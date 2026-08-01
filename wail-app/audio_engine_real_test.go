@@ -79,10 +79,7 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 	}
 
 	// Control surface is safe.
-	eng.SetRoomAnchor(100, 120, 4, 4)
-	if !le.labeler.Aligned() {
-		t.Fatal("SetRoomAnchor should align the labeler")
-	}
+	eng.SetRoomConfig(120, 4, 4)
 	if len(eng.CaptureChannels()) != 0 {
 		t.Fatal("no capture channels expected before discovery runs")
 	}
@@ -103,8 +100,8 @@ func TestEngineConcealsSeqGapWithPLC(t *testing.T) {
 	le := eng.(*linkAudioEngine)
 	defer eng.Stop()
 
-	// Anchor so cfg/tempo-derived interval totals exist for the slot walk.
-	eng.SetRoomAnchor(0, 120, 4, 4)
+	// Room config so cfg/tempo-derived interval totals exist for the slot walk.
+	eng.SetRoomConfig(120, 4, 4)
 
 	enc, err := NewIntervalEncoder(2, 48000, 128)
 	if err != nil {
@@ -294,16 +291,16 @@ func TestCaptureExcludesWAILPrefixedChannelsFromAnyPeer(t *testing.T) {
 // with everyone else, worse every interval, until the channel is restarted.
 func TestSyncCaptureConfigReGridsAssemblerOnRoomConfigChange(t *testing.T) {
 	le := newCaptureTestEngine(t)
-	le.SetRoomAnchor(0, 120, 4, 4)
+	le.SetRoomConfig(120, 4, 4)
 	ch := &captureChannel{
 		name: "Main",
 		asm:  capture.NewWindowed(interval.Config{Bars: 4, Quantum: 4}, 2, engineInternalRate, samplesPerWaifFrame(engineInternalRate)),
 	}
 	le.capture["deadbeef"] = ch
 
-	// Room switches 4 bars → 2 bars. SetRoomAnchor adopts it engine-wide; the
+	// Room switches 4 bars → 2 bars. SetRoomConfig adopts it engine-wide; the
 	// drain goroutine follows on its next tick (syncCaptureConfig).
-	le.SetRoomAnchor(1, 120, 2, 4)
+	le.SetRoomConfig(120, 2, 4)
 	le.syncCaptureConfig(ch)
 
 	if got := ch.asm.Config(); got != (interval.Config{Bars: 2, Quantum: 4}) {
@@ -565,60 +562,9 @@ func TestImminentAudioStillBlocksRetirement(t *testing.T) {
 
 // --- grid-jump attribution ---
 
-// A jump is only actionable if you can tell what moved the grid. The most
-// important case to get right is our own entry snap: it moves the grid on
-// purpose and trips the same detector, so reporting it would send someone
-// hunting a session merge that never happened — and acting on it would
-// re-align a grid we just aligned.
-func TestGridJumpAttributesOurOwnSnap(t *testing.T) {
+// Jumps are handed to the session exactly once (observability, ADR-0009).
+func TestGridJumpIsDeliveredOnce(t *testing.T) {
 	le := newCaptureTestEngine(t)
-	le.OnGridSnap(2_600_000) // entry conformance just snapped +2.6s
-
-	now := time.Now()
-	// 5.22 beats at 120 BPM is 2610ms — the snap we just made.
-	j := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, now)
-
-	if !j.SelfCaused {
-		t.Fatalf("snap not recognised as self-caused: %+v", j)
-	}
-	if j.Cause != "our own grid snap" {
-		t.Fatalf("cause = %q", j.Cause)
-	}
-	// Consumed: one snap explains one jump, so a second jump in the same
-	// window is not silently absorbed by it.
-	j2 := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, now)
-	if j2.SelfCaused {
-		t.Fatal("one snap absorbed two jumps — a real one could vanish behind it")
-	}
-}
-
-// Recency alone must not credit a jump to our snap. A snap below the
-// detector's own threshold produces no jump at all, so crediting anything that
-// merely follows it would swallow a real merge and leave the grid unaligned
-// with nothing reported and nothing re-armed.
-func TestGridJumpDoesNotCreditAMismatchedSnap(t *testing.T) {
-	le := newCaptureTestEngine(t)
-	le.OnGridSnap(60_000) // a 60ms snap: far too small to have caused a 2.6s jump
-
-	j := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, time.Now())
-
-	if j.SelfCaused {
-		t.Fatalf("a 60ms snap was credited with a 2610ms jump: %+v", j)
-	}
-	if j.Cause != "unattributed" {
-		t.Fatalf("cause = %q, want \"unattributed\"", j.Cause)
-	}
-}
-
-// The emit loop must withhold self-caused jumps from the session — the actual
-// guard, not just the classification behind it.
-func TestSelfCausedJumpIsWithheldFromTheSession(t *testing.T) {
-	le := newCaptureTestEngine(t)
-
-	le.noteGridJump(GridJump{Beats: 5.22, Cause: "our own grid snap", SelfCaused: true})
-	if _, ok := le.TakeGridJump(); ok {
-		t.Fatal("a self-caused jump was handed to the session")
-	}
 
 	le.noteGridJump(GridJump{Beats: 5.22, Cause: "Link session merge"})
 	got, ok := le.TakeGridJump()
@@ -644,9 +590,6 @@ func TestGridJumpAttributesPeerAndTempoChanges(t *testing.T) {
 	j := le.classifyGridJump(5.22, 120, 120, 4, ev, 16, now)
 	if j.Cause != "Link session merge" {
 		t.Fatalf("peer change cause = %q, want \"Link session merge\"", j.Cause)
-	}
-	if j.SelfCaused {
-		t.Fatal("a merge is not self-caused")
 	}
 	if j.Peers != 4 {
 		t.Fatalf("peers = %d, want 4", j.Peers)

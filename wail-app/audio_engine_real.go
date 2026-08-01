@@ -98,7 +98,6 @@ type linkAudioEngine struct {
 	dumpGen     atomic.Uint64
 
 	mu       sync.Mutex
-	labeler  interval.RoomLabeler
 	cfg      interval.Config
 	tempoBPM float64
 	dumpDir  string // guarded by mu; current dump session directory
@@ -157,18 +156,6 @@ type linkAudioEngine struct {
 	// and attributes it; the session goroutine consumes it (TakeGridJump),
 	// re-arms grid alignment, and reports it to the room.
 	gridJump atomic.Pointer[GridJump]
-
-	// Our own entry snap moves the grid deliberately, which trips the same
-	// detector. Recording it is what separates "we did this" from "something
-	// out there did this" — the difference between a wasted re-alignment
-	// cycle and a real one.
-	lastSnapAtNs    atomic.Int64
-	lastSnapDeltaUs atomic.Int64
-
-	// curRoomIdx is the room index of the local interval currently in progress
-	// (emit loop publishes, HandleRemoteAudio reads) for label-offset
-	// confirmation. math.MinInt64 until the labeler is aligned.
-	curRoomIdx atomic.Int64
 }
 
 // peerIntent is one identity's declared set of streams. keep holds the stream
@@ -389,7 +376,6 @@ func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte)) Aud
 
 		cushionFrames: engineCushionFrames(),
 	}
-	e.curRoomIdx.Store(math.MinInt64)    // unlabeled until the first room anchor
 	e.localBoundary.Store(math.MinInt64) // no boundary processed yet
 	return e
 }
@@ -492,13 +478,11 @@ func (e *linkAudioEngine) Stop() {
 	log.Printf("[audio] Link Audio engine stopped")
 }
 
-func (e *linkAudioEngine) SetRoomAnchor(currentIndex int64, bpm float64, bars uint32, quantum float64) {
-	// Sample our local interval index now and align the labeler to the room index.
-	ss := abllink.NewSessionState()
-	defer ss.Close()
-	e.link.CaptureAppSessionState(ss)
-	clockMicros := e.link.ClockMicros()
-
+// SetRoomConfig adopts the room's tempo and interval shape for the engine's
+// interval math (playout frame counts, capture window sizing). This is the
+// anchor's one remaining job under ADR-0009 — the room index it also carries
+// is ignored, since rounds are sender-relative.
+func (e *linkAudioEngine) SetRoomConfig(bpm float64, bars uint32, quantum float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if bpm > 0 {
@@ -510,88 +494,6 @@ func (e *linkAudioEngine) SetRoomAnchor(currentIndex int64, bpm float64, bars ui
 	if quantum > 0 {
 		e.cfg.Quantum = quantum
 	}
-	localBeat := ss.BeatAtTime(clockMicros, e.cfg.BeatsPerInterval())
-	localIdx := e.cfg.IndexAtBeat(localBeat)
-	prevOff, wasAligned := e.labeler.Offset(), e.labeler.Aligned()
-	e.labeler.Align(currentIndex, localIdx)
-	newOff := e.labeler.Offset()
-	switch {
-	case !wasAligned:
-		log.Printf("[audio] room anchor applied: index=%d (bpm %.1f, %d bars x %.0f beats) — label offset %+d at local idx %d",
-			currentIndex, e.tempoBPM, e.cfg.Bars, e.cfg.Quantum, newOff, localIdx)
-	case newOff != prevOff:
-		log.Printf("[audio] room anchor re-aligned: index=%d — label offset %+d → %+d at local idx %d (room labels shift %+d intervals)",
-			currentIndex, prevOff, newOff, localIdx, newOff-prevOff)
-	}
-}
-
-func (e *linkAudioEngine) RoomIndex(localIndex int64) (int64, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.labeler.RoomIndex(localIndex)
-}
-
-// AlignRoomLabel aligns the labeler to an explicitly derived local index for
-// the given room index (ADR-0006 "known by construction": the session
-// computed localIndex from the anchor's boundary time on an aligned grid, so
-// this never suffers the sample-align/snap off-by-one). Logs only on change —
-// re-running entry conformance is idempotent.
-// OnGridSnap re-anchors every emit feeder after an entry-conformance grid
-// snap (ADR-0006): the snap moved the playhead, not the audio — the jumped
-// frames skip silently, never counting as underruns (the join-time ~500k
-// "underrun frames" were exactly this setup event misattributed as loss).
-func (e *linkAudioEngine) OnGridSnap(deltaUs int64) {
-	// Recorded before the early return: a backward snap moves the grid too,
-	// so it must still be attributable when the detector sees it.
-	//
-	// Magnitude first, timestamp second — the timestamp publishes the pair.
-	// Storing the other way round let a reader land between the two and match
-	// a fresh timestamp against the PREVIOUS snap's magnitude; they disagree,
-	// the snap reads as an external jump, and that costs an audible re-entry.
-	e.lastSnapDeltaUs.Store(deltaUs)
-	e.lastSnapAtNs.Store(time.Now().UnixNano())
-	if deltaUs <= 0 {
-		return // backward jump: the playhead pauses; nothing to skip
-	}
-	frames := int(deltaUs) * engineInternalRate / 1e6
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	for _, st := range e.emit {
-		st.feeder.SkipFrames(frames)
-	}
-}
-
-func (e *linkAudioEngine) AlignRoomLabel(roomIndex, localIndex int64) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	prevOff, wasAligned := e.labeler.Offset(), e.labeler.Aligned()
-	e.labeler.Align(roomIndex, localIndex)
-	if newOff := e.labeler.Offset(); !wasAligned || newOff != prevOff {
-		log.Printf("[audio] room label aligned by construction: room %d ↔ local %d — label offset %+d (was %+d)",
-			roomIndex, localIndex, newOff, prevOff)
-	}
-}
-
-// abs64 returns |v| for the label-offset comparison below (int64; math.Abs
-// is float64). Formerly shared with the grid-alignment glue (now
-// internal/align, which has its own copy).
-func abs64(v int64) int64 {
-	if v < 0 {
-		return -v
-	}
-	return v
-}
-
-// LabelOffsetFor returns the worst (largest-|delta|) interval-label verdict
-// across one identity's streams: 0 = labels agree with our room index, k = the
-// peer's audio silently plays k intervals off (positive = late: frames labeled
-// ahead are held extra boundaries by playout). ok is false when no stream has
-// finalized a verdict yet (too little data, or unaligned).
-func (e *linkAudioEngine) LabelOffsetFor(identity string) (int64, bool) {
-	// Retired (ADR-0009): playback never compares a sender's labels to a room
-	// index, so there is no label offset to confirm. Kept returning not-found
-	// until the UI plumbing goes with the labeler.
-	return 0, false
 }
 
 func (e *linkAudioEngine) CaptureChannels() []CaptureChannelInfo {
@@ -1306,21 +1208,16 @@ func isGridJump(deltaBeats, elapsedSec, bpm float64) bool {
 	return math.Abs(deltaBeats-elapsedSec*bpm/60.0) > 0.5
 }
 
-// noteGridJump hands a jump to the session — unless we caused it ourselves.
-// Our own snap moves the grid on purpose: re-entering conformance over it
-// would re-measure a grid we just aligned, and reporting it would send the
-// room hunting a merge that never happened.
+// noteGridJump hands a jump to the session for logging.
 func (e *linkAudioEngine) noteGridJump(j GridJump) {
-	if j.SelfCaused {
-		return
-	}
 	e.gridJump.Store(&j)
 }
 
 // classifyGridJump attributes a beat discontinuity to whatever evidence the
-// tick carries. Order matters: our own snap first (we know we did it), then a
-// changed peer set (a session merge re-phases the timeline), then a tempo
-// move. Anything left is reported as unattributed rather than guessed at.
+// tick carries: a changed peer set (a session merge re-phases the timeline),
+// then a tempo move. Anything left is reported as unattributed rather than
+// guessed at. (WAIL itself no longer moves the grid — the entry snap retired
+// with grid alignment, ADR-0009 — so there is no self-caused case anymore.)
 func (e *linkAudioEngine) classifyGridJump(beats, roomBPM, sessionBPM float64, peers uint64, ev jumpEvidence, bpi float64, now time.Time) GridJump {
 	ms := 0.0
 	if roomBPM > 0 {
@@ -1329,11 +1226,6 @@ func (e *linkAudioEngine) classifyGridJump(beats, roomBPM, sessionBPM float64, p
 	j := GridJump{Beats: beats, Ms: ms, Intervals: int64(math.Round(beats / bpi)), Peers: peers}
 
 	switch {
-	case e.matchesOwnSnap(ms, now):
-		j.SelfCaused = true
-		j.Cause = "our own grid snap"
-		j.Detail = fmt.Sprintf("entry conformance snapped %+.0f ms, which is this jump; peers=%d tempo=%.2f BPM",
-			float64(e.lastSnapDeltaUs.Load())/1000, peers, sessionBPM)
 	case !ev.peersChangedAt.IsZero() && now.Sub(ev.peersChangedAt) < gridJumpEvidenceWindow:
 		j.Cause = "Link session merge"
 		j.Detail = fmt.Sprintf("LAN peer count %d→%d, %s before the jump — a joining peer re-phased the shared timeline; tempo=%.2f BPM",
@@ -1348,27 +1240,6 @@ func (e *linkAudioEngine) classifyGridJump(beats, roomBPM, sessionBPM float64, p
 			gridJumpEvidenceWindow, peers, sessionBPM)
 	}
 	return j
-}
-
-// matchesOwnSnap reports whether a jump is the grid snap we just performed —
-// recent AND of the same magnitude. Recency alone is not evidence: a snap
-// smaller than the detector's own 0.5-beat threshold produces no jump at all,
-// yet would blanket-absorb a real merge arriving inside the window, withholding
-// it so nothing ever re-aligns. The record is consumed, so one snap can explain
-// at most one jump.
-func (e *linkAudioEngine) matchesOwnSnap(ms float64, now time.Time) bool {
-	// Timestamp first, magnitude second — the mirror of OnGridSnap's store
-	// order, so seeing a fresh timestamp guarantees its magnitude is visible.
-	at := e.lastSnapAtNs.Load()
-	if at == 0 || now.Sub(time.Unix(0, at)) >= gridSnapAttributionWindow {
-		return false
-	}
-	snapMs := math.Abs(float64(e.lastSnapDeltaUs.Load()) / 1000)
-	if math.Abs(snapMs-math.Abs(ms)) > math.Max(snapMatchToleranceMs, 0.2*snapMs) {
-		return false
-	}
-	e.lastSnapAtNs.Store(0)
-	return true
 }
 
 // Health sums the per-channel and per-stream diagnostic counters. Capture-side
@@ -1461,11 +1332,6 @@ func (e *linkAudioEngine) emitLoop() {
 			bpi := cfg.BeatsPerInterval()
 			localBeat := ss.BeatAtTime(clockMicros, bpi)
 			localIdx := cfg.IndexAtBeat(localBeat)
-			// The labeler still feeds capture-side labels (until senders stamp
-			// local indices, ADR-0009); playout no longer consumes it.
-			if roomLabel, labeled := e.labeler.RoomIndex(localIdx); labeled {
-				e.curRoomIdx.Store(roomLabel)
-			}
 			e.mu.Unlock()
 			e.localBoundary.Store(localIdx)
 			// Local-grid jump detection: the beat should advance by exactly
@@ -1524,8 +1390,6 @@ func (e *linkAudioEngine) emitLoop() {
 				haveLast = true
 			}
 			e.topUpSinks(ss, bpi, localBeat)
-			// The metronome runs on the local Link grid, independent of the
-			// labeler that gates onBoundary — it works before a room anchor.
 			if e.metronomeOn.Load() {
 				e.metronomeTick(ss, cfg, tempo, bpi, localBeat, localIdx)
 			}

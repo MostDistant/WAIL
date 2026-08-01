@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nicholasgasior/wail/wail-app/internal/align"
 	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 )
 
@@ -47,7 +46,7 @@ type SessionConfig struct {
 
 // SessionCommand represents commands from the UI to the session.
 type SessionCommand struct {
-	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetMetronome", "SetMetronomeBroadcast", "SetCushionMs", "SetIntervalOffset", "SetInterval", "SetGridAlign", "Disconnect"
+	Type        string // "ChangeBpm", "SendChat", "StreamNamesChanged", "SetTestTone", "SetWavSender", "SetCaptureEnabled", "SetCaptureDump", "SetLoopback", "SetMetronome", "SetMetronomeBroadcast", "SetCushionMs", "SetIntervalOffset", "SetInterval", "Disconnect"
 	BPM         float64
 	Text        string
 	Names       map[uint16]string
@@ -201,15 +200,16 @@ func sessionLoop(
 	intervalPromptSent := false
 	localStreamNames := make(map[uint16]string)
 
-	// Grid steer (ADR-0006, CONTEXT.md "grid steer"): owns entry conformance,
-	// the gated grid slew, snapshot-tempo arbitration, the committed-tempo
-	// record (the fused lastBroadcastBPM + slew-gate timestamps), and the
-	// post-snap room-label re-derivation (overrides SetRoomAnchor's sample
-	// align once the grid is aligned). The loop below only forwards events;
-	// all alignment state lives in internal/align.
-	steer := align.NewSteerer(alignBridge{link}, bpm, func(state string, errMs float64) {
-		emitter.Emit("align:state", AlignStateEvent{State: state, ErrorMs: errMs})
-	}, logInfo, audioEngine.AlignRoomLabel, audioEngine.OnGridSnap)
+	// The tempo the session last committed to (adopted, declared, or seeded).
+	// Grid alignment is retired (ADR-0009): grids are never physically aligned
+	// across LANs — playout re-quantizes every round onto the local grid, so
+	// cross-LAN phase never reaches the ear. This plain record is all that
+	// remains of the steerer's committed-tempo bookkeeping.
+	currentBPM := bpm
+	// adoptedRoomTempo: whether this (re)connect has adopted the room's tempo
+	// yet — a joiner takes it from the first anchor, once, and declarations
+	// own it from there.
+	adoptedRoomTempo := false
 
 	// Receivers label our republished channels with these names (StreamNames
 	// sync): enabled capture channels default to their discovered channel name,
@@ -310,8 +310,8 @@ func sessionLoop(
 	defer statusTicker.Stop()
 	livenessTicker := time.NewTicker(5 * time.Second)
 	defer livenessTicker.Stop()
-	alignTicker := time.NewTicker(1 * time.Second)
-	defer alignTicker.Stop()
+	gridJumpTicker := time.NewTicker(1 * time.Second)
+	defer gridJumpTicker.Stop()
 
 	var lastBoundaryTime *time.Time
 
@@ -363,9 +363,9 @@ func sessionLoop(
 		intervalBytesSent = 0
 		intervalBytesRecv = 0
 
-		if lastBoundaryTime != nil && steer.CurrentBPM() > 0 {
+		if lastBoundaryTime != nil && currentBPM > 0 {
 			gap := time.Since(*lastBoundaryTime)
-			expectedUs := int64(intervalCfg.BeatsPerInterval() / (steer.CurrentBPM() / 60.0) * 1_000_000.0)
+			expectedUs := int64(intervalCfg.BeatsPerInterval() / (currentBPM / 60.0) * 1_000_000.0)
 			drift := gap.Microseconds() - expectedUs
 			boundaryDriftUs = &drift
 		}
@@ -374,7 +374,7 @@ func sessionLoop(
 
 		// In-app senders stamp the LOCAL interval index (ADR-0009): rounds are
 		// sender-relative, so no room mapping exists or is needed.
-		info := IntervalBoundaryInfo{Index: idx, BPM: steer.CurrentBPM(), Cfg: intervalCfg}
+		info := IntervalBoundaryInfo{Index: idx, BPM: currentBPM, Cfg: intervalCfg}
 		if testToneBoundaryCh != nil {
 			select {
 			case testToneBoundaryCh <- info:
@@ -430,7 +430,7 @@ func sessionLoop(
 				// Broadcast it — this path used to stop at the local session,
 				// so a UI tempo change never reached the room at all.
 				logInfo("BPM changed to %.1f (declared)", cmd.BPM)
-				steer.NoteTempoCommitted(cmd.BPM, time.Now())
+				currentBPM = cmd.BPM
 				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: cmd.BPM}
 				declareTempo(cmd.BPM)
 				emitter.Emit("tempo:changed", TempoChangedEvent{BPM: cmd.BPM, Source: "local"})
@@ -582,12 +582,7 @@ func sessionLoop(
 				eff := audioEngine.SetCushionMs(cmd.Value)
 				logInfo("[audio] emit cushion set to %dms", eff)
 			case "SetIntervalOffset":
-				eff := audioEngine.SetIntervalOffset(cmd.Value)
-				logInfo("[audio] interval offset D set to %d", eff)
-			case "SetGridAlign":
-				// ADR-0006 toggle: the steerer owns disable-restore (committed
-				// tempo if mid-slew) and enable re-arms entry conformance.
-				steer.SetEnabled(cmd.Enabled, intervalCfg.BeatsPerInterval(), time.Now())
+				audioEngine.SetIntervalOffset(cmd.Value) // retired (ADR-0009); logs and ignores
 			case "Disconnect":
 				logInfo("Disconnecting...")
 				goto cleanup
@@ -740,10 +735,9 @@ func sessionLoop(
 				// The rejoin re-declared the configured stream count; the next
 				// status tick pushes update_streams if the live count differs.
 				lastDeclaredStreams = int(config.StreamCount)
-				// ADR-0006: rejoin is an entry — re-arm conformance. The fresh
-				// anchor + relay pongs re-measure δ; a mid-blip rejoin finds δ≈0
-				// and no-ops, a genuinely diverged grid snaps back onto the room.
-				steer.OnRejoin()
+				// The room's tempo may have moved while we were gone: take it
+				// from the next anchor, once, as a join does (ADR-0009).
+				adoptedRoomTempo = false
 				logInfo("Signaling reconnected (attempt %d)", attempt)
 				emitter.Emit("session:reconnected", nil)
 			}
@@ -815,30 +809,38 @@ func sessionLoop(
 					// Relay time service (ADR-0006): the relay's own pong feeds the
 					// relay RTT estimate and the grid steer's server↔local offset.
 					if msg.ServerNowMicros != 0 {
-						if rtt := clock.HandleServerPong(msg.PingSentAtUs); rtt > 0 {
-							steer.OnServerPong(msg.ServerNowMicros+rtt/2, rtt, intervalCfg.BeatsPerInterval(), time.Now())
-						}
+						// Relay RTT estimate (diagnostics). The server-time offset
+						// used to feed grid alignment; retired (ADR-0009).
+						clock.HandleServerPong(msg.PingSentAtUs)
 					}
 				} else {
 					clock.HandlePong(from, msg.PingSentAtUs, msg.PongSentAtUs)
 				}
 
 			case "IntervalAnchor":
-				// Relay-authoritative room interval clock (ADR-0003): align the
-				// engine's labeler to the room index. The session reads that same
-				// labeler back via audioEngine.RoomIndex for boundary logging and
-				// in-app-sender tagging (one source of truth).
-				audioEngine.SetRoomAnchor(msg.Index, msg.BPM, msg.Bars, msg.Quantum)
-				// The anchor carries the room's authoritative config: adopt it for
-				// session-side boundary math and the bridge's interval-beat lens.
+				// The anchor's remaining job (ADR-0009): carry the room's tempo
+				// and interval config to joiners. The room index it also carries
+				// is ignored — rounds are sender-relative now. Once every client
+				// in the field ignores it, the relay's clock retires too.
+				audioEngine.SetRoomConfig(msg.BPM, msg.Bars, msg.Quantum)
+				// Adopt the room's config for session-side boundary math and the
+				// bridge's interval-beat lens.
 				if msg.Bars > 0 && msg.Quantum > 0 {
 					intervalCfg = interval.Config{Bars: msg.Bars, Quantum: msg.Quantum}
 				}
 				link.SetIntervalQuantum(intervalCfg.BeatsPerInterval())
-				// ADR-0006: feed the room grid + server time to the grid steer
-				// (runs entry conformance on join/rejoin; measure-then-snap, then
-				// re-derives the room label by construction on the aligned grid).
-				steer.OnAnchor(msg.NextBoundaryMicros, msg.Index, msg.BPM, intervalCfg.BeatsPerInterval(), time.Now())
+				// Join-time tempo adoption, once per (re)connect: a joiner takes
+				// the room's tempo; declarations own it from there. This was the
+				// steerer's entry-conformance adoption, minus the grid snap.
+				if !adoptedRoomTempo && msg.BPM > 0 {
+					adoptedRoomTempo = true
+					if math.Abs(msg.BPM-currentBPM) > 0.01 {
+						logInfo("Adopting room tempo %.1f BPM", msg.BPM)
+						currentBPM = msg.BPM
+						linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
+						emitter.Emit("tempo:changed", TempoChangedEvent{BPM: msg.BPM, Source: "remote"})
+					}
+				}
 				// ADR-0004: the room interval is communicated, never enforced —
 				// prompt joiners (once) to match their DAW's launch quantization.
 				if !foundedRoom && !intervalPromptSent && msg.Bars > 0 {
@@ -852,9 +854,9 @@ func sessionLoop(
 				// back with an equal (origin, owner) and is inert by the rule.
 				if tempoDeclareAdopts(msg.OriginMicros, msg.Owner, tempoOrigin, tempoOwner) {
 					tempoOrigin, tempoOwner = msg.OriginMicros, msg.Owner
-					if math.Abs(msg.BPM-steer.CurrentBPM()) > 0.01 {
+					if math.Abs(msg.BPM-currentBPM) > 0.01 {
 						logInfo("Tempo declared by %s: %.1f BPM", msg.Owner, msg.BPM)
-						steer.NoteTempoCommitted(msg.BPM, time.Now())
+						currentBPM = msg.BPM
 						linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
 						emitter.Emit("tempo:changed", TempoChangedEvent{BPM: msg.BPM, Source: "remote"})
 					}
@@ -865,7 +867,7 @@ func sessionLoop(
 				// arrives here too, already adopted via its TempoDeclare — the
 				// equal-BPM guard keeps it from double-applying or inflating
 				// the origin with a receipt-time stamp.
-				if math.Abs(msg.BPM-steer.CurrentBPM()) <= 0.01 {
+				if math.Abs(msg.BPM-currentBPM) <= 0.01 {
 					break
 				}
 				var name string
@@ -881,7 +883,7 @@ func sessionLoop(
 				if now := time.Now().UnixMicro(); now > tempoOrigin {
 					tempoOrigin, tempoOwner = now, from
 				}
-				steer.NoteTempoCommitted(msg.BPM, time.Now()) // record + slew gate: never fight tempo changes
+				currentBPM = msg.BPM
 				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
 				emitter.Emit("tempo:changed", TempoChangedEvent{BPM: msg.BPM, Source: "remote"})
 
@@ -1039,7 +1041,7 @@ func sessionLoop(
 		case ev := <-linkEventCh:
 			switch ev.Type {
 			case "TempoChanged":
-				if math.Abs(ev.BPM-steer.CurrentBPM()) > 0.01 {
+				if math.Abs(ev.BPM-currentBPM) > 0.01 {
 					// An observed DAW change that survived the detector's
 					// de-noising: declared on the musician's behalf (ADR-0009).
 					// declareTempo dual-sends the legacy TempoChange with the
@@ -1047,7 +1049,7 @@ func sessionLoop(
 					// quantum as authoritative — a joiner's own would flap it).
 					logInfo("Local tempo changed to %.1f BPM (declaring)", ev.BPM)
 					declareTempo(ev.BPM)
-					steer.NoteTempoCommitted(ev.BPM, time.Now()) // record + slew gate: the user owns the knob
+					currentBPM = ev.BPM
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
 				handleBoundary(ev.Beat)
@@ -1057,24 +1059,20 @@ func sessionLoop(
 				handleBoundary(ev.Beat)
 			}
 
-		// --- Grid slew (ADR-0006): the grid steer closes steady-state drift
-		// against the room grid with bounded tempo nudges (gated against entry
-		// settling and tempo commits; never fires while entry is pending).
-		case <-alignTicker.C:
-			// A Link session merge or transport reset moves the local beat
-			// timeline bodily; the engine detects it and attributes it.
-			// Alignment has to act (the slew cannot walk back whole beats),
-			// and the room has to hear about it: a merge hits every peer on
-			// that LAN, so the cause belongs in the relay's log too, not just
-			// on whichever machine happened to notice.
+		// --- Grid-jump observability. A Link session merge or transport reset
+		// moves the local beat timeline bodily; the engine detects and
+		// attributes it. Nothing corrects it anymore (ADR-0009: playout
+		// re-quantizes every round onto the local grid, wherever it sits), but
+		// a musician whose bar lines just moved deserves the explanation, and a
+		// merge hits every peer on that LAN — so the cause goes to the relay
+		// log too, not just whichever machine noticed.
+		case <-gridJumpTicker.C:
 			if jump, jumped := audioEngine.TakeGridJump(); jumped {
-				steer.OnGridJump(jump.Beats, time.Now())
 				msg := fmt.Sprintf("grid jumped %+.2f beats (%+.0f ms, ≈%+d intervals) — cause: %s; %s",
 					jump.Beats, jump.Ms, jump.Intervals, jump.Cause, jump.Detail)
 				logWarn("%s", msg)
 				mesh.SendLog("warn", "align", msg, uint64(time.Now().UnixMicro()))
 			}
-			steer.Tick(intervalCfg.BeatsPerInterval(), time.Now())
 
 		// --- Ping timer ---
 		case <-pingTicker.C:
@@ -1162,20 +1160,9 @@ func sessionLoop(
 					v := uint32(s + 1)
 					slot = &v
 				}
-				// Interval-label confirmation (ADR-0006 follow-up): nonzero means
-				// this peer's audio silently plays that many intervals off.
-				var labelOffset *int64
-				peers.WithPeer(p, func(ps *PeerState) {
-					if ps.Identity != nil {
-						if v, ok := audioEngine.LabelOffsetFor(*ps.Identity); ok {
-							labelOffset = &v
-						}
-					}
-				})
 				peerInfos = append(peerInfos, PeerInfo{
 					PeerID: p, DisplayName: dn, RTTMs: rttMs, Slot: slot,
 					Status: status, IsSending: isSend, IsReceiving: isRecv,
-					LabelOffset: labelOffset,
 				})
 			}
 
@@ -1254,18 +1241,12 @@ func sessionLoop(
 			// don't raise commands; refresh the advertised stream names here.
 			syncStreamNames()
 
-			// Grid alignment readout (ADR-0006) for the debug panel.
-			var alignStateStr string
-			var alignErrMs, relayRttMs *float64
-			if aState, errMs, ok := steer.Status(intervalCfg.BeatsPerInterval()); ok {
-				alignStateStr = aState
-				if aState != "off" {
-					alignErrMs = &errMs
-					if rtt, rok := clock.RelayRTTUs(); rok {
-						rv := float64(rtt) / 1000.0
-						relayRttMs = &rv
-					}
-				}
+			// Relay RTT readout for the debug panel (grid alignment and its
+			// badge are retired, ADR-0009).
+			var relayRttMs *float64
+			if rtt, rok := clock.RelayRTTUs(); rok {
+				rv := float64(rtt) / 1000.0
+				relayRttMs = &rv
 			}
 
 			// Engine health snapshot (also carries the debug-room stream offsets).
@@ -1280,7 +1261,7 @@ func sessionLoop(
 				AudioSent:       audioIntervalsSent, AudioRecv: audioIntervalsReceived,
 				AudioBytesSent: audioBytesSent, AudioBytesRecv: audioBytesRecv,
 				AudioDCOpen: dcOpen, PluginConnected: true,
-				AlignState: alignStateStr, AlignErrorMs: alignErrMs, RelayRTTMs: relayRttMs,
+				RelayRTTMs:    relayRttMs,
 				StreamOffsets: health.StreamOffsets,
 				Recording:     recorder != nil,
 				RecordingSizeBytes: func() uint64 {
