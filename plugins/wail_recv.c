@@ -297,6 +297,21 @@ static const char *display_name(const char *chan, char *buf, size_t cap) {
    return buf;
 }
 
+// free_slot releases a slot's subscription and clears its port label. Ordering
+// matters: clear assigned first so process() stops touching the source, then
+// give any in-flight process() time to return before destroying it.
+static void free_slot(lbr_recv *self, int i, int *miss, const char *why) {
+   lbr_log(self, "%s: \"%s\" (slot %d freed)", why, self->slots[i].chan_name, i);
+   atomic_store_explicit(&self->slots[i].assigned, false, memory_order_release);
+   wail_sleep_ms(50);
+   lb_source_destroy(self->slots[i].source);
+   self->slots[i].source = NULL;
+   self->slots[i].chan_name[0] = '\0';
+   self->slots[i].channel_id = 0;
+   miss[i] = 0;
+   set_port_name(self, i, "");
+}
+
 static void *mgr_main(void *arg) {
    lbr_recv *self = arg;
    int miss[LBR_SLOTS] = {0};
@@ -312,15 +327,7 @@ static void *mgr_main(void *arg) {
          for (size_t c = 0; c < nch; c++)
             if (chans[c].id_u64 == self->slots[i].channel_id) seen = true;
          miss[i] = seen ? 0 : miss[i] + 1;
-         if (miss[i] >= LBR_GONE_POLLS) {
-            lbr_log(self, "channel gone: \"%s\" (slot %d freed)", self->slots[i].chan_name, i);
-            atomic_store_explicit(&self->slots[i].assigned, false, memory_order_release);
-            wail_sleep_ms(50); // let an in-flight process() finish with the source
-            lb_source_destroy(self->slots[i].source);
-            self->slots[i].source = NULL;
-            miss[i] = 0;
-            set_port_name(self, i, "");
-         }
+         if (miss[i] >= LBR_GONE_POLLS) free_slot(self, i, miss, "channel gone");
       }
 
       // Assign new room-published channels.
@@ -380,6 +387,19 @@ static void *mgr_main(void *arg) {
             break;
          }
       }
+
+      // First-wins by name, reconciled after the fact. Two WAILs bridging one
+      // room rename their copies of a stream independently, so the second's
+      // old name matches no slot for a poll or two and takes a port the guard
+      // above would have refused. Converge by freeing the later duplicate.
+      for (int i = 0; i < LBR_SLOTS; i++) {
+         if (!atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire)) continue;
+         for (int j = i + 1; j < LBR_SLOTS; j++) {
+            if (!atomic_load_explicit(&self->slots[j].assigned, memory_order_acquire)) continue;
+            if (strcmp(self->slots[i].chan_name, self->slots[j].chan_name) == 0)
+               free_slot(self, j, miss, "duplicate of a port we already carry");
+         }
+      }
    }
    return NULL;
 }
@@ -422,6 +442,12 @@ static void CLAP_ABI lbr_deactivate(const clap_plugin_t *plugin) {
          lb_source_destroy(self->slots[i].source);
          self->slots[i].source = NULL;
       }
+      // Release the slot too, not just its source: a reactivate re-runs
+      // discovery, and a slot still marked assigned for a live channel id is
+      // neither re-subscribed nor freed — it just renders silence forever.
+      atomic_store_explicit(&self->slots[i].assigned, false, memory_order_release);
+      self->slots[i].chan_name[0] = '\0';
+      self->slots[i].channel_id = 0;
    }
    if (self->link) {
       lb_enable(self->link, false);

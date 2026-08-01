@@ -477,3 +477,33 @@ func TestRetirementKeepsHealthTotalsMonotonic(t *testing.T) {
 		t.Fatalf("total dropped to %d after retiring the stream, want 7 retained", got)
 	}
 }
+
+// Frames queued behind a PeerLeft publish under the peer-id fallback (the
+// registry entry is gone by the time they are handled), so retirement has to
+// cover that key too — otherwise the departure leaves a channel keyed by
+// something nothing will ever declare again, published for the session.
+func TestPeerIdKeyedStreamsAreRetirable(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStream(t, le, "peer-id-P", "", "", 0) // no Hello yet / peer already removed
+	le.DropPeer("peer-id-P")
+	drainPlayout(le)
+	sweep(le, time.Now().Add(retireGracePeerGone+time.Second))
+	if hasStream(le, "peer-id-P", 0) {
+		t.Fatal("a stream published under the peer-id fallback never retires")
+	}
+}
+
+// DropPeer on a source that will never send StreamNames (the loopback echo)
+// must be undoable, or re-enabling it leaves the drop in force and the monitor
+// channels are retired the next time frames pause.
+func TestClearPeerIntentMakesStreamsWantedAgain(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStream(t, le, "id-A:loopback", "Me (loopback)", "guitar", 0)
+	le.DropPeer("id-A:loopback")
+	le.ClearPeerIntent("id-A:loopback")
+	drainPlayout(le)
+	sweep(le, time.Now().Add(24*time.Hour))
+	if !hasStream(le, "id-A:loopback", 0) {
+		t.Fatal("cleared intent still retired the stream")
+	}
+}

@@ -180,10 +180,13 @@ const (
 func enginePeerGoneGrace() time.Duration {
 	d, src := retireGracePeerGone, "default"
 	if v := os.Getenv("WAIL_STREAM_RETIRE_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		// Floored, not just non-negative: a near-zero grace lets the sweep
+		// retire a stream inside the window HandleRemoteAudio drops the lock
+		// for its decode, which costs that frame and flaps the channel.
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			d, src = time.Duration(n)*time.Second, "WAIL_STREAM_RETIRE_SEC"
 		} else {
-			log.Printf("[audio] warn: bad WAIL_STREAM_RETIRE_SEC %q: using %s", v, d)
+			log.Printf("[audio] warn: bad WAIL_STREAM_RETIRE_SEC %q (want whole seconds >= 1): using %s", v, d)
 		}
 	}
 	log.Printf("[audio] departed-peer channel retirement: %s (%s)", d, src)
@@ -1103,6 +1106,14 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 	}
 
 	e.mu.Lock()
+	// The lock was dropped for the decode, so the boundary sweep may have
+	// retired this stream meanwhile. Placing the frame in the orphan would
+	// lose it and leave the next frame re-minting the channel — don't rely on
+	// the grace being long enough to make that unreachable.
+	if live, ok := e.emit[key]; !ok || live != st {
+		e.mu.Unlock()
+		return
+	}
 	for i, slot := range plcSlots {
 		if concealed[i] == nil {
 			continue
@@ -1152,6 +1163,16 @@ func (e *linkAudioEngine) SetPeerStreams(identity string, keep map[uint16]bool) 
 		own[id] = true
 	}
 	e.intent[identity] = peerIntent{keep: own}
+}
+
+// ClearPeerIntent forgets what we were told about an identity, putting it back
+// to "no news" — nothing of theirs is retirable until they say so again. The
+// counterpart to DropPeer for a source that will never send StreamNames (the
+// loopback echo), where the drop would otherwise stay in force forever.
+func (e *linkAudioEngine) ClearPeerIntent(identity string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.intent, identity)
 }
 
 // DropPeer marks everything an identity publishes as retirable on the longer
