@@ -1,6 +1,6 @@
 # Active grid alignment: entry snap + gated grid slew
 
-Status: accepted (amends ADR-0003 decision 1; implementation follows)
+Status: superseded by ADR-0008 (2026-08-01) — the shipped mechanism remains in the tree until the retirement lands. Alignment turned out not to be a musical requirement: capture and playout re-quantize content onto each listener's own grid, so cross-LAN phase never reaches the ear, and the index agreement this ADR tightens to ~25 ms only ever needed half an interval. Originally: accepted (amends ADR-0003 decision 1).
 
 Under ADR-0003, WAIL is a purely passive Link peer: the relay owns the room interval index, and each client maps its local grid to the room grid with a constant label offset. That keeps indices consistent but never physically aligns the grids — the offset is fixed from an anchor sampled at send time against a local index sampled at receipt time, so two peers holding the same anchor can disagree by a whole interval, persistently, re-rolled on every anchor (the labeler hazard, pinned in `internal/interval/labeler_hazard_test.go`). Even when the offset lands correctly, heard content sits at an arbitrary phase relationship (up to half an interval) forever, and crystal drift (~3 ms/min) degrades it further over long jams.
 
