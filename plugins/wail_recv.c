@@ -37,6 +37,14 @@
 #include "wail_link.h"
 #include "wail_thread.h" // wail_thread / wail_mutex / wail_sleep_ms
 
+// Identifies the running binary in the log. The version alone can't: a DAW
+// keeps a bundle mapped for the life of the process, so the stale case is
+// "same version, older build" — the compile time is what separates them.
+#ifndef WAIL_PLUGIN_VERSION
+#define WAIL_PLUGIN_VERSION "unknown"
+#endif
+#define WAIL_PLUGIN_BUILT __DATE__ " " __TIME__
+
 #define LBR_SLOTS 16
 #define LBR_RING_FRAMES 32768 // power of two; ~0.68s stereo @48k
 #define LBR_ANCHORS 512
@@ -93,6 +101,8 @@ typedef struct {
 
    wail_thread  mgr_thread;
    _Atomic bool running;
+
+   uint64_t snapshot_sig; // manager-thread only; last logged discovery+slot state
 
    FILE *log;
 } lbr_recv;
@@ -297,6 +307,47 @@ static const char *display_name(const char *chan, char *buf, size_t cap) {
    return buf;
 }
 
+// Snapshot signature: FNV-1a per entry, summed. Summing is commutative, so a
+// reordered discovery list is not mistaken for a change; slot entries mix in
+// the index, so a slot's position does count.
+static uint64_t lbr_entry_hash(uint64_t id, const char *name) {
+   uint64_t h = 1469598103934665603ULL;
+   const uint8_t *idb = (const uint8_t *)&id;
+   for (size_t i = 0; i < sizeof id; i++) {
+      h ^= idb[i];
+      h *= 1099511628211ULL;
+   }
+   for (const char *p = name; *p; p++) {
+      h ^= (uint8_t)*p;
+      h *= 1099511628211ULL;
+   }
+   return h;
+}
+
+// log_snapshot records discovery and the slot table, but only when either has
+// changed. Channel identity across a rename is the premise slot keying rests
+// on, so those transitions must be readable from the log rather than inferred
+// after the fact — while the steady state, at two polls a second, is pure
+// repetition and would bury them.
+static void log_snapshot(lbr_recv *self, const lb_channel_info *chans, size_t nch) {
+   uint64_t sig = 0;
+   for (size_t c = 0; c < nch; c++) sig += lbr_entry_hash(chans[c].id_u64, chans[c].name);
+   for (int i = 0; i < LBR_SLOTS; i++)
+      if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire))
+         sig += lbr_entry_hash(self->slots[i].channel_id ^ (uint64_t)(i + 1),
+                               self->slots[i].chan_name);
+   if (sig == self->snapshot_sig) return;
+   self->snapshot_sig = sig;
+
+   for (size_t c = 0; c < nch; c++)
+      lbr_log(self, "  chan id=%016llx name=\"%s\"", (unsigned long long)chans[c].id_u64,
+              chans[c].name);
+   for (int i = 0; i < LBR_SLOTS; i++)
+      if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire))
+         lbr_log(self, "  slot %d id=%016llx name=\"%s\"", i,
+                 (unsigned long long)self->slots[i].channel_id, self->slots[i].chan_name);
+}
+
 // free_slot releases a slot's subscription and clears its port label. Ordering
 // matters: clear assigned first so process() stops touching the source, then
 // give any in-flight process() time to return before destroying it.
@@ -400,6 +451,9 @@ static void *mgr_main(void *arg) {
                free_slot(self, j, miss, "duplicate of a port we already carry");
          }
       }
+
+      // After the poll's decisions, so the slot table logged is the outcome.
+      log_snapshot(self, chans, nch);
    }
    return NULL;
 }
@@ -423,7 +477,8 @@ static bool CLAP_ABI lbr_activate(const clap_plugin_t *plugin, double sr, uint32
    self->link = lb_create(120.0);
    lb_enable(self->link, true);
    lb_enable_audio(self->link, true);
-   lbr_log(self, "=== recv activated: host=\"%s %s\" sr=%.0f%s ===",
+   lbr_log(self, "=== recv activated: build %s (%s) host=\"%s %s\" sr=%.0f%s ===",
+           WAIL_PLUGIN_VERSION, WAIL_PLUGIN_BUILT,
            self->host && self->host->name ? self->host->name : "?",
            self->host && self->host->version ? self->host->version : "?", sr,
            self->rate_ok ? "" : " — NOT 48k: outputting silence");
