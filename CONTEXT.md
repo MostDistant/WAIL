@@ -107,28 +107,15 @@ One of WAIL Receive's 16 stereo output ports, auto-assigned per room-published c
 **LAN loss**:
 Samples lost on the Link Audio hop between a LAN app and WAIL. Detectable via sequence counters, never recoverable; concealed where possible and always surfaced in metrics.
 
-### Grid alignment
-
-_This section describes ADR-0006 machinery superseded by ADR-0009 (alignment is not a musical requirement — re-quantization means cross-LAN phase never reaches the ear). The terms remain while the mechanism is still in the tree._
-
-**Room grid**:
-The room's shared interval timeline, owned by the relay's room clock. The single fixed reference every WAIL aligns its local grid to; peers never align to each other directly.
+### Grids and rounds
 
 **Local grid**:
-A peer's interval boundaries derived from its own Link session timeline at the BPI phase lens. Capture, playout, and the metronome all live on this grid.
+A peer's interval boundaries derived from its own Link session timeline at the BPI phase lens. Capture, playout, and the metronome all live on this grid — it is the only grid there is (ADR-0009: grids are never aligned across LANs; re-quantization is what keeps everyone on the beat).
+_Avoid_: room grid (the retired shared reference, ADR-0006)
 
-**Alignment error (δ)**:
-The phase distance between a peer's local grid and the room grid at a moment in time. The quantity entry conformance and the grid slew measure and act on.
+**Round**:
+One sender-relative interval of one sender's audio: captured against their grid, numbered by their own counter, replayed starting on each listener's next boundary. What "interval index" identifies on the wire.
 
-**Entry conformance**:
-The rule every peer runs on join or rejoin: adopt the room tempo, measure δ, and snap only when |δ| exceeds the perceptual threshold (~25 ms). Mid-blip reconnects find δ ≈ 0 and no-op; first joins and app restarts snap.
-
-**Join-time snap**:
-The one-time re-mapping of the local Link session onto the room grid during entry conformance. Confined to transition moments: never fires mid-session, never when already aligned.
-
-**Grid slew**:
-A small bounded tempo nudge (≤0.05%, below the pitch JND) that closes steady-state alignment error; gated so it never acts near user tempo changes or just after entry, and cancelled by any mid-slew tempo commit or rejoin. The only steady-state steering WAIL ever applies.
-_Avoid_: phase lock (WAIL deliberately does not phase-lock across the WAN), micro-slew (the capture path's per-buffer sample-domain drift correction — a different mechanism)
-
-**Grid steer**:
-The module that owns the ADR-0006 surface end to end: entry conformance, the gated grid slew, snapshot-tempo arbitration, and the committed-tempo record (what tempo the session last committed to, and when — the single home of the slew's tempo gate). Implemented as `internal/align`'s `Steerer`; it drives the `GridAligner` math and the Link bridge, and the session loop only forwards events to it.
+**Grid jump**:
+A discontinuity in the local Link beat timeline — a session merge or transport reset moved it. Detected and attributed (peer-count and tempo evidence) for the logs; nothing corrects it, because nothing needs to.
+_Avoid_: micro-slew (the capture path's per-buffer sample-domain drift correction — an unrelated live mechanism)
