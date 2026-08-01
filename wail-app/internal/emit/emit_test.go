@@ -207,3 +207,29 @@ func TestMissingCountsAgainstTotalAndMaxFrame(t *testing.T) {
 		t.Fatalf("Missing = (%d,%d), want (2,1)", m, c)
 	}
 }
+
+func TestMinIndexTracksLowestBufferedInterval(t *testing.T) {
+	r := New(2, 960)
+	if _, ok := r.MinIndex(); ok {
+		t.Fatal("empty reassembler must report no buffered interval")
+	}
+	pcm := make([]int16, 960*2)
+	r.Add(70, 0, pcm, false, 0)
+	r.Add(12, 0, pcm, false, 0)
+	r.Add(4000, 0, pcm, false, 0)
+
+	min, ok := r.MinIndex()
+	if !ok || min != 12 {
+		t.Fatalf("MinIndex = (%d,%v), want (12,true)", min, ok)
+	}
+	// The distinction retirement depends on: one far-ahead straggler must not
+	// read as "audio is still playing" the way MaxIndex would.
+	r.Drop(70)
+	min, ok = r.MinIndex()
+	if !ok || min != 4000 {
+		t.Fatalf("after Drop(70) MinIndex = (%d,%v), want (4000,true)", min, ok)
+	}
+	if max, _ := r.MaxIndex(); max != min {
+		t.Fatalf("single straggler should have MinIndex == MaxIndex, got %d vs %d", min, max)
+	}
+}

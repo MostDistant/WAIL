@@ -202,6 +202,20 @@ func (r *Reassembler) MaxIndex() (max int64, ok bool) {
 	return max, ok
 }
 
+// MinIndex returns the lowest interval index currently buffered; ok is false
+// when nothing is buffered. Retirement uses it to ask whether anything
+// *imminent* is held: MaxIndex cannot answer that, since one straggler far
+// beyond the playout horizon (a sender whose room labels run ahead) would
+// otherwise read as "still playing" for as many boundaries as it is ahead.
+func (r *Reassembler) MinIndex() (min int64, ok bool) {
+	for idx := range r.partials {
+		if !ok || idx < min {
+			min, ok = idx, true
+		}
+	}
+	return min, ok
+}
+
 // Drop discards any partial for interval `index` and every earlier interval
 // (they can never be played once we've moved past them).
 func (r *Reassembler) Drop(upToInclusive int64) {

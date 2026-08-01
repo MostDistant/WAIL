@@ -173,6 +173,12 @@ const (
 	retireGracePeerGone = 30 * time.Second
 )
 
+// retireHorizonIntervals is how far past the release cursor (plus D) buffered
+// audio still counts as imminent, and so still blocks retirement. Matches the
+// margin the emit loop already treats as normal buffering before it calls a
+// sender's labels an anchor mismatch.
+const retireHorizonIntervals = 2
+
 // enginePeerGoneGrace resolves how long a departed peer's channels stay
 // published, WAIL_STREAM_RETIRE_SEC overriding the default. Always logs the
 // effective value: a session must be diagnosable from its log alone, without
@@ -1217,8 +1223,19 @@ func (e *linkAudioEngine) sweepRetiredLocked(now time.Time) {
 		if now.Sub(st.lastFrameAt) < grace {
 			continue
 		}
-		if _, buffered := st.reasm.MaxIndex(); buffered {
-			continue // still has audio to play out
+		// "Drained" has to mean nothing *imminent*, not nothing at all. A
+		// sender whose labels run ahead of our playout leaves stragglers
+		// buffered that far ahead, and Drop only clears at or below the release
+		// cursor — so asking for an empty reassembler keeps a dead channel
+		// published for as many boundaries as that peer is mislabeled, which is
+		// unbounded. Anything at or below the horizon still blocks: playout
+		// releases label−D and drops one boundary later, so the interval that
+		// just played is still held here and must not be cut.
+		if min, buffered := st.reasm.MinIndex(); buffered {
+			playing, started := st.sched.Playing()
+			if !started || min <= playing+st.sched.Offset()+retireHorizonIntervals {
+				continue
+			}
 		}
 		e.retireStreamLocked(key, st)
 	}
