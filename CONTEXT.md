@@ -5,9 +5,9 @@ WAIL makes remote musicians feel like one Ableton Link session: on each LAN it i
 ## Pillars
 
 1. **WAIL is primarily a Link peer.** Audio enters WAIL as local Link Audio channels and leaves it as published Link Audio channels; time enters and leaves as Link sync. If an app speaks Link + Link Audio, it works with WAIL with nothing to install. For DAWs without Link Audio there is one **optional, opt-in** bridge: WAIL Send / WAIL Receive (ADR-0007) — CLAP plugins that are themselves Link peers, making the DAW a Link Audio citizen outright. It stays optional so "nothing to install" stays the norm.
-2. **Intervalic, not real-time.** The NINJAM model: everyone hears everyone else's *previous* interval, perfectly beat-aligned. The delay is a fixed, configured number of intervals (default one), by design. WAIL never chases sub-20ms streaming over the WAN.
-3. **The WAN leg is loss-free.** Everything WAIL captures is completely delivered to every peer — the interval offset buys the time to do it, and dropping samples to save milliseconds is never the right trade. The LAN hop is Link Audio's domain: best-effort by design; WAIL detects loss there, conceals what it can, and surfaces the rest as metrics rather than hiding it.
-4. **Ableton Link owns time.** WAIL never invents a musical clock — it participates as a Link peer, and the local Link session is authoritative for tempo, beat, and within-bar phase. Two deliberate, narrow exceptions keep each local interval grid physically aligned to the room grid (ADR-0006): a consented **entry conformance** snap at join/rejoin — transition moments only, and only when the measured alignment error exceeds the perceptual threshold — and a gated **grid slew** in steady state that closes drift with bounded tempo nudges, suppressed for a few seconds after any tempo change and never a `ForceBeat` outside entry. Peer RTT measurement feeds this alignment as well as diagnostics.
+2. **Intervalic, not real-time.** The NINJAM model: everyone hears everyone else's recent interval, perfectly beat-aligned to their own grid. The delay is bounded by the interval and adaptive — each round lands on the listener's next boundary once delivered (ADR-0009, NINJAM's actual behavior). WAIL never chases sub-20ms streaming over the WAN.
+3. **The WAN leg is loss-free; the speakers prefer freshness.** Everything WAIL captures is completely delivered to every peer and lands in the archive — dropping samples in transit to save milliseconds is never the right trade. Playback is NINJAM-style (ADR-0009): when rounds back up, the freshest plays and the superseded round goes to the recorder, never silently lost. The LAN hop is Link Audio's domain: best-effort by design; WAIL detects loss there, conceals what it can, and surfaces the rest as metrics rather than hiding it.
+4. **Ableton Link owns time.** WAIL never invents a musical clock — it participates as a Link peer, and the local Link session is authoritative for tempo, beat, and within-bar phase. Across the WAN only the tempo *number* and the interval length are agreed (ADR-0009); grids are never physically aligned across LANs — capture and playback re-quantize onto each listener's own grid, so cross-LAN phase never reaches the ear. (ADR-0006's snap-and-slew alignment is superseded and remains in the tree only until its retirement lands.) Peer RTT measurement remains for diagnostics.
 5. **Boring transport.** One relay server carries everything across the WAN — JSON sync and binary audio — and owns the room interval clock (NINJAM-style); otherwise it is a dumb broadcast relay. No P2P, no ICE/STUN/TURN, no per-peer connection state. We pay an extra hop for a system one person can hold in their head.
 6. **One app is the whole system.** Session orchestration, Link bridging, codec, and networking live in a single app per musician (GUI or headless). The optional WAIL Send / WAIL Receive plugins (ADR-0007) are a narrow exception: they are plugin-resident only for Link Audio rendering (each is a Link peer — sink/source and timeline mapping). Room intelligence — codec, intervals, relay, room clock — never enters any plugin.
 7. **Real-time callbacks are sacred.** No allocation, locking, encoding, or blocking I/O on Link's audio delivery threads. Heavy work happens on background threads.
@@ -42,17 +42,24 @@ The suppression window that stops a just-applied remote tempo change from being 
 A fixed span of bars (e.g. 4 bars of 4/4) of beat-aligned audio; the unit of capture, transmission, and playback.
 
 **Interval index**:
-The room-wide interval counter, owned by the relay (NINJAM-style) so every WAIL in a room agrees on it. WAIF frames are tagged with it.
+A sender's own interval counter, stamped on its WAIF frames (ADR-0009). Sender-relative: there is no room-wide round, and receivers never need to agree on it.
+_Avoid_: room index (the retired relay-owned counter, ADR-0003)
 
 **Interval boundary**:
-Where one interval ends and the next begins. Each WAIL places boundaries on its own local Link phase and labels them with the shared interval index; completed audio ships and pending remote audio is released at the boundary.
+Where one interval ends and the next begins. Each WAIL places boundaries on its own local Link phase; completed audio ships and pending remote audio is released at a boundary.
 
 **BPI (beats per interval)**:
 The room interval's length in beats — bars × beats per bar (default 16). How interval length is displayed and chosen in the UI; the internal model and wire format remain bars × quantum.
 
 **Interval offset**:
-The NINJAM delay: audio captured during interval N is played by remote peers during their interval N+D. D is configurable (default one). A design constant, not network lag.
-_Avoid_: latency (reserved for network timing), one-interval offset (D is not fixed at one)
+Retiring (ADR-0009): the fixed per-round delay D. Playback is now adaptive — each round lands at the listener's next boundary once delivered — so the heard delay is bounded by the interval rather than pinned to a constant.
+_Avoid_: latency (reserved for network timing)
+
+**Freshest-wins**:
+The playback rule (ADR-0009, from NINJAM): when a sender's rounds back up in the queue, the newest complete one plays and the stale one is skipped at the speakers — but still recorded. Rounds advance per sender, never per channel, so one musician's streams cannot split across rounds.
+
+**Tempo declaration**:
+A tempo change broadcast with a monotonic priority stamp; peers adopt by Link's strictly-greater rule, ties broken by owner id (ADR-0009). The only way tempo crosses the WAN — observed DAW changes are declared on the musician's behalf after de-noising; WAIL's own tempo control declares directly.
 
 **Stream**:
 One audio feed a peer sends across the WAN, fed by one capture channel and identified by a stream index. A peer may send several.
@@ -101,6 +108,8 @@ One of WAIL Receive's 16 stereo output ports, auto-assigned per room-published c
 Samples lost on the Link Audio hop between a LAN app and WAIL. Detectable via sequence counters, never recoverable; concealed where possible and always surfaced in metrics.
 
 ### Grid alignment
+
+_This section describes ADR-0006 machinery superseded by ADR-0009 (alignment is not a musical requirement — re-quantization means cross-LAN phase never reaches the ear). The terms remain while the mechanism is still in the tree._
 
 **Room grid**:
 The room's shared interval timeline, owned by the relay's room clock. The single fixed reference every WAIL aligns its local grid to; peers never align to each other directly.

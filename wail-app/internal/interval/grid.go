@@ -218,27 +218,47 @@ func (g *GridAligner) Delta(localNextBoundaryUs int64) (int64, bool) {
 	return WrapPhase(localNextBoundaryUs-roomNearest, period), true
 }
 
+// SlewAuthorityBPM is the largest tempo offset the slew can hold, expressed in
+// BPM at a given tempo (0.06 at 120). Both the tempo-settling gate and the
+// detector's reporting bar key off it, so "what the slew can correct" and "what
+// the room has to be told about" tile exactly — ADR-0009 exists because they
+// used to be tuned independently and left a band that was neither.
+func SlewAuthorityBPM(bpm float64) float64 {
+	if bpm <= 0 {
+		return 0
+	}
+	return SlewMaxFraction * bpm
+}
+
 // SlewTempo maps δ to the tempo to apply this tick: inside the deadband it
-// returns the exact room tempo with active=false (restore and rest); outside
-// it nudges the room tempo toward closing δ, proportional to δ/period and
-// clamped to SlewMaxFraction. Positive δ (local late) speeds the local grid up.
-func SlewTempo(roomBPM float64, deltaUs, periodUs int64) (target float64, active bool) {
-	if roomBPM <= 0 || periodUs <= 0 {
-		return roomBPM, false
+// returns baseBPM with active=false (restore and rest); outside it nudges
+// baseBPM toward closing δ, proportional to δ/period and clamped to
+// SlewMaxFraction. Positive δ (local late) speeds the local grid up.
+//
+// baseBPM is the tempo the session was OBSERVED at when the episode began, not
+// the room tempo. Keyed to the room, the returned target is an absolute
+// teleport whenever the session sits away from it: a session at 120.2 in a 120
+// room was written to 119.94 — 3.75 cents, four times the cap's own audibility
+// budget, and the user's change silently reverted (ADR-0009, reproduced at
+// 0.0022 by the tempo simulation). Keyed to what was observed, every tempo this
+// returns is within SlewMaxFraction of it by construction.
+func SlewTempo(baseBPM float64, deltaUs, periodUs int64) (target float64, active bool) {
+	if baseBPM <= 0 || periodUs <= 0 {
+		return baseBPM, false
 	}
 	abs := deltaUs
 	if abs < 0 {
 		abs = -abs
 	}
 	if abs <= SlewDeadbandUs {
-		return roomBPM, false
+		return baseBPM, false
 	}
 	frac := float64(abs) / float64(periodUs)
 	if frac > SlewMaxFraction {
 		frac = SlewMaxFraction
 	}
 	if deltaUs > 0 {
-		return roomBPM * (1 + frac), true
+		return baseBPM * (1 + frac), true
 	}
-	return roomBPM * (1 - frac), true
+	return baseBPM * (1 - frac), true
 }
