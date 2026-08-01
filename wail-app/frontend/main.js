@@ -10,6 +10,7 @@ const sessionScreen = document.getElementById('session-screen');
 const joinForm = document.getElementById('join-form');
 const joinBtn = document.getElementById('join-btn');
 const joinError = document.getElementById('join-error');
+const debugRoomBtn = document.getElementById('debug-room-btn');
 const disconnectBtn = document.getElementById('disconnect-btn');
 const sessionError = document.getElementById('session-error');
 const sessionBpmInput = document.getElementById('session-bpm');
@@ -298,6 +299,12 @@ const REMEMBER_KEY = 'wail-remember';
 const DEVELOPER_KEY = 'wail-developer-mode';
 function getDeveloperMode() { return localStorage.getItem(DEVELOPER_KEY) === '1'; }
 function saveDeveloperMode(on) { localStorage.setItem(DEVELOPER_KEY, on ? '1' : '0'); }
+// Set when the app was launched with -debug, which implies developer mode for
+// the session without touching the saved preference. Everything that reads
+// "is developer mode on" has to go through developerModeActive(), or opening
+// Settings would show the stored value and quietly switch the Debug tab off.
+let debugFlagImpliesDeveloper = false;
+function developerModeActive() { return debugFlagImpliesDeveloper || getDeveloperMode(); }
 
 function getDisplayName() {
   return localStorage.getItem(DISPLAY_NAME_KEY) || '';
@@ -575,7 +582,7 @@ function openSettings() {
   settingsLinkAudioNameInput.value = getLinkAudioName();
   settingsTelemetryCheckbox.checked = getTelemetryEnabled();
   settingsRememberCheckbox.checked = getRememberEnabled();
-  settingsDeveloperCheckbox.checked = getDeveloperMode();
+  settingsDeveloperCheckbox.checked = developerModeActive();
   settingsPanel.style.display = 'flex';
 }
 
@@ -608,8 +615,11 @@ settingsForm.addEventListener('submit', (e) => {
   const rememberEnabled = settingsRememberCheckbox.checked;
   saveRememberEnabled(rememberEnabled);
   invoke('set_remember_enabled', { enabled: rememberEnabled }).catch(() => {});
-  // Developer mode: persist + show/hide the Debug tab immediately.
+  // Developer mode: persist + show/hide the Debug tab immediately. Unchecking
+  // it also drops what -debug implied — an explicit choice outranks the flag,
+  // and otherwise reopening Settings would tick the box straight back on.
   const developerEnabled = settingsDeveloperCheckbox.checked;
+  debugFlagImpliesDeveloper = debugFlagImpliesDeveloper && developerEnabled;
   saveDeveloperMode(developerEnabled);
   applyDeveloperMode(developerEnabled);
   if (rememberEnabled) {
@@ -649,11 +659,24 @@ sessionTabDebugBtn.addEventListener('click', () => switchSessionTab(sessionTabDe
 // Debug tab is active falls back to the Session tab.
 function applyDeveloperMode(on) {
   sessionTabDebugBtn.style.display = on ? '' : 'none';
+  debugRoomBtn.style.display = on ? '' : 'none';
   if (!on && sessionTabDebugBtn.classList.contains('active')) {
     switchSessionTab(sessionTabSessionBtn);
   }
 }
-applyDeveloperMode(getDeveloperMode());
+applyDeveloperMode(developerModeActive());
+
+// Launching with -debug implies developer mode: the flag is the whole opt-in,
+// so making a tester also hunt for a checkbox only costs us diagnostics. The
+// saved preference is deliberately not written — this holds for the session,
+// and relaunching without the flag goes back to whatever they had.
+invoke('is_debug_mode')
+  .then((on) => {
+    if (!on) return;
+    debugFlagImpliesDeveloper = true;
+    applyDeveloperMode(true);
+  })
+  .catch(() => {}); // binding absent: fall back to the saved preference
 
 function resetStatsWindow() {
   statusSnapshots = [];
@@ -753,6 +776,26 @@ joinForm.addEventListener('submit', async (e) => {
     showError(joinError, err);
     joinBtn.disabled = false;
     joinBtn.textContent = 'Join Room';
+  }
+});
+
+// --- Debug room (developer mode only; same arming as the -debug flag) ---
+debugRoomBtn.addEventListener('click', async () => {
+  joinError.style.display = 'none';
+  debugRoomBtn.disabled = true;
+  debugRoomBtn.textContent = 'Connecting...';
+  try {
+    const result = await invoke('debug_room', {
+      displayName: getDisplayName(),
+      linkAudioName: getLinkAudioName(),
+    });
+    showSession(result.room);
+    setupListeners();
+  } catch (err) {
+    showError(joinError, err);
+  } finally {
+    debugRoomBtn.disabled = false;
+    debugRoomBtn.textContent = 'Debug Room';
   }
 });
 

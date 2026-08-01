@@ -49,6 +49,8 @@
         'set_metronome_broadcast': 'main.App.SetMetronomeBroadcast',
         'set_cushion_ms': 'main.App.SetCushionMs',
         'set_grid_align': 'main.App.SetGridAlign',
+        'debug_room': 'main.App.DebugRoom',
+        'is_debug_mode': 'main.App.IsDebugMode',
         'rename_stream': 'main.App.RenameStream',
         'get_app_version': 'main.App.GetAppVersion',
     };
@@ -75,6 +77,7 @@
         'set_metronome_broadcast': ['enabled'],
         'set_cushion_ms': ['ms'],
         'set_grid_align': ['enabled'],
+        'debug_room': ['displayName', 'linkAudioName'],
     };
 
     async function invoke(command, args) {

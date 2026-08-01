@@ -11,7 +11,8 @@ WAIL is a single-language project: two Go modules, `wail-app/` (the desktop app)
 ```
 wail-app/                Go/Wails desktop app: session orchestration, Ableton Link
 │                        + Link Audio, Opus codec, relay client, GUI. Needs cgo.
-├── main.go               Entry point, Wails window setup, CLI flags (headless, --wav)
+├── main.go               Entry point, Wails window setup, CLI flags (headless, --wav,
+│                         --debug: join the debug room with all diagnostics armed)
 ├── app.go                Frontend-callable methods (JoinRoom, Disconnect, SetTestTone, …)
 ├── session.go            Session state machine (goroutine-based select loop)
 ├── signaling.go          WebSocket signaling/relay client + PeerMesh

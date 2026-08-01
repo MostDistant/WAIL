@@ -17,6 +17,13 @@ const (
 	// labelOffsetMinFrames is the minimum frames in an interval before a
 	// verdict is finalized (an interval at any normal tempo has hundreds).
 	labelOffsetMinFrames = 10
+	// labelOffsetPersistIntervals is how many consecutive finalized intervals a
+	// NONZERO delta must hold before it is reported. One odd interval is what a
+	// join transition looks like while the labeler settles, and reporting it
+	// claims a peer plays intervals late when nothing is wrong — indistinguishable
+	// from the real fault it exists to catch. A genuine offset is stuck, so it
+	// survives the wait and is reported one interval later.
+	labelOffsetPersistIntervals = 2
 )
 
 // LabelOffsetTracker accumulates per-interval label deltas for one remote
@@ -28,6 +35,11 @@ type LabelOffsetTracker struct {
 	total    uint64
 	verdict  int64
 	valid    bool
+	// pending is the modal delta awaiting confirmation and pendingCount how
+	// many consecutive finalized intervals have agreed on it — the hold-down
+	// that keeps a join transition from reading as a mislabeled peer.
+	pending      int64
+	pendingCount int
 }
 
 // Add records one frame's label against the current local room index. When the
@@ -43,9 +55,21 @@ func (t *LabelOffsetTracker) Add(roomIdx, frameIdx int64) (int64, bool) {
 	if !t.started || t.countIdx != roomIdx {
 		if t.started && t.total >= labelOffsetMinFrames {
 			v := t.modalDelta()
-			if !t.valid || v != t.verdict {
-				t.verdict, t.valid = v, true
-				changed = true
+			if v == t.pending {
+				t.pendingCount++
+			} else {
+				t.pending, t.pendingCount = v, 1
+			}
+			// Healthy (0) publishes at once — recovery is always safe to report,
+			// and holding it down would leave a stale fault on the books. A
+			// nonzero delta waits for confirmation. Intervals too sparse to
+			// finalize neither confirm nor break a run: they carry no evidence
+			// either way.
+			if v == 0 || t.pendingCount >= labelOffsetPersistIntervals {
+				if !t.valid || v != t.verdict {
+					t.verdict, t.valid = v, true
+					changed = true
+				}
 			}
 		}
 		t.counts = [2*labelOffsetRange + 1]uint64{}

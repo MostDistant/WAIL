@@ -80,11 +80,31 @@ sed -i 's/\binterface\b/iface/g' vendor/link/include/ableton/link_audio/Channels
 For measuring a peer's rhythmic phase offset against the room grid (the
 "GerenM felt 90ms off" class of problem):
 
-- **GUI**: press **Debug Room** on the join screen. It joins the shared
-  `wail-debug` room and arms all diagnostics: the WAIL Metronome broadcast
-  (a grid-rendered reference click), server-echo loopback, and peer log
-  sharing (the room collates everyone's logs into each client).
-- **Headless**: `-metronome-broadcast` (plus `-loopback` for self-echo).
+- **GUI**: turn on **Developer mode** in settings, then press **Debug Room**
+  on the join screen. It joins the shared `wail-debug` room and arms all
+  diagnostics: the WAIL Metronome broadcast (a grid-rendered reference click),
+  server-echo loopback, and peer log sharing (the room collates everyone's
+  logs into each client).
+- **`-debug`**: the same arming from the command line, GUI or headless —
+  `wail-app -debug`. This is the one to hand a tester: it needs no room name
+  and no settings change, and every debug session then carries the same
+  diagnostics, so captures are comparable across machines.
+  - `-debug` **implies developer mode** for that run, so the Debug tab (stream
+    offsets, cushion) is there without talking anyone through a checkbox. The
+    saved preference is left alone — relaunching without the flag restores it —
+    and unticking Developer mode in settings still wins for the session.
+  - Add `-room NAME` for a private debug room instead of the shared one
+    (`wail-app -debug -room debug-geren`) when you don't want testers landing
+    on top of each other's audio.
+  - Collect with `wail-logstore -room wail-debug` (see **Log store** below)
+    while the tester is connected.
+- **Individually**: `-metronome-broadcast`, `-loopback` if you want one
+  diagnostic rather than the set.
+
+> `-debug` and the Debug Room button share the room's log stream, which
+> carries Link Audio channel names — i.e. the tester's DAW track names — to
+> everyone in the room. Both paths say so in the log when they arm. Worth
+> mentioning to testers before pointing them at the shared room.
 - **In-app readout (DAW-less)**: the Debug tab's *Stream offsets* section
   shows each remote stream's measured phase offset vs the room grid in ms
   (`internal/offset`, computed from labeled WAIF frames — exact, no envelope

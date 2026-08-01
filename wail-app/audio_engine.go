@@ -1,6 +1,20 @@
 package main
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// loopbackIdentitySuffix marks the server-echo monitor stream: our own frames
+// round-tripped through the relay and republished under a distinct identity.
+// It is not a room peer, so diagnostics phrased about "a peer" have to say
+// something else about it.
+const loopbackIdentitySuffix = ":loopback"
+
+// isLoopbackIdentity reports whether an emit identity is our own server echo.
+func isLoopbackIdentity(identity string) bool {
+	return strings.HasSuffix(identity, loopbackIdentitySuffix)
+}
 
 // AudioEngine is WAIL's Link Audio audio path (ADR-0001/0002): capture subscribes
 // to local Link Audio channels and ships them as WAIF over the relay; playback

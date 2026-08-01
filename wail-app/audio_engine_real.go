@@ -1045,8 +1045,16 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			if n < 0 {
 				dir, n = "early", -n
 			}
-			log.Printf("[audio] warn: %s stream %d labels intervals off by %+d — their audio plays %d interval(s) %s",
-				fromIdentity, f.StreamID, verdict, n, dir)
+			if isLoopbackIdentity(fromIdentity) {
+				// Self-echo: "the peer" is this machine, so there is nobody to
+				// chase — it is our own capture labels against our own room
+				// clock, which is a labeler fault, not a remote one.
+				log.Printf("[audio] warn: server-echo loopback stream %d labels intervals off by %+d — our own capture labels disagree with our room clock by %d interval(s)",
+					f.StreamID, verdict, n)
+			} else {
+				log.Printf("[audio] warn: %s stream %d labels intervals off by %+d — their audio plays %d interval(s) %s",
+					fromIdentity, f.StreamID, verdict, n, dir)
+			}
 		}
 	}
 
