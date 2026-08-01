@@ -46,16 +46,22 @@ func (a *Adaptive) Playing() (int64, bool) { return a.playing, a.hasPlaying }
 // Skipped returns how many rounds freshest-wins has skipped at the speakers.
 func (a *Adaptive) Skipped() uint64 { return a.skipped }
 
-// OnFrame decides what to do with a decoded frame for round idx. Semantics
-// match Scheduler.OnFrame: future rounds buffer, the playing round
-// live-appends, finished rounds are too late (for the speakers — the recorder
-// already has them).
+// OnFrame decides what to do with a decoded frame for round idx: future
+// rounds buffer, the playing round live-appends, finished rounds are too late
+// (for the speakers — the recorder already has them). A round far below the
+// playing one is not a straggler but a sender restart (their indices reset
+// near zero): it buffers, so OnBoundary's re-pin has something to re-pin to —
+// without this the restarted sender's audio would be dropped at the door and
+// the re-pin path could never fire.
 func (a *Adaptive) OnFrame(idx int64) Disposition {
 	if !a.hasPlaying || idx > a.playing {
 		return Buffer
 	}
 	if idx == a.playing {
 		return LiveAppend
+	}
+	if idx <= a.playing-restartGap {
+		return Buffer
 	}
 	return TooLate
 }
@@ -81,7 +87,13 @@ func (a *Adaptive) OnBoundary(boundary int64, buffered []RoundState) (release in
 	}
 	// Sender restart: nothing above the playing round, but data far below it.
 	// The indices reset (the sender's app restarted mid-session); re-pin to the
-	// new sequence instead of reading it as too-late forever.
+	// new sequence instead of reading it as too-late forever. Everything left
+	// from the old era — including the previously-playing round's buffer — is
+	// reported as skipped so the caller drops it: an old-era index is numerically
+	// ABOVE the re-pinned cursor and would otherwise win freshest-wins next
+	// boundary, yanking playback back to the dead sequence (and its buffer
+	// would block retirement forever).
+	repin := false
 	if len(cands) == 0 && a.hasPlaying {
 		for _, r := range buffered {
 			if r.Index <= a.playing-restartGap {
@@ -91,6 +103,7 @@ func (a *Adaptive) OnBoundary(boundary int64, buffered []RoundState) (release in
 		if len(cands) == 0 {
 			return a.playing, nil, false
 		}
+		repin = true
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].Index < cands[j].Index })
 
@@ -105,6 +118,13 @@ func (a *Adaptive) OnBoundary(boundary int64, buffered []RoundState) (release in
 	}
 	for _, r := range cands[:chosen] {
 		skipped = append(skipped, r.Index)
+	}
+	if repin {
+		for _, r := range buffered {
+			if r.Index > cands[chosen].Index {
+				skipped = append(skipped, r.Index)
+			}
+		}
 	}
 	a.skipped += uint64(len(skipped))
 	a.playing, a.hasPlaying = cands[chosen].Index, true

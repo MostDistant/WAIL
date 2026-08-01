@@ -339,7 +339,6 @@ type emitStream struct {
 	sinkUnderrunFrames  atomic.Uint64 // frames skipped (played as silence) due to underrun
 	framesMissedAtPlay  atomic.Uint64 // frames still absent when their interval retired
 	framesTooLate       atomic.Uint64 // frames dropped: their round already finished at the speakers
-	gapLogs             uint64        // buffered-ahead warn count (emit-loop-owned, rate limit)
 	framesConcealed     atomic.Uint64 // missing frames masked by Opus PLC
 	sinkWriteRejected   atomic.Uint64 // sink refused a chunk mid-stream (queue full / listener left)
 }
@@ -1448,6 +1447,18 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 			}
 		}
 		sr.dropFirstSeenThrough(idx)
+		// Skipped rounds ABOVE the release are a sender-restart's old era:
+		// numerically ahead of the re-pinned cursor, so Drop(idx-1) cannot
+		// clear them — and left buffered they would win freshest-wins next
+		// boundary and block retirement forever. Take them out explicitly.
+		for _, ri := range skipped {
+			if ri > idx {
+				delete(sr.firstSeen, ri)
+				for _, st := range streams {
+					st.reasm.Take(ri)
+				}
+			}
+		}
 
 		for _, st := range streams {
 			// Retire the round that just finished playing. Live-append had its

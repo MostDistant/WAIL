@@ -126,14 +126,35 @@ func TestAdaptiveNonMonotonicBoundaryIsIgnored(t *testing.T) {
 func TestAdaptiveSenderRestartRepins(t *testing.T) {
 	a := &Adaptive{}
 	a.OnBoundary(11, []RoundState{cand(500, true, 10)})
-	// The sender's app restarted: its indices reset near zero. Far-below
-	// candidates would read as TooLate forever without a reset rule.
-	release, _, adv := a.OnBoundary(13, []RoundState{cand(3, true, 12)})
+
+	// The sender's app restarted: its indices reset near zero. The frames must
+	// BUFFER (they are a new era, not stragglers) — this is the real ingress
+	// path, and without it the re-pin below could never see any candidates.
+	if d := a.OnFrame(3); d != Buffer {
+		t.Fatalf("restart-era frame = %v, want buffer", d)
+	}
+	// A genuine straggler, just behind the cursor, still drops.
+	if d := a.OnFrame(499); d != TooLate {
+		t.Fatalf("straggler = %v, want too-late", d)
+	}
+
+	// At the boundary, the old era — including the previously-playing round's
+	// leftover buffer at 500 — is skipped, or it would win freshest-wins next
+	// boundary (500 > 3) and yank playback back to the dead sequence.
+	release, skipped, adv := a.OnBoundary(13, []RoundState{cand(3, true, 12), cand(500, true, 10)})
 	if !adv || release != 3 {
 		t.Fatalf("post-restart → (%d,%v), want (3,true)", release, adv)
 	}
+	if len(skipped) != 1 || skipped[0] != 500 {
+		t.Fatalf("skipped = %v, want [500] (the old era must be dropped by the caller)", skipped)
+	}
 	if d := a.OnFrame(3); d != LiveAppend {
 		t.Fatalf("frame for re-pinned round = %v, want live-append", d)
+	}
+	// With the old era gone, the new sequence advances normally.
+	release, skipped, adv = a.OnBoundary(14, []RoundState{cand(3, true, 12), cand(4, true, 13)})
+	if !adv || release != 4 || len(skipped) != 0 {
+		t.Fatalf("post-repin advance → (%d,%v,skip=%v), want (4,true,none)", release, adv, skipped)
 	}
 }
 

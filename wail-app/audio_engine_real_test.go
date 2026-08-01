@@ -659,3 +659,45 @@ func TestGridJumpDetectionIsRobustToStallsAndTempoMismatch(t *testing.T) {
 		t.Fatal("test premise wrong: judging against the room tempo should have misfired here")
 	}
 }
+
+// A sender restart mid-session resets their round indices near zero. The
+// engine must keep playing them: restart frames buffer (not too-late), the
+// cursor re-pins at the next boundary, and the old era's leftover buffers are
+// taken out — left in place they would win freshest-wins (500 > 3) and yank
+// playback back to the dead sequence, and their presence would block
+// retirement forever. This drives the REAL ingress path end to end; the
+// scheduler-level rule alone was once green while the engine dropped every
+// restart frame at the door.
+func TestSenderRestartResumesPlayback(t *testing.T) {
+	le := newCaptureTestEngine(t)
+
+	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 500)
+	le.onBoundary(le.cfg, 120, 10) // round 500 releases (complete → immediate)
+
+	// The app restarts; its first interval arrives stamped 3.
+	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 3)
+	st := le.emit[affinity.Key{Identity: "id-A", Stream: 0}]
+	if st == nil {
+		t.Fatal("stream not published")
+	}
+	if !st.reasm.Has(3) {
+		t.Fatal("restart-era frames were dropped at the door instead of buffered")
+	}
+
+	le.onBoundary(le.cfg, 120, 11) // re-pins to the new era
+	sr := le.roundsLocked("id-A")
+	if playing, ok := sr.adaptive.Playing(); !ok || playing != 3 {
+		t.Fatalf("playing = (%d,%v), want (3,true) after the re-pin", playing, ok)
+	}
+	if st.reasm.Has(500) {
+		t.Fatal("old-era buffer at 500 survived the re-pin — it would win freshest-wins next boundary")
+	}
+
+	// And with the old era gone, the stream can retire once idle + drained.
+	le.SetPeerStreams("id-A", map[uint16]bool{})
+	st.reasm.Drop(3)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	if hasStream(le, "id-A", 0) {
+		t.Fatal("stream still published — old-era leftovers blocked retirement")
+	}
+}
