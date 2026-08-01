@@ -69,10 +69,45 @@ type LinkState struct {
 	NumPeers    uint64
 }
 
+// tempoDetectorConfig is the detector's tuning, split out from the constants so
+// a simulation can sweep it (ADR-0008: these are measured, not chosen — and the
+// pre-#499 bar has to stay reachable, since reproducing the wobble bug is how
+// the simulation proves it models reality). Zero fields take the package
+// default, so production constructs it empty and behaves exactly as before.
+type tempoDetectorConfig struct {
+	reportThreshold float64
+	steadyBand      float64
+	integerSnap     float64
+	holdDown        time.Duration
+	// noIntegerSnap turns the snap off outright, which a zero integerSnap
+	// cannot express (zero means "use the default"). Only the pre-#499 replay
+	// needs it: the snap and the raised bar shipped together.
+	noIntegerSnap bool
+}
+
+func (c tempoDetectorConfig) withDefaults() tempoDetectorConfig {
+	if c.reportThreshold <= 0 {
+		c.reportThreshold = tempoReportThreshold
+	}
+	if c.steadyBand <= 0 {
+		c.steadyBand = tempoSteadyBand
+	}
+	if c.noIntegerSnap {
+		c.integerSnap = 0
+	} else if c.integerSnap <= 0 {
+		c.integerSnap = tempoIntegerSnap
+	}
+	if c.holdDown <= 0 {
+		c.holdDown = tempoHoldDown
+	}
+	return c
+}
+
 // TempoChangeDetector is a pure-logic tempo change detector with echo guard
 // and hold-down. Extracted so it can be tested without the Link C FFI.
 type TempoChangeDetector struct {
 	mu             sync.Mutex
+	cfg            tempoDetectorConfig
 	lastTempo      float64
 	echoGuardUntil *time.Time
 	// Hold-down state: a changed reading is a candidate until it holds
@@ -84,7 +119,13 @@ type TempoChangeDetector struct {
 
 // NewTempoChangeDetector creates a new detector with the given initial tempo.
 func NewTempoChangeDetector(initialTempo float64) *TempoChangeDetector {
-	return &TempoChangeDetector{lastTempo: initialTempo}
+	return newTunedTempoChangeDetector(initialTempo, tempoDetectorConfig{})
+}
+
+// newTunedTempoChangeDetector creates a detector with non-default tuning, for
+// simulations that sweep the thresholds.
+func newTunedTempoChangeDetector(initialTempo float64, cfg tempoDetectorConfig) *TempoChangeDetector {
+	return &TempoChangeDetector{lastTempo: initialTempo, cfg: cfg.withDefaults()}
 }
 
 // ArmEchoGuard sets the echo guard expiry (called after applying a remote tempo change).
@@ -113,33 +154,33 @@ func (d *TempoChangeDetector) Check(bpm float64, now time.Time) (float64, bool) 
 		d.echoGuardUntil = nil
 	}
 
-	if math.Abs(bpm-d.lastTempo) <= tempoReportThreshold {
+	if math.Abs(bpm-d.lastTempo) <= d.cfg.reportThreshold {
 		// Within the noise band of the reported tempo: not a change.
 		d.hasCandidate = false
 		return 0, false
 	}
 
 	// Hold-down: the reading is a candidate until it holds for tempoHoldDown.
-	if !d.hasCandidate || math.Abs(bpm-d.candidate) > tempoSteadyBand {
+	if !d.hasCandidate || math.Abs(bpm-d.candidate) > d.cfg.steadyBand {
 		d.candidate = bpm
 		d.candidateSince = now
 		d.hasCandidate = true
 		return 0, false
 	}
-	if now.Sub(d.candidateSince) < tempoHoldDown {
+	if now.Sub(d.candidateSince) < d.cfg.holdDown {
 		return 0, false
 	}
-	reported := snapToIntegerTempo(bpm)
+	reported := snapToIntegerTempo(bpm, d.cfg.integerSnap)
 	d.lastTempo = reported
 	d.hasCandidate = false
 	return reported, true
 }
 
 // snapToIntegerTempo rounds a tempo onto a whole number when it is within
-// tempoIntegerSnap of one — recovering the value a human typed from the value
-// Link reported. Anything further out is left exactly as observed.
-func snapToIntegerTempo(bpm float64) float64 {
-	if r := math.Round(bpm); math.Abs(bpm-r) <= tempoIntegerSnap && r > 0 {
+// radius of one — recovering the value a human typed from the value Link
+// reported. Anything further out is left exactly as observed.
+func snapToIntegerTempo(bpm, radius float64) float64 {
+	if r := math.Round(bpm); math.Abs(bpm-r) <= radius && r > 0 {
 		return r
 	}
 	return bpm

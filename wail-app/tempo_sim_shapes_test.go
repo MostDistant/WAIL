@@ -1,0 +1,332 @@
+package main
+
+// The jitter shapes the tempo simulation replays (ADR-0008). Every one is a
+// disturbance this repo has actually observed in the field or in a bug report;
+// the citation on each is where the evidence lives. They move the session tempo
+// or the local grid the way a DAW, a LAN Link peer or a WAN path would — never
+// through WAIL's own write path, so WAIL has to discover them by observation
+// exactly as it does in production.
+
+import (
+	"fmt"
+	"math"
+	"testing"
+	"time"
+)
+
+// --- injectors -------------------------------------------------------------
+
+// afterStep runs f from step `at` onward, and nothing before.
+func afterStep(at int, f func(p *simPeer, step int)) func(*simPeer, int) {
+	return func(p *simPeer, step int) {
+		if step >= at {
+			f(p, step)
+		}
+	}
+}
+
+func stepsIn(d time.Duration) int { return int(d.Microseconds() / simStepUs) }
+
+// convergenceNudge: a Link session merge drags the tempo ±2% for a handful of
+// polls, then it settles back (link_types.go:36 — the reason the hold-down
+// exists at all). Fires once a minute so several land in a run.
+func convergenceNudge(magnitude float64) func(*simPeer, int) {
+	const every, width = 3000, 5 // 60s apart, 100ms wide
+	var restore float64
+	return func(p *simPeer, step int) {
+		switch phase := step % every; {
+		case phase == 0:
+			restore = p.link.bpm
+			p.link.disturb(restore * (1 + magnitude))
+		case phase == width:
+			p.link.disturb(restore)
+		}
+	}
+}
+
+// insistentLAN: a non-WAIL Link peer on this LAN holds its own tempo and drags
+// the session back toward it every poll (tradeoffs.md:249 — the 120↔122 flap
+// between two insistent LANs). Rate is Link's convergence, not a step.
+func insistentLAN(want, rate float64) func(*simPeer, int) {
+	return func(p *simPeer, _ int) {
+		p.link.disturb(p.link.bpm + (want-p.link.bpm)*rate)
+	}
+}
+
+// wobble: the reported field bug — a clock wandering between two values around
+// one intended tempo, dwelling `dwell` at each (ADR-0008, 2026-07-31).
+func wobble(low, high float64, dwell time.Duration) func(*simPeer, int) {
+	half := stepsIn(dwell)
+	return func(p *simPeer, step int) {
+		if half <= 0 {
+			return
+		}
+		if (step/half)%2 == 0 {
+			p.link.disturb(high)
+		} else {
+			p.link.disturb(low)
+		}
+	}
+}
+
+// knobTurn: one deliberate change, held forever after — a human's hand, not a
+// disturbance. Nothing re-asserts it, so anything that moves it away wins.
+func knobTurn(at int, to float64) func(*simPeer, int) {
+	fired := false
+	return func(p *simPeer, step int) {
+		if step == at && !fired {
+			fired = true
+			p.link.disturb(to)
+		}
+	}
+}
+
+// insistentDAW: automation or an external clock re-asserting its tempo after
+// every correction. Enforcement must yield to this rather than fight forever
+// (the #424 two-enforcer lesson, ADR-0008 Consequences).
+func insistentDAW(at int, want float64) func(*simPeer, int) {
+	return afterStep(at, func(p *simPeer, _ int) { p.link.disturb(want) })
+}
+
+// gridShove: the local timeline moves without a tempo change — a post-re-anchor
+// aftershock (ADR-0006's 2026-07-25 amendment) or a transport relocate.
+func gridShove(at int, ms float64) func(*simPeer, int) {
+	return func(p *simPeer, step int) {
+		if step == at {
+			p.link.jumpBeats(ms / 1000 * p.link.bpm / 60)
+		}
+	}
+}
+
+// vpnTeleport: a jittery WAN path where an occasional low-RTT sample carries a
+// badly skewed one-way split, so min-RTT re-selection teleports the offset
+// estimate (grid.go:94 — the 2026-07-26 Australia session, ±70ms).
+func vpnTeleport(period int, biasUs int64) func(*simPeer, int) {
+	return func(p *simPeer, step int) {
+		if step%period == 0 {
+			// A "new best" RTT whose split is wrong by biasUs either way.
+			p.upUs, p.downUs = 40_000+biasUs, 40_000-biasUs
+		} else if step%period == simPingEvery {
+			p.upUs, p.downUs = 60_000, 60_000 // honest, higher-RTT samples
+		}
+	}
+}
+
+// --- the scenario table ----------------------------------------------------
+
+const simRun = 10 * time.Minute
+
+func shapeScenarios() []simConfig {
+	oneMin := stepsIn(time.Minute)
+	return []simConfig{
+		{
+			name: "0-quiet-room",
+			peers: []simPeerSpec{
+				{name: "A", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+		{
+			name: "1-link-convergence",
+			peers: []simPeerSpec{
+				{name: "A", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: convergenceNudge(0.02)},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+		{
+			name: "2-adoption-oscillator",
+			peers: []simPeerSpec{
+				{name: "A@120", beat0: 3.7, bpm: 120, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000},
+				{name: "B@110", beat0: 100.4, bpm: 110, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+		{
+			name: "3-two-insistent-LANs",
+			peers: []simPeerSpec{
+				{name: "A-LAN120", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: afterStep(oneMin, insistentLAN(120, 0.02))},
+				{name: "B-LAN122", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000,
+					disturb: afterStep(oneMin, insistentLAN(122, 0.02))},
+			},
+		},
+		{
+			name: "4-vpn-teleport",
+			peers: []simPeerSpec{
+				{name: "A", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 60_000, downUs: 60_000,
+					disturb: vpnTeleport(500, 70_000)},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+		{
+			name: "5-crystal-drift-50ppm",
+			peers: []simPeerSpec{
+				{name: "A+50ppm", beat0: 3.7, ppm: 50, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000},
+				{name: "B-50ppm", beat0: 100.4, ppm: -50, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+		{
+			name: "6-aftershock-47ms",
+			peers: []simPeerSpec{
+				{name: "A", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: gridShove(2*oneMin, 47)},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+		{
+			// (up−down)/2 = −12ms, so the offset estimate is biased by −12ms and
+			// the peer sees a standing δ that is not physically there.
+			name: "7-rtt-bias-12ms",
+			peers: []simPeerSpec{
+				{name: "A-biased", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 13_000, downUs: 37_000},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+		{
+			name: "8-wobble-119.9-120",
+			peers: []simPeerSpec{
+				{name: "A-wobble", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: afterStep(oneMin, wobble(119.9, 120.0, 2*time.Second))},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+		{
+			name: "9-insistent-DAW-121.5",
+			peers: []simPeerSpec{
+				{name: "A-DAW", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: insistentDAW(oneMin, 121.5)},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+	}
+}
+
+// TestTempoSimCharacterise runs every shape and prints the table the ADR-0008
+// thresholds are set from. It asserts nothing: the point is to measure what
+// today's code does before changing it. The two assertions that DO gate this
+// work live in TestTempoSimFidelityGate below.
+func TestTempoSimCharacterise(t *testing.T) {
+	t.Logf("%-24s %-10s %8s %8s %8s %7s %6s %6s %9s %8s",
+		"scenario", "peer", "maxδms", "p95δms", "meanδms", "drift%", "rprts", "wrts", "maxfrac", "endBPM")
+	for _, cfg := range shapeScenarios() {
+		cfg.duration = simRun
+		res := runSim(cfg)
+		for _, pr := range res.peers {
+			t.Logf("%-24s %-10s %8.1f %8.1f %8.1f %7.1f %6d %6d %9.6f %8.3f",
+				res.name, pr.name, pr.maxAbsDeltaMs, pr.p95AbsDeltaMs, pr.meanAbsDeltaMs,
+				pr.timeDriftedPct, pr.reports, pr.steerWrites, pr.maxSteerFraction, pr.endBPM)
+		}
+		t.Logf("%-24s %-10s re-anchors=%d roomΔ=%.3f roomEnd=%.3f heardSkewMax=%.1fms",
+			"", "", res.tempos, res.roomExcursionBPM, res.roomEndBPM, res.heardSkewMaxMs)
+	}
+}
+
+// TestTempoSimFidelityGate is the check that makes every other number in this
+// file worth reading: the harness must reproduce the two failures we already
+// know today's code has. A model that cannot show us a bug we have seen in the
+// field cannot be trusted to tell us a threshold is right.
+//
+// Both assertions stay after ADR-0008 lands, inverted — the wobble stops
+// reporting, and the deliberate nudge survives instead of being reverted.
+func TestTempoSimFidelityGate(t *testing.T) {
+	oneMin := stepsIn(time.Minute)
+
+	// 1. The reported field bug, at the threshold regime that produced it: a
+	//    peer wobbling 119.9↔120 broadcasts its excursions as tempo changes and
+	//    drags the whole room with it. #499 suppressed this by raising the bar
+	//    0.01 → 0.25, which is why the regime has to be named explicitly — the
+	//    bar it created is also the top of the dead band in case 2, so the two
+	//    failures below are the same fix pulling in opposite directions.
+	t.Run("wobble drags the room at the pre-499 bar", func(t *testing.T) {
+		res := runSim(simConfig{
+			name: "gate-wobble", duration: 5 * time.Minute,
+			peers: []simPeerSpec{
+				{name: "A-wobble", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					detector: tempoDetectorConfig{reportThreshold: 0.01, noIntegerSnap: true},
+					disturb:  afterStep(oneMin, wobble(119.9, 120.0, 2*time.Second))},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		})
+		t.Logf("reports=%d roomΔ=%.3f roomEnd=%.3f", res.peers[0].reports, res.roomExcursionBPM, res.roomEndBPM)
+		if res.peers[0].reports == 0 {
+			t.Errorf("harness does not reproduce the wobble bug: 0 tempo reports from a wobbling peer")
+		}
+		if res.roomExcursionBPM == 0 {
+			t.Errorf("harness does not reproduce the wobble bug: the room tempo never moved")
+		}
+	})
+
+	// 1b. …and today's bar suppresses it. Pins what #499 actually bought, so a
+	//     later threshold change cannot quietly give it back.
+	t.Run("today's bar suppresses the wobble", func(t *testing.T) {
+		res := runSim(simConfig{
+			name: "gate-wobble-today", duration: 5 * time.Minute,
+			peers: []simPeerSpec{
+				{name: "A-wobble", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: afterStep(oneMin, wobble(119.9, 120.0, 2*time.Second))},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		})
+		t.Logf("reports=%d roomΔ=%.3f", res.peers[0].reports, res.roomExcursionBPM)
+		if res.peers[0].reports != 0 || res.roomExcursionBPM != 0 {
+			t.Errorf("the 0.25 bar should hold the wobble: reports=%d roomΔ=%.3f",
+				res.peers[0].reports, res.roomExcursionBPM)
+		}
+	})
+
+	// 2. The dead band between the slew's authority (0.06 BPM at 120) and the
+	//    reporting bar (0.25): a deliberate 120→120.2 is never told to the room,
+	//    and the slew — whose target is derived from the ROOM tempo — writes
+	//    over it. The user's change disappears silently.
+	t.Run("deliberate nudge is silently reverted", func(t *testing.T) {
+		res := runSim(simConfig{
+			name: "gate-nudge", duration: 5 * time.Minute,
+			peers: []simPeerSpec{
+				{name: "A-nudge", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: knobTurn(oneMin, 120.2)},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		})
+		got := res.peers[0].endBPM
+		t.Logf("reports=%d endBPM=%.4f steerWrites=%d maxSteerFraction=%.6f",
+			res.peers[0].reports, got, res.peers[0].steerWrites, res.peers[0].maxSteerFraction)
+		if res.peers[0].reports != 0 {
+			t.Errorf("expected the 0.2 BPM nudge to fall below the reporting bar, got %d reports", res.peers[0].reports)
+		}
+		// Reverted means it ended nearer the room tempo than the user's value.
+		if math.Abs(got-120.2) < math.Abs(got-120.0) {
+			t.Errorf("harness does not reproduce the silent revert: session held %.4f, near the user's 120.2", got)
+		}
+	})
+}
+
+// TestTempoSimWobbleSweep maps where today's protection actually holds, over
+// both axes of a wobble: how far it swings and how long it dwells at each
+// extreme. Amplitude has to vary — a sweep at 0.1 alone measures nothing,
+// because tempoIntegerSnap pulls 119.9 back onto 120 at every dwell, so the
+// curve is flat for a reason that has nothing to do with dwell.
+//
+// The two columns to read together: `reports` is what leaks into the room, and
+// `maxfrac` is the largest single tempo write, against the 0.0005 (0.86 cent)
+// bound the slew cap is supposed to guarantee. A shape can be silent to the
+// room and still be audible locally.
+func TestTempoSimWobbleSweep(t *testing.T) {
+	oneMin := stepsIn(time.Minute)
+	t.Logf("%-6s %-8s %8s %8s %10s %8s", "amp", "dwell", "reports", "roomΔ", "maxfrac", "endBPM")
+	for _, amp := range []float64{0.1, 0.15, 0.3, 0.5, 1.0} {
+		for _, dwell := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second} {
+			res := runSim(simConfig{
+				name:     fmt.Sprintf("wobble-%.2f-%s", amp, dwell),
+				duration: 5 * time.Minute,
+				peers: []simPeerSpec{
+					{name: "A-wobble", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+						disturb: afterStep(oneMin, wobble(120-amp, 120.0, dwell))},
+					{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+				},
+			})
+			t.Logf("%-6.2f %-8s %8d %8.3f %10.6f %8.3f",
+				amp, dwell, res.peers[0].reports, res.roomExcursionBPM,
+				res.peers[0].maxSteerFraction, res.peers[0].endBPM)
+		}
+	}
+}
