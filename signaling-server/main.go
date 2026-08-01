@@ -49,6 +49,7 @@ const (
 	baseTextBurst     = 200.0  // max tokens
 	rateLimitWarnMax  = 50     // violations before disconnect
 	maxStreamsPerPeer = 16     // cap stream_count for rate-limit scaling
+	roomCapacity      = 32     // max summed stream slots per room
 )
 
 // ---------------------------------------------------------------------------
@@ -127,6 +128,20 @@ type tokenBucket struct {
 
 func newTokenBucket(rate, burst float64) tokenBucket {
 	return tokenBucket{tokens: burst, maxTokens: burst, refillRate: rate, lastRefill: time.Now()}
+}
+
+// rescale changes the refill rate and burst in place, preserving the current
+// token level (clamped to the new max) so a stream-count update can never
+// mint free capacity.
+func (b *tokenBucket) rescale(rate, burst float64) {
+	now := time.Now()
+	b.tokens += now.Sub(b.lastRefill).Seconds() * b.refillRate
+	b.lastRefill = now
+	b.refillRate = rate
+	b.maxTokens = burst
+	if b.tokens > b.maxTokens {
+		b.tokens = b.maxTokens
+	}
 }
 
 func (b *tokenBucket) allow() bool {
@@ -551,7 +566,6 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 		}
 	}
 
-	const roomCapacity = 32
 	var usedSlots int
 	h.db.QueryRow("SELECT COALESCE(SUM(stream_count), 0) FROM peers WHERE room = ?", roomName).Scan(&usedSlots)
 	if usedSlots+streamCount > roomCapacity {
@@ -657,6 +671,52 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 		c.sendJSON(am)
 	}
 	return roomName, peerID, streamCount
+}
+
+// updateStreams lets a joined peer redeclare its stream count mid-session
+// (streams can be opened/closed at any time, but join only sizes the rate
+// limit once). Returns the new effective count when it changed — the caller
+// (readPump) then rescales the binary token bucket — or 0 when the count was
+// unchanged or the update was rejected. room/peerID are readPump's cached
+// locals, never c.room/c.peerID (eviction races).
+func (h *hub) updateStreams(room, peerID string, c *conn, msg clientMsg) int {
+	if room == "" {
+		return 0
+	}
+	streamCount := msg.StreamCount
+	if streamCount < 1 {
+		streamCount = 1
+	}
+	if streamCount > maxStreamsPerPeer {
+		streamCount = maxStreamsPerPeer
+	}
+	// c.streamCount is only ever touched by this conn's readPump goroutine
+	// (join and here), so no lock is needed.
+	old := c.streamCount
+	if streamCount == old {
+		c.sendJSON(map[string]any{"type": "update_streams_ok", "stream_count": streamCount})
+		return 0
+	}
+
+	// Room capacity is accounted in stream slots (same as join): the peer may
+	// grow only into the slots not used by others. Shrinking always fits.
+	var usedSlots int
+	h.db.QueryRow("SELECT COALESCE(SUM(stream_count), 0) FROM peers WHERE room = ?", room).Scan(&usedSlots)
+	if usedSlots-old+streamCount > roomCapacity {
+		log.Printf("peer %s stream_count update %d -> %d rejected: room %s full (%d/%d slots)",
+			peerID, old, streamCount, room, usedSlots, roomCapacity)
+		c.sendJSON(map[string]any{
+			"type": "update_streams_error", "code": "room_full",
+			"slots_available": roomCapacity - (usedSlots - old),
+		})
+		return 0
+	}
+
+	h.db.Exec("UPDATE peers SET stream_count = ? WHERE room = ? AND peer_id = ?", streamCount, room, peerID)
+	c.streamCount = streamCount
+	log.Printf("peer %s in room %s updated stream_count %d -> %d", peerID, room, old, streamCount)
+	c.sendJSON(map[string]any{"type": "update_streams_ok", "stream_count": streamCount})
+	return streamCount
 }
 
 func (h *hub) signal(room, peerID string, c *conn, msg clientMsg) {
@@ -1071,6 +1131,16 @@ func (c *conn) readPump(h *hub) {
 			if room != "" {
 				loopback = msg.Enabled
 				log.Printf("peer %s loopback=%v in room %s", peerID, loopback, room)
+			}
+		case "update_streams":
+			// A peer that opens/closes streams mid-session redeclares its count;
+			// rescale the binary bucket in place (preserving tokens) and reset
+			// the violation counter — violations accumulated while honestly
+			// under-declared were the relay's undersized bucket, not abuse.
+			if sc := h.updateStreams(room, peerID, c, msg); sc > 0 && binaryBucket != nil {
+				binaryBucket.rescale(baseBinaryRate*float64(sc), baseBinaryBurst*float64(sc))
+				violations = 0
+				warned = false
 			}
 		}
 	}

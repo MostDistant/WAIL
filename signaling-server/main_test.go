@@ -604,3 +604,194 @@ func TestJoinUpgradesLegacyHash(t *testing.T) {
 		t.Fatalf("join failed after upgrade: %v", resp)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// update_streams
+// ---------------------------------------------------------------------------
+
+func TestTokenBucketRescale(t *testing.T) {
+	// Grow: rate and burst increase, existing tokens are preserved.
+	b := newTokenBucket(100, 2500)
+	b.refillRate = 0 // freeze refill for determinism
+	for i := 0; i < 2000; i++ {
+		b.allow()
+	}
+	b.rescale(400, 10000)
+	if b.tokens != 500 {
+		t.Fatalf("expected 500 tokens preserved after grow, got %v", b.tokens)
+	}
+	if b.maxTokens != 10000 || b.refillRate != 400 {
+		t.Fatalf("rescale did not apply new rate/burst: %+v", b)
+	}
+
+	// Shrink: tokens above the new max are clamped, none minted.
+	b.rescale(50, 300)
+	if b.tokens != 300 {
+		t.Fatalf("expected tokens clamped to 300 after shrink, got %v", b.tokens)
+	}
+
+	// An empty bucket stays empty — a rescale must never mint free capacity.
+	b2 := newTokenBucket(100, 2500)
+	b2.refillRate = 0
+	for i := 0; i < 2500; i++ {
+		b2.allow()
+	}
+	b2.rescale(1600, 40000)
+	if b2.tokens != 0 {
+		t.Fatalf("expected 0 tokens after rescale of empty bucket, got %v", b2.tokens)
+	}
+}
+
+// joinDirect joins a conn straight through the hub (no websocket) and returns
+// the connection for inspection.
+func joinDirect(t *testing.T, h *hub, room, peerID string, streamCount int) *conn {
+	t.Helper()
+	c := &conn{send: make(chan wsMessage, 16)}
+	gotRoom, gotPeer, gotSC := h.join(c, clientMsg{
+		Type: "join", Room: room, PeerID: peerID,
+		StreamCount: streamCount, ClientVersion: "99.0.0",
+	})
+	if gotRoom == "" {
+		t.Fatalf("join failed for %s", peerID)
+	}
+	if gotPeer != peerID || gotSC != streamCount {
+		t.Fatalf("join returned (%s, %d), want (%s, %d)", gotPeer, gotSC, peerID, streamCount)
+	}
+	return c
+}
+
+func dbStreamCount(t *testing.T, h *hub, room, peerID string) int {
+	t.Helper()
+	var n int
+	if err := h.db.QueryRow("SELECT stream_count FROM peers WHERE room = ? AND peer_id = ?", room, peerID).
+		Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func drainJSON(t *testing.T, c *conn) map[string]any {
+	t.Helper()
+	select {
+	case m := <-c.send:
+		var v map[string]any
+		if err := json.Unmarshal(m.data, &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	case <-time.After(time.Second):
+		t.Fatal("no message on conn send channel")
+		return nil
+	}
+}
+
+func TestUpdateStreams(t *testing.T) {
+	h := newHub(testDB(t))
+	c := joinDirect(t, h, "room", "A", 1)
+	drainJSON(t, c) // join_ok
+
+	if got := h.updateStreams("room", "A", c, clientMsg{StreamCount: 4}); got != 4 {
+		t.Fatalf("updateStreams returned %d, want 4", got)
+	}
+	if n := dbStreamCount(t, h, "room", "A"); n != 4 {
+		t.Fatalf("DB stream_count = %d, want 4", n)
+	}
+	if c.streamCount != 4 {
+		t.Fatalf("conn streamCount = %d, want 4", c.streamCount)
+	}
+	msg := drainJSON(t, c)
+	if msg["type"] != "update_streams_ok" || msg["stream_count"] != float64(4) {
+		t.Fatalf("expected update_streams_ok(4), got %v", msg)
+	}
+}
+
+func TestUpdateStreamsRoomFull(t *testing.T) {
+	h := newHub(testDB(t))
+	// Fill the room to capacity: 16 + 15 = 31 slots, then A joins with 1 → 32.
+	joinDirect(t, h, "room", "B", 16)
+	joinDirect(t, h, "room", "C", 15)
+	cA := joinDirect(t, h, "room", "A", 1)
+	drainJSON(t, cA) // join_ok
+
+	if got := h.updateStreams("room", "A", cA, clientMsg{StreamCount: 4}); got != 0 {
+		t.Fatalf("updateStreams returned %d, want 0 (rejected)", got)
+	}
+	if n := dbStreamCount(t, h, "room", "A"); n != 1 {
+		t.Fatalf("DB stream_count = %d, want unchanged 1", n)
+	}
+	msg := drainJSON(t, cA)
+	if msg["type"] != "update_streams_error" || msg["code"] != "room_full" {
+		t.Fatalf("expected update_streams_error(room_full), got %v", msg)
+	}
+	if msg["slots_available"] != float64(1) {
+		t.Fatalf("expected slots_available 1, got %v", msg["slots_available"])
+	}
+
+	// Shrinking always fits, even in a full room.
+	if got := h.updateStreams("room", "B", mustConn(t, h, "room", "B"), clientMsg{StreamCount: 10}); got != 10 {
+		t.Fatalf("shrink returned %d, want 10", got)
+	}
+}
+
+func mustConn(t *testing.T, h *hub, room, peerID string) *conn {
+	t.Helper()
+	r := h.getRoom(room)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.connMap[peerID]
+	if !ok {
+		t.Fatalf("peer %s not in room %s", peerID, room)
+	}
+	return c
+}
+
+func TestUpdateStreamsClamped(t *testing.T) {
+	h := newHub(testDB(t))
+	c := joinDirect(t, h, "room", "A", 1)
+	drainJSON(t, c) // join_ok
+
+	if got := h.updateStreams("room", "A", c, clientMsg{StreamCount: 100}); got != maxStreamsPerPeer {
+		t.Fatalf("updateStreams returned %d, want clamped %d", got, maxStreamsPerPeer)
+	}
+	if n := dbStreamCount(t, h, "room", "A"); n != maxStreamsPerPeer {
+		t.Fatalf("DB stream_count = %d, want %d", n, maxStreamsPerPeer)
+	}
+}
+
+func TestUpdateStreamsUnchanged(t *testing.T) {
+	h := newHub(testDB(t))
+	c := joinDirect(t, h, "room", "A", 2)
+	drainJSON(t, c) // join_ok
+
+	// Re-declaring the current count is acked but reports no change (0).
+	if got := h.updateStreams("room", "A", c, clientMsg{StreamCount: 2}); got != 0 {
+		t.Fatalf("updateStreams returned %d, want 0 (unchanged)", got)
+	}
+	msg := drainJSON(t, c)
+	if msg["type"] != "update_streams_ok" || msg["stream_count"] != float64(2) {
+		t.Fatalf("expected update_streams_ok(2), got %v", msg)
+	}
+}
+
+// End-to-end over a websocket: a joined peer redeclares its stream count and
+// the relay acks and persists it.
+func TestUpdateStreamsWS(t *testing.T) {
+	h, srv := testServer(t)
+	ws := dialWS(t, srv)
+	joinRoom(t, ws, "ws-room", "A", 1)
+
+	if err := ws.WriteJSON(map[string]any{"type": "update_streams", "stream_count": 4}); err != nil {
+		t.Fatal(err)
+	}
+	ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var resp map[string]any
+	if err := ws.ReadJSON(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["type"] != "update_streams_ok" || resp["stream_count"] != float64(4) {
+		t.Fatalf("expected update_streams_ok(4), got %v", resp)
+	}
+	if n := dbStreamCount(t, h, "ws-room", "A"); n != 4 {
+		t.Fatalf("DB stream_count = %d, want 4", n)
+	}
+}

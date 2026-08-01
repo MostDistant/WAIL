@@ -268,6 +268,20 @@ func ConnectSignaling(
 			case "evicted":
 				log.Printf("[signaling] Evicted by server")
 				return
+			case "update_streams_ok":
+				if msg.StreamCount != nil {
+					log.Printf("[signaling] relay acked stream_count=%d", *msg.StreamCount)
+				}
+			case "update_streams_error":
+				slots := uint64(0)
+				if msg.SlotsAvailable != nil {
+					slots = *msg.SlotsAvailable
+				}
+				log.Printf("[signaling] WARN: relay rejected stream update (%s, %d slots available) — extra streams may be rate-limited", msg.Code, slots)
+				select {
+				case incomingCh <- SignalMessage{Type: "UpdateStreamsError", Code: msg.Code, SlotsAvailable: slots}:
+				default:
+				}
 			case "log":
 				incomingCh <- SignalMessage{
 					Type:        "LogBroadcast",
@@ -339,6 +353,11 @@ func ConnectSignaling(
 					raw = map[string]any{
 						"type":    "set_loopback",
 						"enabled": msg.Enabled,
+					}
+				case "UpdateStreams":
+					raw = map[string]any{
+						"type":         "update_streams",
+						"stream_count": msg.StreamCount,
 					}
 				default:
 					continue
@@ -475,6 +494,8 @@ func (m *PeerMesh) handleSignalMessage(msg SignalMessage) *MeshEvent {
 			Level: msg.Level, Target: msg.Target,
 			Message: msg.Message, TimestampUs: msg.TimestampUs,
 		}
+	case "UpdateStreamsError":
+		return &MeshEvent{Type: "UpdateStreamsError", Code: msg.Code, SlotsAvailable: msg.SlotsAvailable}
 	}
 	return nil
 }
@@ -532,6 +553,13 @@ func (m *PeerMesh) SendLog(level, target, message string, timestampUs uint64) {
 // back to us — the server-echo loopback debug monitor.
 func (m *PeerMesh) SendLoopback(enabled bool) {
 	m.signaling.SendControl(SignalMessage{Type: "Loopback", Enabled: enabled})
+}
+
+// SendUpdateStreams redeclares our send-stream count so the relay rescales
+// the per-peer binary rate limit (streams can open/close mid-session, but
+// the relay sizes the limit at join).
+func (m *PeerMesh) SendUpdateStreams(n uint16) {
+	m.signaling.SendControl(SignalMessage{Type: "UpdateStreams", StreamCount: n})
 }
 
 // SendMetricsReport sends a metrics report to the signaling server.
