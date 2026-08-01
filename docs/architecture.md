@@ -253,6 +253,7 @@ Two independent time domains exist in the system:
 | `LogBroadcast` (`log`) | Client → Server → Room | Broadcast structured log entry to all room peers (opt-in) |
 | `MetricsReport` | Client → Server | Per-peer audio frame counts + pipeline state (consumed server-side, not relayed) |
 | `rate_limit_warning` | Server → Client | Warning that the peer is sending too fast and will be disconnected if it continues |
+| `update_streams` | Client → Server | Redeclare the send-stream count mid-session; the relay rescales the binary rate limit and room slot accounting. Acked with `update_streams_ok`, rejected with `update_streams_error` (`room_full`) |
 
 ## Key Design Decisions
 
@@ -268,7 +269,7 @@ Two independent time domains exist in the system:
 
 6. **Server-relayed architecture**: All data flows through the signaling server (no direct P2P). This eliminates ICE/STUN/TURN negotiation complexity at the cost of an extra hop and server bandwidth scaling quadratically with room size.
 
-7. **Stream-count-aware rate limiting**: Per-connection token bucket rate limiting on the signaling server. Binary message rate scales with `stream_count` (60 tokens/sec/stream, 2× burst), text rate is fixed at 100/sec. Escalation: drop excess messages → warn log → send `rate_limit_warning` to client → disconnect after 50 cumulative violations. Join messages are exempt from text rate limiting so peers can always reconnect.
+7. **Stream-count-aware rate limiting**: Per-connection token bucket rate limiting on the signaling server. Binary message rate scales with `stream_count` (100 tokens/sec/stream, 2500-token burst/stream — a full interval of frames), text rate is fixed at 100/sec. Escalation: drop excess messages → warn log → send `rate_limit_warning` to client → disconnect after 50 cumulative violations. Join messages are exempt from text rate limiting so peers can always reconnect. Streams open and close mid-session (capture toggles, restore auto-enable, in-app senders), so the client recomputes its live send-stream count each status tick (enabled capture channels + test tone/WAV/metronome) and pushes `update_streams` when it drifts from the last declaration; the relay rescales the bucket in place (preserving tokens, so updates can't mint free capacity), re-checks room capacity, and resets the violation counter.
 
 8. **Pure engine logic in `internal/` packages**: interval math, scheduler, loss, affinity, and interval assembly/reassembly are cgo- and network-free, so they are fully unit-tested; the cgo Link Audio layer and the relay wrap that proven logic.
 
