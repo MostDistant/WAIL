@@ -24,7 +24,7 @@ jobs:
     # head_commit exists only on push; on a pull request it is null and the
     # expression would rely on null-coercion to keep the job running. Say it
     # outright instead — the skip is about release-prep pushes to main.
-    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: prepare release')
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: prepare release')"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -68,7 +68,7 @@ jobs:
     # head_commit exists only on push; on a pull request it is null and the
     # expression would rely on null-coercion to keep the job running. Say it
     # outright instead — the skip is about release-prep pushes to main.
-    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: prepare release')
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: prepare release')"
     env:
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_NOHASHDIR: "true"
@@ -184,7 +184,7 @@ jobs:
     # head_commit exists only on push; on a pull request it is null and the
     # expression would rely on null-coercion to keep the job running. Say it
     # outright instead — the skip is about release-prep pushes to main.
-    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: prepare release')
+    if: "github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: prepare release')"
     env:
       CCACHE_BASEDIR: ${{ github.workspace }}
       CCACHE_NOHASHDIR: "true"
