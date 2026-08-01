@@ -61,7 +61,11 @@ signaling-server/         Go WebSocket relay server (deployed to fly.io)
 ├── interval_clock.go     interval_anchor broadcast
 ├── labelwatch.go         Label watchdog: heals peers whose room-label offset froze
 │                         wrong (WAIF label vs room index → unicast fresh anchor)
-└── cmd/wail-metrics/     CLI metrics client
+├── cmd/wail-metrics/     CLI metrics client
+├── cmd/wail-logtail/     Tails a room's peer-shared logs live (joins as an observer)
+└── cmd/wail-logstore/    Backfills relay logs from Fly's logs API (~7 days) into a
+                          local SQLite DB, optionally alongside a room's peer logs —
+                          one timeline for both sides. See DEVELOPMENT.md → "Log store"
 
 plugins/                  WAIL Send / WAIL Receive CLAP plugins for DAWs without Link Audio (ADR-0007).
 │                         Each instance is its own LAN Link Audio peer; the app is unchanged.
