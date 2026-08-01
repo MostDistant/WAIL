@@ -7,7 +7,7 @@ package main
 // without the Link SDK; there is no real audio path in stub builds.
 type stubAudioEngine struct{}
 
-func newAudioEngine(_ *LinkBridge, _ string, _ func(waif []byte), _ int) AudioEngine {
+func newAudioEngine(_ *LinkBridge, _ string, _ func(waif []byte)) AudioEngine {
 	return &stubAudioEngine{}
 }
 

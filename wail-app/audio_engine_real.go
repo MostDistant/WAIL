@@ -76,7 +76,6 @@ type linkAudioEngine struct {
 	link     *abllink.Link
 	peerName string
 	send     func(waif []byte)
-	offsetD  int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -85,11 +84,11 @@ type linkAudioEngine struct {
 	wireDecodeFailures atomic.Uint64 // WAIF wire-decode errors (pre-Opus)
 	unlabeledWindows   atomic.Uint64 // capture windows dropped before a room anchor
 
-	// Latest room label of the current local interval, refreshed each emit-loop
-	// tick. HandleRemoteAudio diffs incoming frame labels against this to
-	// measure anchor offset disagreement with each sender in real time.
-	lastRoomLabel   atomic.Int64
-	lastRoomLabeled atomic.Bool
+	// localBoundary is the local interval index the emit loop last processed —
+	// a monotonic boundary counter, published each tick so the frame path can
+	// stamp a round's FirstSeen without waiting for a boundary (ADR-0009).
+	// math.MinInt64 until the emit loop's first tick.
+	localBoundary atomic.Int64
 
 	// Capture-dump debug toggle. dumpEnabled/dumpGen are read lock-free on the
 	// hot path; dumpDir (resolved fresh per enable) is read under mu only when a
@@ -109,6 +108,11 @@ type linkAudioEngine struct {
 	emit         map[affinity.Key]*emitStream
 	own          *affinity.OwnChannels // our published sinks, for discovery exclusion
 	nextStreamID uint16
+
+	// rounds is the per-sender adaptive playout cursor (ADR-0009): one per
+	// identity, shared by all of that sender's streams so a musician's mic and
+	// guitar can never split across rounds. Guarded by mu.
+	rounds map[string]*senderRounds
 
 	// loggedRoomSkip remembers which room-prefixed channels we have already
 	// explained skipping (by channel id), so the reason is stated once per
@@ -185,12 +189,6 @@ const (
 	retireGracePeerGone = 30 * time.Second
 )
 
-// retireHorizonIntervals is how far past the release cursor (plus D) buffered
-// audio still counts as imminent, and so still blocks retirement. Matches the
-// margin the emit loop already treats as normal buffering before it calls a
-// sender's labels an anchor mismatch.
-const retireHorizonIntervals = 2
-
 // enginePeerGoneGrace resolves how long a departed peer's channels stay
 // published, WAIL_STREAM_RETIRE_SEC overriding the default. Always logs the
 // effective value: a session must be diagnosable from its log alone, without
@@ -244,24 +242,11 @@ func engineCushionFrames() int {
 	return cushionFramesFor(ms)
 }
 
-// SetIntervalOffset live-adjusts the receive playout offset D for every
-// current and future stream (clamped 0..4; returns the effective D). D is
-// the NINJAM latency/reliability knob each receiver sets for itself — how
-// many intervals remote audio is held before playout.
+// SetIntervalOffset is retired (ADR-0009): playout is adaptive per sender —
+// each round plays at the receiver's next boundary once ready — so there is
+// no D to set. Kept so the Debug control degrades gracefully.
 func (e *linkAudioEngine) SetIntervalOffset(d int) int {
-	if d < 0 {
-		d = 0
-	}
-	if d > 4 {
-		d = 4
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.offsetD = d
-	for _, st := range e.emit {
-		st.sched.SetOffset(int64(d))
-	}
-	log.Printf("[audio] interval offset D set to %d (live)", d)
+	log.Printf("[audio] interval offset is retired (ADR-0009: adaptive playout); ignoring D=%d", d)
 	return d
 }
 
@@ -319,7 +304,6 @@ type emitStream struct {
 	channels int
 	dec      *IntervalDecoder
 	reasm    *emit.Reassembler
-	sched    *playout.Scheduler
 	// sinks are this stream's published outputs. sinks[0] is the Link Audio
 	// sink — the write-rejected metric anchors on it. The emit map keyed
 	// by affinity.Key IS the affinity (a reconnecting identity reuses this stream +
@@ -355,11 +339,6 @@ type emitStream struct {
 	expectSeq uint32
 	lastPos   emit.FramePos
 
-	// labelTrack confirms this stream's interval labels agree with our room
-	// index (ADR-0006 follow-up): a persistent nonzero verdict means the
-	// peer's audio plays that many intervals late/early, silently.
-	labelTrack emit.LabelOffsetTracker
-
 	// offsetTrk accumulates per-frame RMS at absolute room-frame positions
 	// (debug-room analysis: this stream's rhythmic phase offset vs the room
 	// grid, internal/offset). Created on first decoded frame.
@@ -373,9 +352,7 @@ type emitStream struct {
 	sinkUnderrunEvents  atomic.Uint64 // paced feed fell behind the playhead past the cushion
 	sinkUnderrunFrames  atomic.Uint64 // frames skipped (played as silence) due to underrun
 	framesMissedAtPlay  atomic.Uint64 // frames still absent when their interval retired
-	framesTooLate       atomic.Uint64 // frames dropped: sender labels already behind our playout (anchor mismatch)
-	labelGapBand        atomic.Int64  // last logged sender-label gap (edge-trigger)
-	labelGapLogNs       atomic.Int64  // rate limit for the label-gap warn
+	framesTooLate       atomic.Uint64 // frames dropped: their round already finished at the speakers
 	gapLogs             uint64        // buffered-ahead warn count (emit-loop-owned, rate limit)
 	framesConcealed     atomic.Uint64 // missing frames masked by Opus PLC
 	sinkWriteRejected   atomic.Uint64 // sink refused a chunk mid-stream (queue full / listener left)
@@ -394,17 +371,17 @@ type metronomeStream struct {
 	haveReader   bool
 }
 
-func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), offsetD int) AudioEngine {
+func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte)) AudioEngine {
 	e := &linkAudioEngine{
 		lb:             lb,
 		link:           lb.Link(),
 		peerName:       peerName,
 		send:           send,
-		offsetD:        offsetD,
 		cfg:            interval.Config{Bars: 4, Quantum: lb.Quantum()},
 		tempoBPM:       120,
 		capture:        make(map[string]*captureChannel),
 		emit:           make(map[affinity.Key]*emitStream),
+		rounds:         make(map[string]*senderRounds),
 		intent:         make(map[string]peerIntent),
 		loggedRoomSkip: make(map[string]bool),
 		own:            affinity.NewOwnChannels(),
@@ -413,8 +390,54 @@ func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), off
 
 		cushionFrames: engineCushionFrames(),
 	}
-	e.curRoomIdx.Store(math.MinInt64) // unlabeled until the first room anchor
+	e.curRoomIdx.Store(math.MinInt64)    // unlabeled until the first room anchor
+	e.localBoundary.Store(math.MinInt64) // no boundary processed yet
 	return e
+}
+
+// senderRounds is one sender's playout state: the adaptive round cursor and
+// the first-seen boundary of each buffered round (readiness needs one boundary
+// of streaming age — see playout.RoundState). Guarded by the engine's mu.
+type senderRounds struct {
+	adaptive  playout.Adaptive
+	firstSeen map[int64]int64
+	skipLogs  uint64
+}
+
+// roundsLocked returns the identity's playout state, creating it on first use.
+// Caller holds e.mu.
+func (e *linkAudioEngine) roundsLocked(identity string) *senderRounds {
+	sr := e.rounds[identity]
+	if sr == nil {
+		sr = &senderRounds{firstSeen: make(map[int64]int64)}
+		e.rounds[identity] = sr
+	}
+	return sr
+}
+
+// noteFirstSeen records the boundary at which a round's first frame arrived.
+func (sr *senderRounds) noteFirstSeen(idx, boundary int64) {
+	if _, ok := sr.firstSeen[idx]; !ok {
+		sr.firstSeen[idx] = boundary
+	}
+}
+
+// firstSeenOr returns the recorded first-seen boundary, or fallback when the
+// round predates tracking (treated as just-arrived: not ready unless complete).
+func (sr *senderRounds) firstSeenOr(idx, fallback int64) int64 {
+	if b, ok := sr.firstSeen[idx]; ok {
+		return b
+	}
+	return fallback
+}
+
+// dropFirstSeenThrough forgets rounds at or below the released one.
+func (sr *senderRounds) dropFirstSeenThrough(release int64) {
+	for idx := range sr.firstSeen {
+		if idx <= release {
+			delete(sr.firstSeen, idx)
+		}
+	}
 }
 
 func (e *linkAudioEngine) Start() error {
@@ -425,7 +448,7 @@ func (e *linkAudioEngine) Start() error {
 	e.wg.Add(2)
 	go e.discoveryLoop()
 	go e.emitLoop()
-	log.Printf("[audio] Link Audio engine started (peer %q, offset D=%d)", e.peerName, e.offsetD)
+	log.Printf("[audio] Link Audio engine started (peer %q, adaptive playout)", e.peerName)
 	return nil
 }
 
@@ -566,19 +589,10 @@ func abs64(v int64) int64 {
 // ahead are held extra boundaries by playout). ok is false when no stream has
 // finalized a verdict yet (too little data, or unaligned).
 func (e *linkAudioEngine) LabelOffsetFor(identity string) (int64, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	var worst int64
-	found := false
-	for key, st := range e.emit {
-		if key.Identity != identity {
-			continue
-		}
-		if v, ok := st.labelTrack.Verdict(); ok && (!found || abs64(v) > abs64(worst)) {
-			worst, found = v, true
-		}
-	}
-	return worst, found
+	// Retired (ADR-0009): playback never compares a sender's labels to a room
+	// index, so there is no label offset to confirm. Kept returning not-found
+	// until the UI plumbing goes with the labeler.
+	return 0, false
 }
 
 func (e *linkAudioEngine) CaptureChannels() []CaptureChannelInfo {
@@ -1015,7 +1029,6 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 			dec:             dec,
 			shiftFrames:     dec.Lookahead(),
 			reasm:           emit.New(channels, samplesPerWaifFrame(engineInternalRate)),
-			sched:           playout.New(e.offsetD),
 			sinks:           sinks,
 			feeder:          emit.NewFeeder(e.cushionFrames, emitChunkFrames),
 			lastDisplayName: displayName,
@@ -1038,30 +1051,6 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 	// Idle clock for retirement. Frames still in flight after a peer drops a
 	// stream keep pushing this out, which is exactly the grace's job.
 	st.lastFrameAt = time.Now()
-	// Label-offset confirmation (ADR-0006 follow-up): bucket this frame's
-	// label against our current room index; a verdict change means the peer's
-	// labeling shifted — warn when it's nonzero (their audio silently plays
-	// that many intervals late/early).
-	if roomIdx := e.curRoomIdx.Load(); roomIdx != math.MinInt64 {
-		if verdict, changed := st.labelTrack.Add(roomIdx, f.IntervalIndex); changed && verdict != 0 {
-			// Frames labeled ahead of our room index (positive) are held extra
-			// boundaries by playout (release = label − D) → positive = late.
-			dir, n := "late", verdict
-			if n < 0 {
-				dir, n = "early", -n
-			}
-			if isLoopbackIdentity(fromIdentity) {
-				// Self-echo: "the peer" is this machine, so there is nobody to
-				// chase — it is our own capture labels against our own room
-				// clock, which is a labeler fault, not a remote one.
-				log.Printf("[audio] warn: server-echo loopback stream %d labels intervals off by %+d — our own capture labels disagree with our room clock by %d interval(s)",
-					f.StreamID, verdict, n)
-			} else {
-				log.Printf("[audio] warn: %s stream %d labels intervals off by %+d — their audio plays %d interval(s) %s",
-					fromIdentity, f.StreamID, verdict, n, dir)
-			}
-		}
-	}
 
 	dec := st.dec // st.dec is only touched on this (session) goroutine
 	cur := emit.FramePos{Interval: f.IntervalIndex, Frame: int(f.FrameNumber)}
@@ -1149,38 +1138,29 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		e.mu.Unlock()
 		return
 	}
+	sr := e.roundsLocked(key.Identity)
 	for i, slot := range plcSlots {
 		if concealed[i] == nil {
 			continue
 		}
-		if st.sched.OnFrame(slot.Interval) != playout.TooLate {
+		if d := sr.adaptive.OnFrame(slot.Interval); d != playout.TooLate {
+			if d == playout.Buffer {
+				sr.noteFirstSeen(slot.Interval, e.localBoundary.Load())
+			}
 			st.reasm.AddPLC(slot.Interval, slot.Frame, concealed[i])
 			st.framesConcealed.Add(1)
 		}
 	}
-	// Room-label gap: the frame's interval index is the sender's room label,
-	// ours is the emit loop's latest. Both tick in lockstep in a healthy room
-	// (gap ∈ {-1,0,+1}); a persistent larger gap is an anchor offset mismatch
-	// — this stream will sound gap intervals late (positive) or be dropped as
-	// too-late (very negative). Edge-triggered + rate-limited per stream.
-	if e.lastRoomLabeled.Load() {
-		if gap := f.IntervalIndex - e.lastRoomLabel.Load(); gap < -1 || gap > 1 {
-			nowNs := time.Now().UnixNano()
-			if st.labelGapBand.Load() != gap || nowNs-st.labelGapLogNs.Load() > int64(5*time.Second) {
-				st.labelGapBand.Store(gap)
-				st.labelGapLogNs.Store(nowNs)
-				log.Printf("[audio] WARN: %s stream %d labels run %+d intervals vs our room clock (frame interval %d, our label %d) — anchor offset mismatch; audio ≈%+d intervals off (negative beyond -%d: dropped as too-late)",
-					fromIdentity, f.StreamID, gap, f.IntervalIndex, e.lastRoomLabel.Load(), gap, st.sched.Offset()+1)
-			}
-		}
-	}
-	switch st.sched.OnFrame(f.IntervalIndex) {
+	switch d := sr.adaptive.OnFrame(f.IntervalIndex); d {
 	case playout.TooLate:
-		// Interval already finished playing; drop. A nonzero rate here means
-		// the sender's labels run behind our playout (anchor offset mismatch).
+		// Round already finished at the speakers (a straggler, or a sender
+		// catching up after a stall); the recorder took it at receipt.
 		st.framesTooLate.Add(1)
 	default:
 		// Buffer or LiveAppend: place the frame; the paced reader picks it up.
+		if d == playout.Buffer {
+			sr.noteFirstSeen(f.IntervalIndex, e.localBoundary.Load())
+		}
 		st.reasm.Add(f.IntervalIndex, int(f.FrameNumber), pcm, f.IsFinal, int(f.TotalFrames))
 	}
 	e.mu.Unlock()
@@ -1238,16 +1218,14 @@ func (e *linkAudioEngine) retirableLocked(key affinity.Key) (time.Duration, bool
 
 // sweepRetiredLocked closes and forgets streams whose owner has stopped
 // claiming them, once they are idle past their grace AND have nothing left
-// buffered. The drained check is what keeps this from truncating the tail of
-// the last interval: playout runs D boundaries behind the final frame, so a
-// grace shorter than one interval would otherwise cut audio mid-flight.
-// Boundary-aligned (called from onBoundary under mu) so a sink never closes
-// while topUpSinks is feeding it. Caller holds e.mu.
-// roomLabel is the boundary being processed, which is also the horizon's
-// reference: this runs before the release loop advances each scheduler, so
-// reading the cursor from the schedulers here would measure the *previous*
-// boundary and retire one interval sooner than intended.
-func (e *linkAudioEngine) sweepRetiredLocked(now time.Time, roomLabel int64) {
+// due at the speakers. Under adaptive playout (ADR-0009) "due" is simple:
+// anything buffered above the sender's playing round will be released at the
+// next boundary, so it blocks retirement; the playing round's own buffer
+// (still live-appendable) does not — grace is far longer than an interval, so
+// its playback finished long ago. Boundary-aligned (called from onBoundary
+// under mu) so a sink never closes while topUpSinks is feeding it. Caller
+// holds e.mu.
+func (e *linkAudioEngine) sweepRetiredLocked(now time.Time) {
 	for key, st := range e.emit {
 		grace, ok := e.retirableLocked(key)
 		if !ok {
@@ -1256,39 +1234,28 @@ func (e *linkAudioEngine) sweepRetiredLocked(now time.Time, roomLabel int64) {
 		if now.Sub(st.lastFrameAt) < grace {
 			continue
 		}
-		// "Drained" has to mean nothing *imminent*, not nothing at all. A
-		// sender whose labels run ahead of our playout leaves stragglers
-		// buffered that far ahead, and Drop only clears at or below the release
-		// cursor — so asking for an empty reassembler keeps a dead channel
-		// published for as many boundaries as that peer is mislabeled. Anything
-		// at or below the horizon still blocks: an interval is released at
-		// boundary index+D and dropped one boundary later, so the interval that
-		// just played is still held here and must not be cut.
-		backlog := 0
-		if min, buffered := st.reasm.MinIndex(); buffered {
-			if min <= roomLabel+retireHorizonIntervals {
-				continue
+		if max, buffered := st.reasm.MaxIndex(); buffered {
+			playing, has := e.roundsLocked(key.Identity).adaptive.Playing()
+			if !has || max > playing {
+				continue // audio still due at the speakers
 			}
-			// Past the horizon: this audio is not imminent, and retiring
-			// discards it. Count it so the log can say so — silently dropping
-			// a decoded backlog is exactly the kind of thing that should not
-			// have to be inferred later.
-			backlog = st.reasm.Count()
 		}
-		e.retireStreamLocked(key, st, backlog)
+		e.retireStreamLocked(key, st, 0)
 	}
-	// Forget intent for identities with nothing published left, so the map
-	// tracks the room rather than growing for the session's lifetime.
+	// Forget intent and round cursors for identities with nothing published
+	// left, so the maps track the room rather than growing for the session.
+	used := make(map[string]bool, len(e.emit))
+	for key := range e.emit {
+		used[key.Identity] = true
+	}
 	for identity := range e.intent {
-		used := false
-		for key := range e.emit {
-			if key.Identity == identity {
-				used = true
-				break
-			}
-		}
-		if !used {
+		if !used[identity] {
 			delete(e.intent, identity)
+		}
+	}
+	for identity := range e.rounds {
+		if !used[identity] {
+			delete(e.rounds, identity)
 		}
 	}
 }
@@ -1503,16 +1470,13 @@ func (e *linkAudioEngine) emitLoop() {
 			bpi := cfg.BeatsPerInterval()
 			localBeat := ss.BeatAtTime(clockMicros, bpi)
 			localIdx := cfg.IndexAtBeat(localBeat)
-			roomLabel, labeled := e.labeler.RoomIndex(localIdx)
-			if labeled {
+			// The labeler still feeds capture-side labels (until senders stamp
+			// local indices, ADR-0009); playout no longer consumes it.
+			if roomLabel, labeled := e.labeler.RoomIndex(localIdx); labeled {
 				e.curRoomIdx.Store(roomLabel)
 			}
 			e.mu.Unlock()
-
-			if labeled {
-				e.lastRoomLabel.Store(roomLabel)
-				e.lastRoomLabeled.Store(true)
-			}
+			e.localBoundary.Store(localIdx)
 			// Local-grid jump detection: the beat should advance by exactly
 			// elapsed-wall × tempo between ticks. Anything else is a Link
 			// session merge/transport reset — which silently invalidates the
@@ -1563,8 +1527,8 @@ func (e *linkAudioEngine) emitLoop() {
 			}
 			lastPeers, lastSessionBPM = peers, sessionBPM
 
-			if labeled && (!haveLast || localIdx > lastLocalIdx) {
-				e.onBoundary(cfg, tempo, localIdx, roomLabel)
+			if !haveLast || localIdx > lastLocalIdx {
+				e.onBoundary(cfg, tempo, localIdx)
 				lastLocalIdx = localIdx
 				haveLast = true
 			}
@@ -1578,91 +1542,116 @@ func (e *linkAudioEngine) emitLoop() {
 	}
 }
 
-// onBoundary releases each stream's due interval at this local boundary:
-// retire the finished interval (measuring what never arrived), then promote
-// the feeder's pre-rolled reader — or install a fresh one — for the release.
-func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localIdx, roomLabel int64) {
+// onBoundary releases each sender's due round at this local boundary
+// (ADR-0009): the per-sender adaptive cursor picks the freshest ready round
+// across that sender's streams — so a musician's streams can never split
+// across rounds — then each stream retires the round that just finished
+// (measuring what never arrived), drops anything freshest-wins skipped
+// (already archived at receipt), and promotes the feeder's pre-rolled reader
+// or installs a fresh one. localIdx is a monotonic local boundary counter;
+// round indices are the sender's own and are never compared against it.
+func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localIdx int64) {
 	startBeat, endBeat := cfg.BeatWindow(localIdx)
 	totalFrames := intervalPlayoutFrames(cfg, engineInternalRate, tempo)
 	paddedFrames := intervalPaddedFrames(cfg, engineInternalRate, tempo)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.sweepRetiredLocked(time.Now(), roomLabel)
+	e.sweepRetiredLocked(time.Now())
+
+	byIdentity := make(map[string][]*emitStream)
 	for _, st := range e.emit {
-		release, advanced := st.sched.OnBoundary(roomLabel)
+		byIdentity[st.key.Identity] = append(byIdentity[st.key.Identity], st)
+	}
+	for identity, streams := range byIdentity {
+		sr := e.roundsLocked(identity)
+		// Candidate rounds: the union across this sender's streams. A round is
+		// complete only when every stream holding data for it has all of it.
+		complete := make(map[int64]bool)
+		for _, st := range streams {
+			for _, ri := range st.reasm.Indices() {
+				c, seen := complete[ri]
+				complete[ri] = (!seen || c) && st.reasm.Complete(ri)
+			}
+		}
+		states := make([]playout.RoundState, 0, len(complete))
+		for ri, c := range complete {
+			states = append(states, playout.RoundState{
+				Index: ri, Complete: c, FirstSeen: sr.firstSeenOr(ri, localIdx),
+			})
+		}
+		prevPlaying, hadPrev := sr.adaptive.Playing()
+		idx, skipped, advanced := sr.adaptive.OnBoundary(localIdx, states)
 		if !advanced {
 			continue
 		}
-		idx := release
-
-		// Retire the interval that just finished playing. Live-append had its
-		// whole playback window; slots still empty were rendered as silence —
-		// the honest audible-loss measure (PLC-concealed slots are not empty).
-		if missing, _ := st.reasm.Missing(idx - 1); missing > 0 {
-			st.framesMissedAtPlay.Add(uint64(missing))
-		}
-		st.reasm.Drop(idx - 1)
-
-		// Released before its streaming tail arrived: expected with real-time
-		// senders (the last frames are in flight at the boundary) — informational.
-		if !st.reasm.Complete(idx) {
-			n := st.intervalsIncomplete.Add(1)
-			if n == 1 || n%100 == 0 {
-				_, recv, total, _ := st.reasm.Interval(idx)
-				log.Printf("[audio] interval %d released with %d/%d frames for %v (tail in flight — expected with streaming send; %d total)",
-					idx, recv, total, st.key, n)
+		if len(skipped) > 0 {
+			sr.skipLogs++
+			if sr.skipLogs == 1 || sr.skipLogs%50 == 0 {
+				log.Printf("[audio] %s: skipped %d stale round(s) %v at the speakers (freshest-wins; archived at receipt)",
+					identity, len(skipped), skipped)
 			}
 		}
+		sr.dropFirstSeenThrough(idx)
 
-		// Buffered-ahead gap: a healthy sender streams in real time, so at
-		// release the reassembler holds at most ~D intervals of future audio.
-		// More means the sender's labels run ahead of our playout — the same
-		// anchor mismatch as the label-gap warn, measured at release time.
-		if maxBuf, ok := st.reasm.MaxIndex(); ok {
-			if g := maxBuf - idx; g > st.sched.Offset()+2 {
-				st.gapLogs++
-				if st.gapLogs == 1 || st.gapLogs%50 == 0 {
-					log.Printf("[audio] WARN: %v buffered through room interval %d while releasing %d — sender labels %d intervals ahead of playout (anchor offset mismatch)",
-						st.key, maxBuf, idx, g-st.sched.Offset())
+		for _, st := range streams {
+			// Retire the round that just finished playing. Live-append had its
+			// whole playback window; slots still empty were rendered as silence —
+			// the honest audible-loss measure (PLC-concealed slots are not empty).
+			if hadPrev {
+				if missing, _ := st.reasm.Missing(prevPlaying); missing > 0 {
+					st.framesMissedAtPlay.Add(uint64(missing))
 				}
 			}
-		}
+			st.reasm.Drop(idx - 1)
 
-		reasm := st.reasm
-		feeder := st.feeder
-		channels := st.channels
-		nextIdx := idx + 1
-		// Runs when the cushion first crosses the playing interval's end
-		// (~cushion before the boundary, under e.mu via topUpSinks). When the
-		// final window's padding carries the next interval's real head (a
-		// continuation-padding sender), play the current reader through the
-		// pad and start the next reader past its twice-encoded head — the
-		// decoded stream then has no boundary discontinuity at all. Silent
-		// padding (old senders) keeps the truncate-at-interval-end handoff.
-		makeNext := func() (*emit.PacedReader, int64, int) {
-			start := 0
-			if cur := feeder.Current(); cur != nil && paddedFrames > totalFrames {
-				if s, _, _, ok := reasm.Interval(idx); ok && padCarriesAudio(s, totalFrames, paddedFrames, channels) {
-					cur.SetTotalFrames(paddedFrames)
-					start = paddedFrames - totalFrames
+			// Released before its streaming tail arrived: expected with real-time
+			// senders (the last frames are in flight at the boundary) — informational.
+			if !st.reasm.Complete(idx) {
+				n := st.intervalsIncomplete.Add(1)
+				if n == 1 || n%100 == 0 {
+					_, recv, total, _ := st.reasm.Interval(idx)
+					log.Printf("[audio] round %d released with %d/%d frames for %v (tail in flight — expected with streaming send; %d total)",
+						idx, recv, total, st.key, n)
 				}
 			}
-			return emit.NewPacedReader(
-				func() []int16 { return st.shiftedInterval(nextIdx) },
-				channels, engineInternalRate, tempo, endBeat, totalFrames,
-			), nextIdx, start
-		}
-		if st.feeder.Promote(idx, makeNext) {
-			// Adopted the pre-rolled reader; re-anchor if tempo moved since pre-roll.
-			if cur := st.feeder.Current(); cur != nil && cur.TempoBPM() != tempo {
-				cur.Rebase(tempo, totalFrames)
+
+			st := st
+			reasm := st.reasm
+			feeder := st.feeder
+			channels := st.channels
+			nextIdx := idx + 1
+			// Runs when the cushion first crosses the playing interval's end
+			// (~cushion before the boundary, under e.mu via topUpSinks). When the
+			// final window's padding carries the next interval's real head (a
+			// continuation-padding sender), play the current reader through the
+			// pad and start the next reader past its twice-encoded head — the
+			// decoded stream then has no boundary discontinuity at all. Silent
+			// padding (old senders) keeps the truncate-at-interval-end handoff.
+			makeNext := func() (*emit.PacedReader, int64, int) {
+				start := 0
+				if cur := feeder.Current(); cur != nil && paddedFrames > totalFrames {
+					if s, _, _, ok := reasm.Interval(idx); ok && padCarriesAudio(s, totalFrames, paddedFrames, channels) {
+						cur.SetTotalFrames(paddedFrames)
+						start = paddedFrames - totalFrames
+					}
+				}
+				return emit.NewPacedReader(
+					func() []int16 { return st.shiftedInterval(nextIdx) },
+					channels, engineInternalRate, tempo, endBeat, totalFrames,
+				), nextIdx, start
 			}
-		} else {
-			st.feeder.SetCurrent(idx, emit.NewPacedReader(
-				func() []int16 { return st.shiftedInterval(idx) },
-				st.channels, engineInternalRate, tempo, startBeat, totalFrames,
-			), makeNext)
+			if st.feeder.Promote(idx, makeNext) {
+				// Adopted the pre-rolled reader; re-anchor if tempo moved since pre-roll.
+				if cur := st.feeder.Current(); cur != nil && cur.TempoBPM() != tempo {
+					cur.Rebase(tempo, totalFrames)
+				}
+			} else {
+				st.feeder.SetCurrent(idx, emit.NewPacedReader(
+					func() []int16 { return st.shiftedInterval(idx) },
+					st.channels, engineInternalRate, tempo, startBeat, totalFrames,
+				), makeNext)
+			}
 		}
 	}
 }

@@ -7,10 +7,8 @@ import (
 	"log"
 	"maps"
 	"math"
-	"os"
 	"reflect"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -168,12 +166,8 @@ func sessionLoop(
 	emitter.Emit("session:started", SessionStarted{PeerID: peerID, Room: room, BPM: bpm})
 
 	// Link Audio engine (ADR-0001/0002) — the only audio path: capture subscribes
-	// to local Link Audio channels and playback republishes remote streams one
-	// interval late (see audio_engine_real.go; a no-op stub under -tags linkstub).
-	offsetD := 1
-	if v, err := strconv.Atoi(os.Getenv("WAIL_INTERVAL_OFFSET")); err == nil && v >= 0 {
-		offsetD = v
-	}
+	// to local Link Audio channels and playback republishes remote streams a
+	// round late, adaptively (ADR-0009; a no-op stub under -tags linkstub).
 	// Engine sends happen on pacer goroutines, not the session loop, so they are
 	// counted atomically and folded into the per-interval sent= log line.
 	var engineFramesSent atomic.Uint64
@@ -185,13 +179,13 @@ func sessionLoop(
 	// clearly in a DAW's peer list. This is also the own-channel filter key
 	// (audio_engine_real.go), so the engine uses it end to end; it is separate
 	// from the room display name.
-	audioEngine := newAudioEngine(link, config.LinkAudioName, engineSend, offsetD)
+	audioEngine := newAudioEngine(link, config.LinkAudioName, engineSend)
 	audioEngine.SetCaptureRestore(config.CaptureRestore)
 	if err := audioEngine.Start(); err != nil {
 		logWarn("Link Audio engine failed to start: %v", err)
 	}
 	defer audioEngine.Stop()
-	logInfo("Link Audio engine enabled (interval offset D=%d)", offsetD)
+	logInfo("Link Audio engine enabled (adaptive playout)")
 
 	// State
 	clock := NewClockSync()
