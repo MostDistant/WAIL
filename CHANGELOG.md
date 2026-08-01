@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.2.0-beta.1 (2026-08-01)
+
+### Features
+
+- record relay and peer logs into a local SQLite store (#501)
+- add -debug to join the debug room with diagnostics armed (#503)
+
+### Fixes
+
+- review fixes for #495 and #496 that missed their merges (#498)
+- recover grid alignment after the local Link grid moves (#499)
+- bin tier2 placement by the classified block, not the raw frequency (#500)
+- declare dladdr properly, and run the build workflow on pull requests (#505)
+- redeclare send-stream count mid-session via update_streams (#502)
+- the remaining review findings from #498 and #499 (#507)
+- stage the beta formula so its first publish reaches the Homebrew tap (#511)
+
 ## 4.2.0-beta.0 (2026-08-01)
 
 ### Features
