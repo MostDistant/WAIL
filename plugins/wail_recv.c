@@ -53,6 +53,9 @@
 // prefix would subscribe raw LAN channels that merely start with "WAIL" — a
 // WAIL Send track named "WAIL Bass" would come back as a receive port.
 #define LBR_ROOM_PREFIX "WAIL · "
+// Length of the literal above, compile-time — the filter runs it per channel
+// per poll in three places.
+#define LBR_ROOM_PREFIX_LEN (sizeof(LBR_ROOM_PREFIX) - 1)
 #define LBR_GONE_POLLS 6 // ~3s of discovery misses → slot freed
 
 typedef struct {
@@ -316,7 +319,7 @@ static void set_port_name(lbr_recv *self, int slot, const char *name) {
 
 // display_name strips the room-published dot-prefix for the port label.
 static const char *display_name(const char *chan, char *buf, size_t cap) {
-   size_t p = strlen(LBR_ROOM_PREFIX);
+   size_t p = LBR_ROOM_PREFIX_LEN;
    if (strncmp(chan, LBR_ROOM_PREFIX, p) == 0) {
       snprintf(buf, cap, "%s", chan + p);
       return buf;
@@ -354,7 +357,7 @@ static void log_snapshot(lbr_recv *self, const lb_channel_info *chans, size_t nc
       // on the LAN — another app's tracks being renamed or armed — would
       // otherwise churn the signature and dump the table for something we
       // never act on.
-      if (strncmp(chans[c].name, LBR_ROOM_PREFIX, strlen(LBR_ROOM_PREFIX)) != 0) continue;
+      if (strncmp(chans[c].name, LBR_ROOM_PREFIX, LBR_ROOM_PREFIX_LEN) != 0) continue;
       sig += lbr_entry_hash(chans[c].id_u64, chans[c].name);
    }
    for (int i = 0; i < LBR_SLOTS; i++)
@@ -365,7 +368,7 @@ static void log_snapshot(lbr_recv *self, const lb_channel_info *chans, size_t nc
    self->snapshot_sig = sig;
 
    for (size_t c = 0; c < nch; c++) {
-      if (strncmp(chans[c].name, LBR_ROOM_PREFIX, strlen(LBR_ROOM_PREFIX)) != 0) continue;
+      if (strncmp(chans[c].name, LBR_ROOM_PREFIX, LBR_ROOM_PREFIX_LEN) != 0) continue;
       lbr_log(self, "  chan id=%016llx name=\"%s\"", (unsigned long long)chans[c].id_u64,
               chans[c].name);
    }
@@ -419,7 +422,7 @@ static void *mgr_main(void *arg) {
 
       // Assign new room-published channels.
       for (size_t c = 0; c < nch; c++) {
-         if (strncmp(chans[c].name, LBR_ROOM_PREFIX, strlen(LBR_ROOM_PREFIX)) != 0) continue;
+         if (strncmp(chans[c].name, LBR_ROOM_PREFIX, LBR_ROOM_PREFIX_LEN) != 0) continue;
 
          // Already ours? Match on channel id first, so an in-place rename
          // relabels the port this channel already holds instead of taking a
