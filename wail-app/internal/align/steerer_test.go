@@ -1111,3 +1111,83 @@ func TestOscillatingDeltaDoesNotStreamEvents(t *testing.T) {
 		t.Fatalf("jitter streamed %d events over 30 ticks", len(*emits))
 	}
 }
+
+// --- long-run behaviour: one tempo, one hour, peers coming and going ---
+
+// The real workload is an hour on a fixed tempo, not the handful of ticks the
+// other tests cover. Over that span a quiet, aligned grid must stay quiet: no
+// grid snaps (a snap is audible), no tempo writes, no spurious re-entry, and a
+// UI event budget that doesn't grow with time.
+func TestAnHourOnAFixedTempoStaysQuiet(t *testing.T) {
+	start := time.Now()
+	s, f, emits := newSteerer(14_000_000) // aligned
+	observe(s, start)
+	f.snaps, f.tempos, *emits = nil, nil, nil
+
+	for i := 0; i < 3600; i++ {
+		s.Tick(16, start.Add(snapSettle+time.Duration(i)*time.Second))
+	}
+
+	if len(f.snaps) != 0 {
+		t.Fatalf("%d audible grid snaps during a quiet hour", len(f.snaps))
+	}
+	if len(f.tempos) != 0 {
+		t.Fatalf("wrote the tempo %d times with nothing to correct: %v", len(f.tempos), f.tempos)
+	}
+	if s.entryPending {
+		t.Fatal("entry conformance re-armed itself over a quiet hour")
+	}
+	if len(*emits) > 2 {
+		t.Fatalf("%d UI events over a quiet hour", len(*emits))
+	}
+}
+
+// Peers joining and leaving is the event that actually happens in these
+// sessions, and each one re-phases the shared Link timeline. Every merge must
+// recover — one snap, tempo back on the room's — and an hour of them must not
+// leave the steerer wedged or drifting in its own state.
+func TestRepeatedMergesOverAnHourEachRecover(t *testing.T) {
+	start := time.Now()
+	s, f, _ := newSteerer(14_000_000)
+	observe(s, start)
+
+	const merges = 12 // one every five minutes
+	for m := 0; m < merges; m++ {
+		at := start.Add(time.Duration(m) * 5 * time.Minute)
+
+		// A joining peer shoves the grid 2.6s and parks the session tempo at
+		// its own — exactly the field case.
+		f.timeAtBeat = 16_600_000
+		f.state.BPM = 120.0
+		f.snaps = nil
+		s.OnGridJump(5.22, at)
+		if !s.entryPending {
+			t.Fatalf("merge %d did not re-arm entry conformance", m)
+		}
+
+		// Entry runs on the next anchor/pong and snaps the grid back.
+		observe(s, at.Add(time.Second))
+		if len(f.snaps) != 1 {
+			t.Fatalf("merge %d: %d snaps, want exactly 1", m, len(f.snaps))
+		}
+		if s.entryPending {
+			t.Fatalf("merge %d: entry still pending after conformance ran", m)
+		}
+
+		// Grid is aligned again; the rest of the five minutes is steady state.
+		f.timeAtBeat = 14_000_000
+		for i := 0; i < 300; i++ {
+			s.Tick(16, at.Add(snapSettle+time.Duration(i)*time.Second))
+		}
+		if s.slewTarget != 0 {
+			t.Fatalf("merge %d: still slewing five minutes later (target %v)", m, s.slewTarget)
+		}
+		if got := lastTempo(f); got != 0 && !approxEq(got, 120) {
+			t.Fatalf("merge %d: tempo left at %v, want the room's 120", m, got)
+		}
+	}
+
+	if s.gateShutSince != (time.Time{}) {
+		t.Fatal("wedge timer left running after an hour of recoveries")
+	}
+}
