@@ -90,6 +90,15 @@ else()
   target_link_libraries(wail-link PUBLIC m atomic)
 endif()
 
+# dladdr (wail_link.h's build stamp) is a GNU extension: glibc only declares it
+# under _GNU_SOURCE, and it lived in libdl before glibc 2.34. PUBLIC so every
+# consumer of the header compiles with it — the macro must precede the first
+# libc header, which rules out defining it in the header itself.
+if(NOT WIN32)
+  target_compile_definitions(wail-link PUBLIC _GNU_SOURCE)
+  target_link_libraries(wail-link PUBLIC ${CMAKE_DL_LIBS})
+endif()
+
 function(add_wail_link_plugin name)
   add_library(${name} MODULE ${ARGN})
   target_include_directories(${name} PRIVATE "${CLAP_INCLUDE}" "${CMAKE_CURRENT_SOURCE_DIR}")
