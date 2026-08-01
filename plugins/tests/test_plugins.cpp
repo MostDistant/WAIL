@@ -250,26 +250,41 @@ TEST(wail_recv_hears_only_room_published) {
       return info.name;
    };
 
+   // Our channel is not necessarily port 0: a live WAIL room on the LAN
+   // publishes room channels too, and whatever discovery saw first holds the
+   // low slots. Find ours by name.
+   auto findPort = [&](const std::string &want) -> int {
+      for (uint32_t i = 0; i < (uint32_t)kPorts; i++)
+         if (portName(i) == want) return (int)i;
+      return -1;
+   };
+
    // Wait for the room channel to be assigned + named (discovery ~1s + manager poll).
    // The pump is real-time paced (5.33ms/block): publishing faster than real
    // time stamps buffers into the future and receivers drop them.
-   std::string name0;
+   int slot = -1;
    {
       auto t0 = std::chrono::steady_clock::now();
       auto next = t0;
-      while (name0 != "tester · sweep" &&
+      while ((slot = findPort("tester · sweep")) < 0 &&
              std::chrono::steady_clock::now() - t0 < std::chrono::seconds(12)) {
          next += std::chrono::microseconds((int64_t)((double)kBlock * 1000000.0 / kSampleRate));
          std::this_thread::sleep_until(next - std::chrono::milliseconds(2));
          while (std::chrono::steady_clock::now() < next) {
          }
          pumpBoth();
-         name0 = portName(0);
       }
    }
-   CHECK_MSG(name0 == "tester · sweep", "port 0 name = \"" + name0 + "\" (want \"tester · sweep\")");
+   CHECK_MSG(slot >= 0, "room channel \"tester · sweep\" never got a port");
+   if (slot < 0) {
+      lb_sink_destroy(room);
+      lb_sink_destroy(raw);
+      inst.teardown();
+      lb_destroy(pub);
+      return;
+   }
 
-   // Collect ~1s of port-0 audio (same real-time pacing).
+   // Collect ~1s of that port's audio (same real-time pacing).
    std::vector<float> col;
    {
       auto t0 = std::chrono::steady_clock::now();
@@ -281,7 +296,7 @@ TEST(wail_recv_hears_only_room_published) {
          }
          pumpBoth();
          for (uint32_t i = 0; i < kBlock; i++)
-            if (outL[0][i] != 0.0f || col.size() > 0) col.push_back(outL[0][i]);
+            if (outL[slot][i] != 0.0f || col.size() > 0) col.push_back(outL[slot][i]);
       }
    }
    CHECK(col.size() >= 48000 / 2);
@@ -295,16 +310,16 @@ TEST(wail_recv_hears_only_room_published) {
       }
       double rms = sqrt(sq / col.size());
       double freq = crossings / 2.0 / ((double)col.size() / 48000.0);
-      CHECK_MSG(rms > 0.1, "port 0 too quiet (rms=" + std::to_string(rms) + ")");
+      CHECK_MSG(rms > 0.1, "room port too quiet (rms=" + std::to_string(rms) + ")");
       // CI runners stall the real-time publisher/recv pacing and the renderer
       // honestly skips late buffers, garbling the sine — fidelity stays
       // local-only; assignment + audio flow are the CI-verified behaviors.
       if (getenv("GITHUB_ACTIONS") == nullptr)
-         CHECK_MSG(freq > 380 && freq < 500, "port 0 freq = " + std::to_string(freq) + " Hz, want ~440");
+         CHECK_MSG(freq > 380 && freq < 500, "room port freq = " + std::to_string(freq) + " Hz, want ~440");
    }
 
    // The raw channel must never be assigned a named port.
-   for (uint32_t idx = 1; idx < 4; idx++) {
+   for (uint32_t idx = 0; idx < (uint32_t)kPorts; idx++) {
       std::string nm = portName(idx);
       CHECK_MSG(nm.find("raw-channel") == std::string::npos,
                 "raw channel got a port: \"" + nm + "\"");
@@ -312,6 +327,123 @@ TEST(wail_recv_hears_only_room_published) {
 
    lb_sink_destroy(room);
    lb_sink_destroy(raw);
+   inst.teardown();
+   lb_destroy(pub);
+}
+
+// The app renames a room channel in place once the sender's stream name
+// arrives (the channel id survives — that's affinity). The recv plugin must
+// relabel the port that channel already holds, not take a second one: keying
+// slots by name took a fresh port per rename and never released the first,
+// since its id was still live so the disappeared-channel reclaim never fired.
+// Also guards the subscribe filter: a raw LAN channel whose name merely starts
+// with "WAIL" (a WAIL Send track named "WAIL Bass") is not room content.
+TEST(wail_recv_renames_in_place_and_ignores_unprefixed) {
+   wailtest::ClapInstance inst;
+   std::string err;
+   CHECK_MSG(inst.load(WAIL_RECV_PATH, "software.wail.recv", 48000.0, 256, 256, &err),
+             err.c_str());
+   if (!inst.plugin) return;
+
+   lb_link *pub = lb_create(120.0);
+   lb_enable(pub, true);
+   lb_enable_audio(pub, true);
+   // Pre-rename name, as published before StreamNames sync arrives.
+   lb_sink *room = lb_sink_create(pub, "WAIL · tester · stream 3", 16384);
+   // Unprefixed: a Send-plugin track that happens to be named "WAIL Bass".
+   lb_sink *unprefixed = lb_sink_create(pub, "WAIL Bass", 16384);
+
+   const uint32_t kBlock = 256;
+   std::vector<float> outL[kPorts], outR[kPorts];
+   float *ch[kPorts][2];
+   clap_audio_buffer_t outs[kPorts];
+   for (int p = 0; p < kPorts; p++) {
+      outL[p].assign(kBlock, 0.0f);
+      outR[p].assign(kBlock, 0.0f);
+      ch[p][0] = outL[p].data();
+      ch[p][1] = outR[p].data();
+      outs[p] = clap_audio_buffer_t{};
+      outs[p].channel_count = 2;
+      outs[p].data32 = ch[p];
+   }
+
+   uint64_t frame = 0;
+   auto pumpBoth = [&]() {
+      float l[kBlock], r[kBlock];
+      for (uint32_t i = 0; i < kBlock; i++)
+         l[i] = r[i] = 0.5f * sinf(2.0f * 3.14159265f * 440.0f * (float)(frame + i) / 48000.0f);
+      frame += kBlock;
+      lb_state *st = lb_capture(pub);
+      double beat = lb_beat_at_time(st, lb_clock_micros(pub) + 10000, 4.0);
+      lb_sink_commit(room, st, beat, 4.0, l, r, kBlock, 48000);
+      lb_sink_commit(unprefixed, st, beat, 4.0, l, r, kBlock, 48000);
+      lb_release(st);
+      clap_process_t p{};
+      p.steady_time = -1;
+      p.frames_count = kBlock;
+      p.audio_outputs_count = kPorts;
+      p.audio_outputs = outs;
+      inst.plugin->process(inst.plugin, &p);
+   };
+
+   auto portName = [&](uint32_t idx) -> std::string {
+      auto *ap = (const clap_plugin_audio_ports_t *)inst.plugin->get_extension(inst.plugin, CLAP_EXT_AUDIO_PORTS);
+      clap_audio_port_info_t info{};
+      if (!ap || !ap->get(inst.plugin, idx, false, &info)) return {};
+      return info.name;
+   };
+
+   // Real-time paced, like the roundtrip test: publishing faster than real
+   // time stamps buffers into the future and receivers drop them.
+   auto pumpUntil = [&](auto pred, int seconds) {
+      auto t0 = std::chrono::steady_clock::now();
+      auto next = t0;
+      while (!pred() && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(seconds)) {
+         next += std::chrono::microseconds((int64_t)((double)kBlock * 1000000.0 / kSampleRate));
+         std::this_thread::sleep_until(next - std::chrono::milliseconds(2));
+         while (std::chrono::steady_clock::now() < next) {
+         }
+         pumpBoth();
+      }
+   };
+
+   // Live WAIL rooms on the LAN hold slots too, so find ours by name.
+   auto findPort = [&](const std::string &want) -> int {
+      for (uint32_t i = 0; i < (uint32_t)kPorts; i++)
+         if (portName(i) == want) return (int)i;
+      return -1;
+   };
+
+   pumpUntil([&] { return findPort("tester · stream 3") >= 0; }, 12);
+   int slot = findPort("tester · stream 3");
+   CHECK_MSG(slot >= 0, "channel \"tester · stream 3\" never got a port");
+
+   // Rename in place: same channel id, new name.
+   lb_sink_set_name(room, "WAIL · tester · Guitar");
+   pumpUntil([&] { return findPort("tester · Guitar") >= 0; }, 12);
+   CHECK_MSG(findPort("tester · Guitar") == slot,
+             "rename should relabel port " + std::to_string(slot) + ", got port " +
+                 std::to_string(findPort("tester · Guitar")));
+
+   // Exactly one port for the channel, and no stranded pre-rename label.
+   // Exact names, not a "tester" substring: the previous test's channel can
+   // still be lingering in LAN discovery when this one starts.
+   int labeled = 0;
+   for (uint32_t idx = 0; idx < (uint32_t)kPorts; idx++)
+      if (portName(idx) == "tester · Guitar") labeled++;
+   CHECK_MSG(labeled == 1,
+             "expected 1 port for the renamed channel, found " + std::to_string(labeled));
+   CHECK_MSG(findPort("tester · stream 3") < 0, "pre-rename label stranded on a port");
+
+   // The unprefixed channel must never be assigned.
+   for (uint32_t idx = 0; idx < kPorts; idx++) {
+      std::string nm = portName(idx);
+      CHECK_MSG(nm.find("Bass") == std::string::npos,
+                "unprefixed channel got port " + std::to_string(idx) + ": \"" + nm + "\"");
+   }
+
+   lb_sink_destroy(room);
+   lb_sink_destroy(unprefixed);
    inst.teardown();
    lb_destroy(pub);
 }
