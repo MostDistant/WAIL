@@ -223,6 +223,127 @@ func TestTempoSimCharacterise(t *testing.T) {
 	}
 }
 
+// TestTempoSimDeclaredOnly compares the two architectures over every shape:
+// today's, where WAIL infers tempo intent from what it observes, against
+// grid-alignment-only, where the room tempo moves only when someone declares one
+// and alignment is left to hold the grids together.
+//
+// The grid is the integral of tempo, so the two cannot be fully separated: a
+// standing tempo difference is a phase ramp, and the slew may only correct it at
+// SlewMaxFraction (500 ppm, 0.06 BPM at 120 — of which crystal drift already
+// spends 50-100). The column that decides the question is endδ against maxδ: if
+// alignment is holding, |δ| ends small whatever it peaked at; if inference was
+// load-bearing, δ ends at its peak and is still climbing.
+func TestTempoSimDeclaredOnly(t *testing.T) {
+	// Rebuild the scenarios for every run. Several injectors are stateful — the
+	// one-shot ones latch a `fired` flag — so reusing a config across the two
+	// modes silently skips the disturbance on the second pass and reports a
+	// flawless run that never happened.
+	build := func() []simConfig { return append(shapeScenarios(), declaredOnlyScenarios()...) }
+
+	t.Logf("%-24s %-10s %-9s %8s %8s %8s %7s %6s", "scenario", "peer", "mode", "maxδms", "endδms", "meanδms", "drift%", "rprts")
+	for i := range build() {
+		for _, declared := range []bool{false, true} {
+			run := build()[i]
+			run.duration = simRun
+			run.declaredOnly = declared
+			mode := "inferred"
+			if declared {
+				mode = "declared"
+			}
+			res := runSim(run)
+			for _, pr := range res.peers {
+				t.Logf("%-24s %-10s %-9s %8.1f %8.1f %8.1f %7.1f %6d",
+					res.name, pr.name, mode, pr.maxAbsDeltaMs, pr.endAbsDeltaMs,
+					pr.meanAbsDeltaMs, pr.timeDriftedPct, pr.reports)
+			}
+			t.Logf("%-24s %-10s %-9s roomΔ=%.3f roomEnd=%.3f heardSkewMax=%.1fms",
+				"", "", mode, res.roomExcursionBPM, res.roomEndBPM, res.heardSkewMaxMs)
+		}
+	}
+}
+
+// TestTempoSimAbsorbableOffset finds the largest standing tempo difference grid
+// alignment can absorb on its own, with no tempo propagation at all. This is the
+// number that decides how much of the tempo machinery is needed: a divergence
+// the slew can hold needs nothing, and one it cannot must be propagated, because
+// the grid is the integral of tempo and the error ramps without bound.
+//
+// Predicted ceiling: SlewMaxFraction is 500 ppm (0.06 BPM at 120), of which
+// crystal drift already spends 50-100, so ~0.04-0.06 BPM.
+func TestTempoSimAbsorbableOffset(t *testing.T) {
+	oneMin := stepsIn(time.Minute)
+	// Two ways a tempo can sit away from the room, and they behave nothing alike.
+	// "set once" is a DAW whose project tempo is simply a different number: Link
+	// holds one session tempo, so WAIL's first nudge changes it and the offset
+	// ceases to exist. "held" is automation or an external clock re-asserting
+	// every buffer, which overwrites each nudge before it can accumulate.
+	for _, mode := range []string{"set-once", "held"} {
+		t.Logf("--- %s", mode)
+		t.Logf("%-8s %8s %8s %8s %8s %8s", "offset", "ppm", "maxδms", "endδms", "meanδms", "drift%")
+		for _, off := range []float64{0.02, 0.04, 0.05, 0.055, 0.06, 0.1, 0.2, 0.5} {
+			inject := knobTurn(oneMin, 120+off)
+			if mode == "held" {
+				inject = insistentDAW(oneMin, 120+off)
+			}
+			res := runSim(simConfig{
+				name: fmt.Sprintf("%s-%.2f", mode, off), duration: simRun, declaredOnly: true,
+				peers: []simPeerSpec{
+					{name: "A-off", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+						disturb: inject},
+					{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+				},
+			})
+			pr := res.peers[0]
+			t.Logf("%-8.2f %8.0f %8.1f %8.1f %8.1f %8.1f",
+				off, off/120*1e6, pr.maxAbsDeltaMs, pr.endAbsDeltaMs, pr.meanAbsDeltaMs, pr.timeDriftedPct)
+		}
+	}
+	t.Logf("slew authority = %.0f ppm (%.3f BPM at 120); perceptual threshold %d ms",
+		interval.SlewMaxFraction*1e6, interval.SlewAuthorityBPM(120), interval.AlignThresholdUs/1000)
+}
+
+// declaredOnlyScenarios are the two cases that decide the trade the other way
+// round: the sanctioned path working, and the cost of losing inference.
+func declaredOnlyScenarios() []simConfig {
+	oneMin := stepsIn(time.Minute)
+	return []simConfig{
+		{
+			// The sanctioned path: a peer declares 122 in WAIL's own UI. Must
+			// propagate and leave both grids aligned in either mode.
+			name: "10-declared-change-122",
+			peers: []simPeerSpec{
+				{name: "A-declares", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: declareOnce(2*oneMin, 122)},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+		{
+			// The cost: a DAW knob turn of 2 BPM that inference would have
+			// propagated. Declared-only cannot, so the grids should ramp apart at
+			// 2/120 = 16667 ppm — 33x the slew's authority, audible in ~1.5s.
+			// This is the case a prompt has to catch immediately.
+			name: "11-unpropagated-DAW-2bpm",
+			peers: []simPeerSpec{
+				{name: "A-knob", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: knobTurn(2*oneMin, 122)},
+				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		},
+	}
+}
+
+// declareOnce fires one WAIL-UI tempo change, the path that bypasses inference.
+func declareOnce(at int, to float64) func(*simPeer, int) {
+	fired := false
+	return func(p *simPeer, step int) {
+		if step == at && !fired {
+			fired = true
+			p.declare(to)
+		}
+	}
+}
+
 // TestTempoSimFidelityGate is the check that makes every other number in this
 // file worth reading: the harness must reproduce the two failures we already
 // know today's code has. A model that cannot show us a bug we have seen in the

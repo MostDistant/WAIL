@@ -260,6 +260,8 @@ type simPeer struct {
 	// disturb injects a jitter shape each step, moving tempo or grid the way the
 	// DAW or Link would — never through WAIL's own write path.
 	disturb func(p *simPeer, step int)
+	// declaredOnly suppresses inferred tempo reports (see simConfig).
+	declaredOnly bool
 
 	// Metrics.
 	deltas    []int64 // ground-truth δ, sampled each step
@@ -300,6 +302,19 @@ func (p *simPeer) onSnapshot(bpm float64) {
 	}
 }
 
+// declare models a tempo change made in WAIL's own UI: intent by construction,
+// so it broadcasts immediately and never passes through the detector at all
+// (ADR-0008 decision 3). This is the sanctioned path a declared-only
+// architecture leaves for changing the room tempo — and it is the path
+// App.ChangeBPM does NOT currently take, which is why a UI tempo change never
+// reaches the room today.
+func (p *simPeer) declare(bpm float64) {
+	p.reports = append(p.reports, bpm)
+	p.relay.tempoChange(p, bpm)
+	p.steer.NoteTempoCommitted(bpm, p.now())
+	p.write("declared", bpm)
+}
+
 // write applies a tempo commit through the raw bridge, tagged for the metrics.
 // Steering writes bypass this — they arrive via alignBridge and keep the
 // default "steer" tag.
@@ -320,7 +335,10 @@ func (p *simPeer) step(step int) {
 	}
 
 	// Poll → detect → broadcast (link_types.go:193, session.go:1010-1019).
-	if bpm, changed := p.link.Detector().Check(p.link.State().BPM, p.now()); changed {
+	// Check runs even when its verdict is discarded: it is what feeds the running
+	// mean the tempo-settling gate reads.
+	bpm, changed := p.link.Detector().Check(p.link.State().BPM, p.now())
+	if changed && !p.declaredOnly {
 		if math.Abs(bpm-p.steer.CurrentBPM()) > 0.01 { // session.go:1011
 			p.reports = append(p.reports, bpm)
 			p.relay.tempoChange(p, bpm)              // session.go:1016
@@ -414,6 +432,13 @@ type simConfig struct {
 	duration time.Duration
 	roomBPM  float64
 	peers    []simPeerSpec
+	// declaredOnly models the grid-alignment-only architecture: WAIL never
+	// infers a tempo change from what it observes, so the room tempo moves only
+	// when someone declares one. Entry conformance still adopts the room tempo at
+	// join and the grid slew is untouched — the question this mode answers is
+	// whether alignment alone holds the grids together once tempo agreement is
+	// established, or whether δ ramps away without inference to maintain it.
+	declaredOnly bool
 }
 
 type simResult struct {
@@ -436,7 +461,11 @@ type peerResult struct {
 	name string
 	// Ground-truth phase error against the room grid.
 	maxAbsDeltaMs, p95AbsDeltaMs, meanAbsDeltaMs float64
-	timeDriftedPct                               float64
+	// endAbsDeltaMs is |δ| at the end of the run. Against maxAbsDeltaMs it says
+	// whether alignment recovered or is still ramping away — the question that
+	// decides whether grid alignment alone can carry the architecture.
+	endAbsDeltaMs  float64
+	timeDriftedPct float64
 	// What WAIL did about it.
 	reports          int
 	steerWrites      int
@@ -463,6 +492,7 @@ func runSim(cfg simConfig) simResult {
 			name: spec.name, relay: relay,
 			baseOffsetUs: spec.baseOffsetUs, ppm: spec.ppm,
 			upUs: spec.upUs, downUs: spec.downUs, disturb: spec.disturb,
+			declaredOnly: cfg.declaredOnly,
 		}
 		d := newTunedTempoChangeDetector(bpm, spec.detector)
 		p.link = newSimLink(bpm, spec.beat0, p.localUs(0), d, p.now)
@@ -512,6 +542,9 @@ func (p *simPeer) result() peerResult {
 		if abs[i] > r.maxAbsDeltaMs {
 			r.maxAbsDeltaMs = abs[i]
 		}
+	}
+	if n := len(p.deltas); n > 0 {
+		r.endAbsDeltaMs = math.Abs(float64(p.deltas[n-1])) / 1000
 	}
 	if len(abs) > 0 {
 		r.meanAbsDeltaMs = sum / float64(len(abs))
