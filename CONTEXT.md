@@ -7,7 +7,7 @@ WAIL makes remote musicians feel like one Ableton Link session: on each LAN it i
 1. **WAIL is primarily a Link peer.** Audio enters WAIL as local Link Audio channels and leaves it as published Link Audio channels; time enters and leaves as Link sync. If an app speaks Link + Link Audio, it works with WAIL with nothing to install. For DAWs without Link Audio there is one **optional, opt-in** bridge: WAIL Send / WAIL Receive (ADR-0007) — CLAP plugins that are themselves Link peers, making the DAW a Link Audio citizen outright. It stays optional so "nothing to install" stays the norm.
 2. **Intervalic, not real-time.** The NINJAM model: everyone hears everyone else's *previous* interval, perfectly beat-aligned. The delay is a fixed, configured number of intervals (default one), by design. WAIL never chases sub-20ms streaming over the WAN.
 3. **The WAN leg is loss-free.** Everything WAIL captures is completely delivered to every peer — the interval offset buys the time to do it, and dropping samples to save milliseconds is never the right trade. The LAN hop is Link Audio's domain: best-effort by design; WAIL detects loss there, conceals what it can, and surfaces the rest as metrics rather than hiding it.
-4. **Ableton Link owns time.** WAIL never invents a musical clock — it participates as a Link peer, and the local Link session is authoritative for tempo, beat, and within-bar phase. Two deliberate, narrow exceptions keep each local interval grid physically aligned to the room grid (ADR-0006): a consented **entry conformance** snap at join/rejoin — transition moments only, and only when the measured alignment error exceeds the perceptual threshold — and a gated **grid slew** in steady state that closes drift with bounded tempo nudges, suppressed for a few seconds after any tempo change and never a `ForceBeat` outside entry. Peer RTT measurement feeds this alignment as well as diagnostics.
+4. **Ableton Link owns time; the room owns tempo.** WAIL never invents a musical clock — it participates as a Link peer, and the local Link session is authoritative for beat and within-bar phase. Tempo is the exception (ADR-0008): the room is authoritative and a peer's session is held to it, because a session tempo also moves for reasons nobody chose — a Link merge, a joining peer, a wandering clock — and those must not become the room's tempo. Two deliberate, narrow exceptions keep each local interval grid physically aligned to the room grid (ADR-0006): a consented **entry conformance** snap whenever the local grid stops being the grid we aligned to — a join, a rejoin, or a grid jump — and only when the measured alignment error exceeds the perceptual threshold; and a gated **grid slew** in steady state that closes drift with bounded tempo nudges. A `ForceBeat` belongs to entry conformance alone: a discontinuity is snapped, accumulated drift is slewed, and neither substitutes for the other. Peer RTT measurement feeds this alignment as well as diagnostics.
 5. **Boring transport.** One relay server carries everything across the WAN — JSON sync and binary audio — and owns the room interval clock (NINJAM-style); otherwise it is a dumb broadcast relay. No P2P, no ICE/STUN/TURN, no per-peer connection state. We pay an extra hop for a system one person can hold in their head.
 6. **One app is the whole system.** Session orchestration, Link bridging, codec, and networking live in a single app per musician (GUI or headless). The optional WAIL Send / WAIL Receive plugins (ADR-0007) are a narrow exception: they are plugin-resident only for Link Audio rendering (each is a Link peer — sink/source and timeline mapping). Room intelligence — codec, intervals, relay, room clock — never enters any plugin.
 7. **Real-time callbacks are sacred.** No allocation, locking, encoding, or blocking I/O on Link's audio delivery threads. Heavy work happens on background threads.
@@ -112,14 +112,33 @@ A peer's interval boundaries derived from its own Link session timeline at the B
 The phase distance between a peer's local grid and the room grid at a moment in time. The quantity entry conformance and the grid slew measure and act on.
 
 **Entry conformance**:
-The rule every peer runs on join or rejoin: adopt the room tempo, measure δ, and snap only when |δ| exceeds the perceptual threshold (~25 ms). Mid-blip reconnects find δ ≈ 0 and no-op; first joins and app restarts snap.
+The rule a peer runs whenever the local grid stops being the grid it aligned to — a join, a rejoin, or a grid jump: adopt the room tempo, measure δ, and snap only when |δ| exceeds the perceptual threshold (~25 ms). The measurement forks the behaviour, not the event: mid-blip reconnects find δ ≈ 0 and no-op; first joins and app restarts snap.
 
-**Join-time snap**:
-The one-time re-mapping of the local Link session onto the room grid during entry conformance. Confined to transition moments: never fires mid-session, never when already aligned.
+**Grid snap**:
+The re-mapping of the local Link session onto the room grid during entry conformance. Confined to transition moments and to a measured need: never when already aligned, and never as a substitute for the slew on accumulated drift.
+_Avoid_: join-time snap (it also answers a mid-session grid jump)
 
 **Grid slew**:
 A small bounded tempo nudge (≤0.05%, below the pitch JND) that closes steady-state alignment error; gated so it never acts near user tempo changes or just after entry, and cancelled by any mid-slew tempo commit or rejoin. The only steady-state steering WAIL ever applies.
 _Avoid_: phase lock (WAIL deliberately does not phase-lock across the WAN), micro-slew (the capture path's per-buffer sample-domain drift correction — a different mechanism)
+
+**Grid jump**:
+A discontinuity in the local Link timeline — the grid moving by more than elapsed time can account for, because something re-mapped the session (a Link merge as a peer joins the LAN, a transport reset). Distinct from drift, which is continuous: a jump is answered by entry conformance, drift by the grid slew.
+
+**Tempo enforcement**:
+Holding a peer's Link session to the room tempo when its divergence is not a deliberate change. Yields after repeated reverts rather than fighting a source that keeps re-asserting.
+
+**Declared tempo change**:
+A tempo change made in WAIL's own UI. Intent by construction, so it needs no inference: it is broadcast as-is and re-anchors the room.
+_Avoid_: manual tempo change
+
+**Observed tempo change**:
+A tempo reading taken from the local Link session, which carries a musician's intent and the session's disturbances mixed together. Only becomes a room tempo change once the detector judges it deliberate.
+_Avoid_: DAW tempo change (a DAW is the usual source, but the distinction is inferred-vs-declared, not which app)
+
+**Tempo-settling gate**:
+The condition that holds the grid slew off while a tempo change is still resolving, so steering never fights a change in flight.
+_Avoid_: same-rate gate (it tested whether two grids ticked at the same rate — a different question)
 
 **Grid steer**:
 The module that owns the ADR-0006 surface end to end: entry conformance, the gated grid slew, snapshot-tempo arbitration, and the committed-tempo record (what tempo the session last committed to, and when — the single home of the slew's tempo gate). Implemented as `internal/align`'s `Steerer`; it drives the `GridAligner` math and the Link bridge, and the session loop only forwards events to it.
