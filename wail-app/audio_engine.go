@@ -107,10 +107,30 @@ type GridJump struct {
 	SelfCaused bool    // WAIL moved its own grid (an entry snap) — not a fault
 }
 
-// gridSnapAttributionWindow is how recently our own snap must have run for a
-// detected jump to be credited to it. Comfortably longer than the poll
-// interval, far shorter than the gap between real merges.
-const gridSnapAttributionWindow = 2 * time.Second
+const (
+	// gridSnapAttributionWindow is how recently our own snap must have run for
+	// a detected jump to be credited to it. Recency is necessary but never
+	// sufficient — see matchesOwnSnap, which also requires the magnitudes to
+	// agree, so one snap cannot blanket-absorb an unrelated jump.
+	gridSnapAttributionWindow = 2 * time.Second
+	// snapMatchToleranceMs is the floor on that magnitude agreement, for snaps
+	// small enough that a percentage would be tighter than measurement noise.
+	snapMatchToleranceMs = 50
+	// gridJumpEvidenceWindow is how far back peer/tempo movement still counts
+	// as the explanation. Link's peer discovery and the timeline merge it
+	// triggers are tens of milliseconds apart, so same-tick evidence misses it.
+	gridJumpEvidenceWindow = 3 * time.Second
+)
+
+// jumpEvidence is when the attributable inputs last moved, carried across
+// ticks by the emit loop so a jump can be explained by something that happened
+// slightly before it.
+type jumpEvidence struct {
+	peersChangedAt time.Time
+	peersFrom      uint64
+	tempoChangedAt time.Time
+	tempoFrom      float64
+}
 
 // EngineHealth is a snapshot of cumulative audio-path diagnostics.
 type EngineHealth struct {

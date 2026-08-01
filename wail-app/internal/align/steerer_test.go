@@ -969,21 +969,24 @@ func TestGridJumpReRunsEntryConformance(t *testing.T) {
 // Within one bucket the reported δ must track the real one. Emitting only on a
 // bucket change froze the number at whatever δ was when the state last
 // changed, so a grid recovering from 2.6s to 60ms still read 2605ms.
+//
+// This is the gate-OPEN path deliberately: while the gate is shut the rates
+// differ and δ sweeps, so that path reports the bucket only.
 func TestReportedErrorTracksDeltaInsideAState(t *testing.T) {
 	now := time.Now()
 	s, f, emits := newSteerer(16_600_000) // 2.6s late — "drifted"
 	observe(s, now)
 	now = now.Add(snapSettle + time.Second)
-	f.state.BPM = 130 // gate shut, so nothing steers and δ is ours to script
 	s.Tick(16, now)
 	if lastEmit(emits) != "drifted" {
 		t.Fatalf("expected drifted, got %q", lastEmit(emits))
 	}
 
-	// Still drifted, but much closer than before.
+	// Still drifted, but far closer than the number last reported.
 	f.timeAtBeat = 14_060_000 // 60ms late
 	*emits = nil
-	s.Tick(16, now.Add(time.Second))
+	now = now.Add(emitMinInterval + time.Second)
+	s.Tick(16, now)
 
 	if len(*emits) == 0 {
 		t.Fatal("δ improved from 2.6s to 60ms inside one bucket and nothing was reported")
@@ -992,11 +995,119 @@ func TestReportedErrorTracksDeltaInsideAState(t *testing.T) {
 		t.Fatalf("reported δ = %.1f ms, want ~60", errMs)
 	}
 
-	// Jitter below the step must not spam the UI.
-	f.timeAtBeat = 14_062_000 // 2ms of movement
+	// Movement below the step is jitter, not news.
+	f.timeAtBeat = 14_062_000
 	*emits = nil
-	s.Tick(16, now.Add(2*time.Second))
+	s.Tick(16, now.Add(emitMinInterval+time.Second))
 	if len(*emits) != 0 {
-		t.Fatalf("2ms of jitter emitted %d events", len(*emits))
+		t.Fatalf("2ms of movement emitted %d events", len(*emits))
+	}
+}
+
+// The wedge is specifically a stale slew target holding the gate shut against
+// itself. With no slew in flight the gate is shut because something else
+// genuinely owns the tempo — a DAW tempo ramp holds it shut for the length of
+// the ramp — and that is the case the gate exists to respect. Escalating there
+// yanks the tempo back and snaps the grid, audibly, every timeout.
+func TestGateShutWithNoSlewNeverEscalates(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_000_000) // aligned: no slew will start
+	observe(s, now)
+	now = now.Add(snapSettle + time.Second)
+
+	f.state.BPM = 130 // an external owner holds the tempo away from the room
+	f.snaps, f.tempos = nil, nil
+	for i := 0; i < 200; i++ { // ~3 minutes of ticks
+		s.Tick(16, now.Add(time.Duration(i)*time.Second))
+	}
+
+	if len(f.snaps) != 0 {
+		t.Fatalf("escalated with no slew in flight: %d grid snaps during a tempo ramp", len(f.snaps))
+	}
+	if len(f.tempos) != 0 {
+		t.Fatalf("fought the tempo owner: %v", f.tempos)
+	}
+	if s.entryPending {
+		t.Fatal("re-armed entry conformance over a tempo nobody asked us to take")
+	}
+}
+
+// The wedge timer must measure ticks that actually evaluated the gate, not
+// wall time. Otherwise a spell where Tick returns early — a tempo-commit
+// burst, or alignment switched off — leaves it accruing, and the first
+// evaluated tick escalates with no grace at all.
+func TestWedgeTimerCountsOnlyEvaluatedTicks(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_020_000)
+	observe(s, now)
+	now = now.Add(snapSettle + time.Second)
+	for i := 0; i < slewPersistenceTicks; i++ {
+		s.Tick(16, now)
+	}
+	if s.slewTarget == 0 {
+		t.Fatal("expected an active slew")
+	}
+
+	f.state.BPM = 130 // gate shuts
+	s.Tick(16, now)   // timer starts
+
+	// Alignment goes off for well past the timeout, then comes back.
+	s.SetEnabled(false, 16, now.Add(time.Second))
+	s.SetEnabled(true, 16, now.Add(time.Minute))
+	observe(s, now.Add(time.Minute)) // entry runs, clearing entryPending
+
+	// The very next evaluated tick must not escalate on a minute-old timer.
+	s.Tick(16, now.Add(time.Minute+snapSettle+time.Second))
+	if s.entryPending {
+		t.Fatal("escalated instantly on a stale timer — the gate was not continuously shut")
+	}
+}
+
+// Abandoning a slew must put the tempo back. The slew holds the session away
+// from the room tempo, so clearing the bookkeeping alone strands it there with
+// nothing tracking it — SetEnabled's restore keys off the very target cleared.
+func TestAbandonedSlewRestoresTheTempo(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_020_000)
+	observe(s, now)
+	now = now.Add(snapSettle + time.Second)
+	for i := 0; i < slewPersistenceTicks; i++ {
+		s.Tick(16, now)
+	}
+	slewed := lastTempo(f)
+	if s.slewTarget == 0 || approxEq(slewed, 120) {
+		t.Fatalf("expected the slew to hold the tempo off 120, got %v", f.tempos)
+	}
+
+	s.OnGridJump(5.22, now)
+
+	if got := lastTempo(f); !approxEq(got, 120) {
+		t.Fatalf("tempo left at %v after abandoning the slew, want the room's 120", got)
+	}
+}
+
+// A δ that oscillates by more than the step must not emit every tick: the
+// reference is the last *emitted* value, so the step alone bounds nothing.
+func TestOscillatingDeltaDoesNotStreamEvents(t *testing.T) {
+	now := time.Now()
+	s, f, emits := newSteerer(14_040_000) // 40ms: "drifted"
+	observe(s, now)
+	now = now.Add(snapSettle + time.Second)
+	s.Tick(16, now)
+	*emits = nil
+
+	// ±12ms of jitter inside one bucket, one tick a second.
+	for i := 0; i < 30; i++ {
+		// 40ms vs 60ms: 20ms apart, so past the step, but both well inside
+		// the same bucket — jitter, not a state change.
+		if i%2 == 0 {
+			f.timeAtBeat = 14_040_000
+		} else {
+			f.timeAtBeat = 14_060_000
+		}
+		s.Tick(16, now.Add(time.Duration(i+1)*time.Second))
+	}
+	if len(*emits) > 30/int(emitMinInterval/time.Second)+1 {
+		t.Fatalf("jitter streamed %d events over 30 ticks", len(*emits))
 	}
 }

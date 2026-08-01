@@ -1304,38 +1304,67 @@ func (e *linkAudioEngine) TakeGridJump() (GridJump, bool) {
 	return *j, true
 }
 
+// noteGridJump hands a jump to the session — unless we caused it ourselves.
+// Our own snap moves the grid on purpose: re-entering conformance over it
+// would re-measure a grid we just aligned, and reporting it would send the
+// room hunting a merge that never happened.
+func (e *linkAudioEngine) noteGridJump(j GridJump) {
+	if j.SelfCaused {
+		return
+	}
+	e.gridJump.Store(&j)
+}
+
 // classifyGridJump attributes a beat discontinuity to whatever evidence the
 // tick carries. Order matters: our own snap first (we know we did it), then a
 // changed peer set (a session merge re-phases the timeline), then a tempo
 // move. Anything left is reported as unattributed rather than guessed at.
-func (e *linkAudioEngine) classifyGridJump(beats, roomBPM, sessionBPM, lastSessionBPM float64, peers, lastPeers uint64, bpi float64) GridJump {
+func (e *linkAudioEngine) classifyGridJump(beats, roomBPM, sessionBPM float64, peers uint64, ev jumpEvidence, bpi float64, now time.Time) GridJump {
 	ms := 0.0
 	if roomBPM > 0 {
 		ms = beats * 60_000 / roomBPM
 	}
 	j := GridJump{Beats: beats, Ms: ms, Intervals: int64(math.Round(beats / bpi)), Peers: peers}
 
-	snapAge := time.Since(time.Unix(0, e.lastSnapAtNs.Load()))
 	switch {
-	case e.lastSnapAtNs.Load() != 0 && snapAge < gridSnapAttributionWindow:
+	case e.matchesOwnSnap(ms, now):
 		j.SelfCaused = true
 		j.Cause = "our own grid snap"
-		j.Detail = fmt.Sprintf("entry conformance snapped %+.0f ms %s ago; peers=%d tempo=%.2f BPM",
-			float64(e.lastSnapDeltaUs.Load())/1000, snapAge.Round(time.Millisecond), peers, sessionBPM)
-	case peers != lastPeers:
+		j.Detail = fmt.Sprintf("entry conformance snapped %+.0f ms, which is this jump; peers=%d tempo=%.2f BPM",
+			float64(e.lastSnapDeltaUs.Load())/1000, peers, sessionBPM)
+	case !ev.peersChangedAt.IsZero() && now.Sub(ev.peersChangedAt) < gridJumpEvidenceWindow:
 		j.Cause = "Link session merge"
-		j.Detail = fmt.Sprintf("LAN peer count %d→%d — a joining peer re-phased the shared timeline; tempo=%.2f BPM",
-			lastPeers, peers, sessionBPM)
-	case math.Abs(sessionBPM-lastSessionBPM) > 0.01:
+		j.Detail = fmt.Sprintf("LAN peer count %d→%d, %s before the jump — a joining peer re-phased the shared timeline; tempo=%.2f BPM",
+			ev.peersFrom, peers, now.Sub(ev.peersChangedAt).Round(time.Millisecond), sessionBPM)
+	case !ev.tempoChangedAt.IsZero() && now.Sub(ev.tempoChangedAt) < gridJumpEvidenceWindow:
 		j.Cause = "session tempo change"
-		j.Detail = fmt.Sprintf("session tempo %.2f→%.2f BPM (room %.2f); peers=%d",
-			lastSessionBPM, sessionBPM, roomBPM, peers)
+		j.Detail = fmt.Sprintf("session tempo %.2f→%.2f BPM, %s before the jump (room %.2f); peers=%d",
+			ev.tempoFrom, sessionBPM, now.Sub(ev.tempoChangedAt).Round(time.Millisecond), roomBPM, peers)
 	default:
 		j.Cause = "unattributed"
-		j.Detail = fmt.Sprintf("no peer or tempo change this tick (peers=%d, tempo=%.2f BPM) — a transport reset or an external ForceBeatAtTime",
-			peers, sessionBPM)
+		j.Detail = fmt.Sprintf("no peer or tempo change in the preceding %s (peers=%d, tempo=%.2f BPM) — a transport reset or an external ForceBeatAtTime",
+			gridJumpEvidenceWindow, peers, sessionBPM)
 	}
 	return j
+}
+
+// matchesOwnSnap reports whether a jump is the grid snap we just performed —
+// recent AND of the same magnitude. Recency alone is not evidence: a snap
+// smaller than the detector's own 0.5-beat threshold produces no jump at all,
+// yet would blanket-absorb a real merge arriving inside the window, withholding
+// it so nothing ever re-aligns. The record is consumed, so one snap can explain
+// at most one jump.
+func (e *linkAudioEngine) matchesOwnSnap(ms float64, now time.Time) bool {
+	at := e.lastSnapAtNs.Load()
+	if at == 0 || now.Sub(time.Unix(0, at)) >= gridSnapAttributionWindow {
+		return false
+	}
+	snapMs := math.Abs(float64(e.lastSnapDeltaUs.Load()) / 1000)
+	if math.Abs(snapMs-math.Abs(ms)) > math.Max(snapMatchToleranceMs, 0.2*snapMs) {
+		return false
+	}
+	e.lastSnapAtNs.Store(0)
+	return true
 }
 
 // Health sums the per-channel and per-stream diagnostic counters. Capture-side
@@ -1408,6 +1437,7 @@ func (e *linkAudioEngine) emitLoop() {
 	haveLastBeat := false
 	var lastPeers uint64
 	var lastSessionBPM float64
+	var ev jumpEvidence
 
 	for {
 		select {
@@ -1445,19 +1475,27 @@ func (e *linkAudioEngine) emitLoop() {
 			if haveLastBeat {
 				expected := (float64(clockMicros)/1e6 - lastBeatAt) * tempo / 60.0
 				if d := localBeat - lastBeat; math.Abs(d-expected) > 0.5 {
-					jump := e.classifyGridJump(d, tempo, sessionBPM, lastSessionBPM, peers, lastPeers, bpi)
+					jump := e.classifyGridJump(d, tempo, sessionBPM, peers, ev, bpi, time.Now())
 					log.Printf("[audio] WARN: local Link beat jumped %+.2f beats (%+.0f ms, expected %+.2f from elapsed time) — cause: %s; %s",
 						jump.Beats, jump.Ms, expected, jump.Cause, jump.Detail)
 					// Our own snap moves the grid on purpose. Re-entering
 					// conformance over it would re-measure a grid we just
 					// aligned, and reporting it as a jump would send everyone
 					// hunting a merge that never happened.
-					if !jump.SelfCaused {
-						e.gridJump.Store(&jump)
-					}
+					e.noteGridJump(jump)
 				}
 			}
 			lastBeat, lastBeatAt, haveLastBeat = localBeat, float64(clockMicros)/1e6, true
+			// Remember *when* the evidence last moved, not just the previous
+			// tick's values: peer discovery and the timeline merge it causes
+			// are tens of milliseconds apart, so comparing across one tick
+			// reports the merge it exists to name as "unattributed".
+			if haveLastBeat && peers != lastPeers {
+				ev.peersChangedAt, ev.peersFrom = time.Now(), lastPeers
+			}
+			if haveLastBeat && math.Abs(sessionBPM-lastSessionBPM) > 0.01 {
+				ev.tempoChangedAt, ev.tempoFrom = time.Now(), lastSessionBPM
+			}
 			lastPeers, lastSessionBPM = peers, sessionBPM
 
 			if labeled && (!haveLast || localIdx > lastLocalIdx) {

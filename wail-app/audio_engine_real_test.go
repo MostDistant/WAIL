@@ -569,7 +569,9 @@ func TestGridJumpAttributesOurOwnSnap(t *testing.T) {
 	le := newCaptureTestEngine(t)
 	le.OnGridSnap(2_600_000) // entry conformance just snapped +2.6s
 
-	j := le.classifyGridJump(5.22, 120, 120, 120, 3, 3, 16)
+	now := time.Now()
+	// 5.22 beats at 120 BPM is 2610ms — the snap we just made.
+	j := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, now)
 
 	if !j.SelfCaused {
 		t.Fatalf("snap not recognised as self-caused: %+v", j)
@@ -577,18 +579,64 @@ func TestGridJumpAttributesOurOwnSnap(t *testing.T) {
 	if j.Cause != "our own grid snap" {
 		t.Fatalf("cause = %q", j.Cause)
 	}
-	// Self-caused jumps must never reach the session: no re-entry, no report.
-	le.gridJump.Store(nil)
+	// Consumed: one snap explains one jump, so a second jump in the same
+	// window is not silently absorbed by it.
+	j2 := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, now)
+	if j2.SelfCaused {
+		t.Fatal("one snap absorbed two jumps — a real one could vanish behind it")
+	}
+}
+
+// Recency alone must not credit a jump to our snap. A snap below the
+// detector's own threshold produces no jump at all, so crediting anything that
+// merely follows it would swallow a real merge and leave the grid unaligned
+// with nothing reported and nothing re-armed.
+func TestGridJumpDoesNotCreditAMismatchedSnap(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	le.OnGridSnap(60_000) // a 60ms snap: far too small to have caused a 2.6s jump
+
+	j := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, time.Now())
+
+	if j.SelfCaused {
+		t.Fatalf("a 60ms snap was credited with a 2610ms jump: %+v", j)
+	}
+	if j.Cause != "unattributed" {
+		t.Fatalf("cause = %q, want \"unattributed\"", j.Cause)
+	}
+}
+
+// The emit loop must withhold self-caused jumps from the session — the actual
+// guard, not just the classification behind it.
+func TestSelfCausedJumpIsWithheldFromTheSession(t *testing.T) {
+	le := newCaptureTestEngine(t)
+
+	le.noteGridJump(GridJump{Beats: 5.22, Cause: "our own grid snap", SelfCaused: true})
 	if _, ok := le.TakeGridJump(); ok {
 		t.Fatal("a self-caused jump was handed to the session")
+	}
+
+	le.noteGridJump(GridJump{Beats: 5.22, Cause: "Link session merge"})
+	got, ok := le.TakeGridJump()
+	if !ok {
+		t.Fatal("a real jump was not handed to the session")
+	}
+	if got.Cause != "Link session merge" {
+		t.Fatalf("cause = %q", got.Cause)
+	}
+	if _, ok := le.TakeGridJump(); ok {
+		t.Fatal("the jump was delivered twice")
 	}
 }
 
 func TestGridJumpAttributesPeerAndTempoChanges(t *testing.T) {
 	le := newCaptureTestEngine(t)
 
-	// A peer joining re-phases the shared timeline.
-	j := le.classifyGridJump(5.22, 120, 120, 120, 4, 3, 16)
+	now := time.Now()
+
+	// A peer joined a moment before the jump — discovery and the timeline
+	// merge it causes are tens of ms apart, so the evidence must still count.
+	ev := jumpEvidence{peersChangedAt: now.Add(-200 * time.Millisecond), peersFrom: 3}
+	j := le.classifyGridJump(5.22, 120, 120, 4, ev, 16, now)
 	if j.Cause != "Link session merge" {
 		t.Fatalf("peer change cause = %q, want \"Link session merge\"", j.Cause)
 	}
@@ -599,20 +647,27 @@ func TestGridJumpAttributesPeerAndTempoChanges(t *testing.T) {
 		t.Fatalf("peers = %d, want 4", j.Peers)
 	}
 
+	// Evidence older than the window is not an explanation.
+	stale := jumpEvidence{peersChangedAt: now.Add(-time.Hour), peersFrom: 3}
+	if j := le.classifyGridJump(5.22, 120, 120, 4, stale, 16, now); j.Cause != "unattributed" {
+		t.Fatalf("hour-old peer change still credited: %q", j.Cause)
+	}
+
 	// Tempo moved, peer set steady.
-	j = le.classifyGridJump(2.0, 120, 124, 120, 3, 3, 16)
+	evT := jumpEvidence{tempoChangedAt: now.Add(-100 * time.Millisecond), tempoFrom: 120}
+	j = le.classifyGridJump(2.0, 120, 124, 3, evT, 16, now)
 	if j.Cause != "session tempo change" {
 		t.Fatalf("tempo change cause = %q", j.Cause)
 	}
 
 	// Nothing observable — say so rather than guessing.
-	j = le.classifyGridJump(2.0, 120, 120, 120, 3, 3, 16)
+	j = le.classifyGridJump(2.0, 120, 120, 3, jumpEvidence{}, 16, now)
 	if j.Cause != "unattributed" {
 		t.Fatalf("cause = %q, want \"unattributed\"", j.Cause)
 	}
 
 	// The magnitude conversions carry the units the log quotes.
-	j = le.classifyGridJump(4.0, 120, 120, 120, 3, 3, 16)
+	j = le.classifyGridJump(4.0, 120, 120, 3, jumpEvidence{}, 16, now)
 	if math.Abs(j.Ms-2000) > 1 {
 		t.Fatalf("4 beats at 120 BPM = %.0f ms, want 2000", j.Ms)
 	}

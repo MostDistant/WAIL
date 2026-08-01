@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/bcrypt"
@@ -761,6 +762,35 @@ func (h *hub) broadcastAudioBinary(room, peerID string, c *conn, data []byte, lo
 	}
 }
 
+// serverLoggedTarget is the only client log target mirrored into the relay's
+// own log — the grid-alignment diagnostics, which describe faults affecting a
+// whole room rather than one machine.
+const serverLoggedTarget = "align"
+
+// maxServerLoggedMessage caps a mirrored message. Clients may send up to the
+// websocket read limit, and this text reaches the operator's log pipeline.
+const maxServerLoggedMessage = 512
+
+// sanitizeForLog makes an unauthenticated client string safe to write into the
+// relay's log: control characters (newlines above all — they let a client forge
+// whole log lines and assert anything about any room) become spaces, and the
+// result is truncated.
+func sanitizeForLog(s string) string {
+	if len(s) > maxServerLoggedMessage {
+		s = s[:maxServerLoggedMessage] + "…(truncated)"
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r == '\t' || unicode.IsControl(r) {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func (h *hub) broadcastLog(room, peerID string, c *conn, msg clientMsg) {
 	if room == "" {
 		return
@@ -769,12 +799,17 @@ func (h *hub) broadcastLog(room, peerID string, c *conn, msg clientMsg) {
 	if r == nil {
 		return
 	}
-	// Warnings and errors also land in the relay's own log. A client-side
-	// fault that hits a whole room (a Link session merge, say) is otherwise
-	// only visible on whichever machine happened to notice it — and only if
-	// someone thinks to collect that machine's log afterwards.
-	if msg.Level == "warn" || msg.Level == "error" {
-		log.Printf("room %s peer %s %s [%s] %s", room, peerID, msg.Level, msg.Target, msg.Message)
+	// A room-wide fault (a Link session merge, say) is otherwise only visible
+	// on whichever machine happened to notice it, and only if someone thinks
+	// to collect that machine's log afterwards — so those land in the relay's
+	// log too. Deliberately narrow: only the "align" target, whose messages
+	// this relay's own code shape knows, and never the general client log
+	// stream. Peers already echo each other's logs, so mirroring everything
+	// would multiply a room's chatter into the operator's log — and every
+	// field here is unauthenticated client input.
+	if msg.Target == serverLoggedTarget && (msg.Level == "warn" || msg.Level == "error") {
+		log.Printf("room %s peer %s %s [%s] %s", room, peerID, msg.Level, msg.Target,
+			sanitizeForLog(msg.Message))
 	}
 	raw, err := json.Marshal(map[string]any{
 		"type": "log", "from": peerID, "level": msg.Level,
