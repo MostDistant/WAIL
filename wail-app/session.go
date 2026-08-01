@@ -513,6 +513,12 @@ func sessionLoop(
 			case "SetLoopback":
 				loopbackEnabled = cmd.Enabled
 				mesh.SendLoopback(cmd.Enabled)
+				if !cmd.Enabled {
+					// The echo stops, so no StreamNames or PeerLeft will ever reach
+					// these — retire them explicitly or the monitor channels stay
+					// published for the rest of the session.
+					audioEngine.DropPeer(identity + ":loopback")
+				}
 				logInfo("[loopback] server echo enabled=%v", cmd.Enabled)
 			case "SetMetronome":
 				audioEngine.SetMetronome(cmd.Enabled)
@@ -590,16 +596,25 @@ func sessionLoop(
 				log.Printf("[%s] %s", name, ev.Message)
 
 			case "PeerLeft":
-				var name string
+				var name, goneIdentity string
 				peers.WithPeer(ev.PeerID, func(p *PeerState) {
 					if p.DisplayName != nil {
 						name = *p.DisplayName
+					}
+					if p.Identity != nil {
+						goneIdentity = *p.Identity
 					}
 				})
 				if name == "" {
 					name = ev.PeerID
 				}
+				if goneIdentity == "" {
+					goneIdentity = ev.PeerID // pre-Hello peers publish under their peer id
+				}
 				logInfo("Peer %s left", name)
+				// Their channels stay published through the retirement grace, so a
+				// rejoin inside it keeps the same channels (affinity).
+				audioEngine.DropPeer(goneIdentity)
 				peers.Remove(ev.PeerID)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: ev.PeerID})
 
@@ -723,6 +738,13 @@ func sessionLoop(
 					peers.WithPeer(msg.PeerID, func(p *PeerState) {
 						p.Identity = msg.Identity
 					})
+					// Audio that beat this Hello was keyed by peer id (the
+					// identity fallback), so it published under a key nothing
+					// will ever refer to again — retire it, or it lingers beside
+					// the identity-keyed channel as a duplicate.
+					if rid != msg.PeerID {
+						audioEngine.DropPeer(msg.PeerID)
+					}
 					peers.RekeyPeerSlots(msg.PeerID, rid)
 					peers.AssignSlot(msg.PeerID, 0)
 				}
@@ -818,12 +840,28 @@ func sessionLoop(
 				emitter.Emit("chat:message", ChatMessageEvent{SenderName: msg.SenderName, IsOwn: false, Text: msg.Text})
 
 			case "StreamNames":
-				if msg.Names != nil {
-					parsed := StreamNamesFromWire(msg.Names)
-					peers.WithPeer(from, func(p *PeerState) {
-						p.StreamNames = parsed
-					})
+				// A nil Names is "I send nothing", not "no news": the field is
+				// omitempty and syncStreamNames is its only sender, so a peer
+				// dropping to zero streams arrives with the field absent.
+				// Discarding it left their channels published forever.
+				parsed := StreamNamesFromWire(msg.Names)
+				var senderIdentity string
+				peers.WithPeer(from, func(p *PeerState) {
+					p.StreamNames = parsed
+					if p.Identity != nil {
+						senderIdentity = *p.Identity
+					}
+				})
+				if senderIdentity == "" {
+					senderIdentity = from
 				}
+				// The declared set is authoritative: anything of theirs we
+				// publish that is missing from it gets retired once drained.
+				keep := make(map[uint16]bool, len(parsed))
+				for id := range parsed {
+					keep[id] = true
+				}
+				audioEngine.SetPeerStreams(senderIdentity, keep)
 			}
 
 		// --- Audio from peers ---
@@ -967,16 +1005,23 @@ func sessionLoop(
 		// --- Liveness watchdog ---
 		case <-livenessTicker.C:
 			for _, deadID := range peers.TimedOutPeers(30 * time.Second) {
-				var name string
+				var name, deadIdentity string
 				peers.WithPeer(deadID, func(p *PeerState) {
 					if p.DisplayName != nil {
 						name = *p.DisplayName
+					}
+					if p.Identity != nil {
+						deadIdentity = *p.Identity
 					}
 				})
 				if name == "" {
 					name = deadID
 				}
+				if deadIdentity == "" {
+					deadIdentity = deadID
+				}
 				logWarn("Peer %s timed out", name)
+				audioEngine.DropPeer(deadIdentity)
 				peers.Remove(deadID)
 				mesh.RemovePeer(deadID)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: deadID})
@@ -992,6 +1037,9 @@ func sessionLoop(
 			}
 			for _, pid := range hardPeers {
 				logWarn("Peer %s no identity after 15s — removing", pid)
+				// No Hello ever arrived, so anything they published is keyed by
+				// their peer id (the identity fallback on the audio path).
+				audioEngine.DropPeer(pid)
 				peers.Remove(pid)
 				mesh.RemovePeer(pid)
 				emitter.Emit("peer:left", PeerLeftEvent{PeerID: pid})

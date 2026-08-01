@@ -110,6 +110,28 @@ type linkAudioEngine struct {
 	own          *affinity.OwnChannels // our published sinks, for discovery exclusion
 	nextStreamID uint16
 
+	// loggedRoomSkip remembers which room-prefixed channels we have already
+	// explained skipping (by channel id), so the reason is stated once per
+	// channel instead of on every discovery tick.
+	loggedRoomSkip map[string]bool
+
+	// peerGoneGrace is how long a departed peer's channels stay published
+	// (WAIL_STREAM_RETIRE_SEC), resolved once at construction.
+	peerGoneGrace time.Duration
+
+	// intent is what each sending identity says it is still sending (from their
+	// StreamNames sync, or "gone" when they leave). A published stream absent
+	// from its owner's intent is retired at a boundary once it has drained —
+	// without this, e.emit only ever grows within a session and dead channels
+	// keep publishing silence, holding a port on every WAIL Receive on the LAN.
+	intent map[string]peerIntent
+
+	// retired accumulates the diagnostic counters of retired streams, so the
+	// Health totals the session diffs never go backwards when a stream goes
+	// away (a decrease silently swallows later real events: the delta helper
+	// only logs when now > prev).
+	retired EngineHealth
+
 	// stopping is set under mu before Stop's wg.Wait, and checked before any wg.Add
 	// (startDrainLocked). It stops a late AddPluginSource / SetCaptureEnabled from
 	// racing a wg.Add against the Wait (which would panic) or resurrecting state on a
@@ -132,6 +154,40 @@ type linkAudioEngine struct {
 	// (emit loop publishes, HandleRemoteAudio reads) for label-offset
 	// confirmation. math.MinInt64 until the labeler is aligned.
 	curRoomIdx atomic.Int64
+}
+
+// peerIntent is one identity's declared set of streams. keep holds the stream
+// ids they say they are still sending; gone means they left the room, so
+// nothing of theirs is wanted.
+type peerIntent struct {
+	keep map[uint16]bool
+	gone bool
+}
+
+// Retirement graces, measured from a stream's last frame. A peer that drops a
+// stream said so explicitly, so it only has to outlast frames still in flight.
+// A peer that left may just be blipping, and affinity exists so their channel
+// survives a reconnect and the far side's routing holds — hence far longer.
+const (
+	retireGraceDropped  = 5 * time.Second
+	retireGracePeerGone = 30 * time.Second
+)
+
+// enginePeerGoneGrace resolves how long a departed peer's channels stay
+// published, WAIL_STREAM_RETIRE_SEC overriding the default. Always logs the
+// effective value: a session must be diagnosable from its log alone, without
+// inferring the default from an absent override line.
+func enginePeerGoneGrace() time.Duration {
+	d, src := retireGracePeerGone, "default"
+	if v := os.Getenv("WAIL_STREAM_RETIRE_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			d, src = time.Duration(n)*time.Second, "WAIL_STREAM_RETIRE_SEC"
+		} else {
+			log.Printf("[audio] warn: bad WAIL_STREAM_RETIRE_SEC %q: using %s", v, d)
+		}
+	}
+	log.Printf("[audio] departed-peer channel retirement: %s (%s)", d, src)
+	return d
 }
 
 // Cushion clamp bounds (see emitCushionMs): 100 is the floor — below it the
@@ -254,6 +310,11 @@ type emitStream struct {
 	lastDisplayName string
 	lastStreamName  string
 
+	// lastFrameAt is when a frame for this stream last arrived, the idle clock
+	// for retirement. Set on the session goroutine, read by the emit loop's
+	// boundary sweep — both under e.mu.
+	lastFrameAt time.Time
+
 	feeder *emit.Feeder // cushion-ahead sink feeder (owned by the emit loop)
 
 	// shiftFrames is the codec lookahead (OPUS_GET_LOOKAHEAD) this stream's
@@ -314,17 +375,20 @@ type metronomeStream struct {
 
 func newAudioEngine(lb *LinkBridge, peerName string, send func(waif []byte), offsetD int) AudioEngine {
 	e := &linkAudioEngine{
-		lb:       lb,
-		link:     lb.Link(),
-		peerName: peerName,
-		send:     send,
-		offsetD:  offsetD,
-		cfg:      interval.Config{Bars: 4, Quantum: lb.Quantum()},
-		tempoBPM: 120,
-		capture:  make(map[string]*captureChannel),
-		emit:     make(map[affinity.Key]*emitStream),
-		own:      affinity.NewOwnChannels(),
-		restore:  make(map[CaptureChannelKey]bool),
+		lb:             lb,
+		link:           lb.Link(),
+		peerName:       peerName,
+		send:           send,
+		offsetD:        offsetD,
+		cfg:            interval.Config{Bars: 4, Quantum: lb.Quantum()},
+		tempoBPM:       120,
+		capture:        make(map[string]*captureChannel),
+		emit:           make(map[affinity.Key]*emitStream),
+		intent:         make(map[string]peerIntent),
+		loggedRoomSkip: make(map[string]bool),
+		own:            affinity.NewOwnChannels(),
+		restore:        make(map[CaptureChannelKey]bool),
+		peerGoneGrace:  enginePeerGoneGrace(),
 
 		cushionFrames: engineCushionFrames(),
 	}
@@ -670,6 +734,13 @@ func (e *linkAudioEngine) reconcileChannels(chans []abllink.Channel) {
 		// streams, the metronome, or *another* WAIL peer's) as capture inputs —
 		// they carry already-relayed room audio, so capturing one re-relays it.
 		if strings.HasPrefix(c.Name, affinity.RoomChannelPrefix) {
+			// Say so once: a user channel that happens to carry the prefix is
+			// excluded by exactly this rule, and silence made that unfindable.
+			if !e.loggedRoomSkip[id] {
+				e.loggedRoomSkip[id] = true
+				log.Printf("[audio] channel %q (peer %q) not offered for capture: the %q prefix marks room-published audio, which WAIL never re-captures",
+					c.Name, c.PeerName, affinity.RoomChannelPrefix)
+			}
 			continue
 		}
 		seen[id] = true
@@ -934,6 +1005,9 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 		st.lastDisplayName = displayName
 		st.lastStreamName = streamName
 	}
+	// Idle clock for retirement. Frames still in flight after a peer drops a
+	// stream keep pushing this out, which is exactly the grace's job.
+	st.lastFrameAt = time.Now()
 	// Label-offset confirmation (ADR-0006 follow-up): bucket this frame's
 	// label against our current room index; a verdict change means the peer's
 	// labeling shifted — warn when it's nonzero (their audio silently plays
@@ -1066,13 +1140,114 @@ func (e *linkAudioEngine) HandleRemoteAudio(fromIdentity, displayName, streamNam
 	e.mu.Unlock()
 }
 
+// SetPeerStreams records what one identity says it is still sending (their
+// StreamNames sync). Streams of theirs outside keep become retirable; streams
+// back inside it are wanted again, which is how a reconnecting peer keeps its
+// channel. An empty keep means they send nothing — not "unknown".
+func (e *linkAudioEngine) SetPeerStreams(identity string, keep map[uint16]bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	own := make(map[uint16]bool, len(keep))
+	for id := range keep {
+		own[id] = true
+	}
+	e.intent[identity] = peerIntent{keep: own}
+}
+
+// DropPeer marks everything an identity publishes as retirable on the longer
+// peer-gone grace: they left the room, or (for the ":loopback" identity) the
+// server echo was switched off. A frame arriving later, or a fresh
+// SetPeerStreams, revives them well inside the grace.
+func (e *linkAudioEngine) DropPeer(identity string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.intent[identity] = peerIntent{gone: true}
+}
+
+// retirableLocked reports whether this stream's owner has stopped claiming it,
+// and the grace that applies. No recorded intent means we have not heard
+// otherwise — the stream stays.
+func (e *linkAudioEngine) retirableLocked(key affinity.Key) (time.Duration, bool) {
+	in, ok := e.intent[key.Identity]
+	switch {
+	case !ok:
+		return 0, false
+	case in.gone:
+		return e.peerGoneGrace, true
+	case !in.keep[key.Stream]:
+		return retireGraceDropped, true
+	}
+	return 0, false
+}
+
+// sweepRetiredLocked closes and forgets streams whose owner has stopped
+// claiming them, once they are idle past their grace AND have nothing left
+// buffered. The drained check is what keeps this from truncating the tail of
+// the last interval: playout runs D boundaries behind the final frame, so a
+// grace shorter than one interval would otherwise cut audio mid-flight.
+// Boundary-aligned (called from onBoundary under mu) so a sink never closes
+// while topUpSinks is feeding it. Caller holds e.mu.
+func (e *linkAudioEngine) sweepRetiredLocked(now time.Time) {
+	for key, st := range e.emit {
+		grace, ok := e.retirableLocked(key)
+		if !ok {
+			continue
+		}
+		if now.Sub(st.lastFrameAt) < grace {
+			continue
+		}
+		if _, buffered := st.reasm.MaxIndex(); buffered {
+			continue // still has audio to play out
+		}
+		e.retireStreamLocked(key, st)
+	}
+	// Forget intent for identities with nothing published left, so the map
+	// tracks the room rather than growing for the session's lifetime.
+	for identity := range e.intent {
+		used := false
+		for key := range e.emit {
+			if key.Identity == identity {
+				used = true
+				break
+			}
+		}
+		if !used {
+			delete(e.intent, identity)
+		}
+	}
+}
+
+// retireStreamLocked unpublishes one stream: its Link Audio channel leaves the
+// LAN (so every WAIL Receive frees the port it held), its counters fold into
+// the engine's retired totals, and it drops out of e.emit. Caller holds e.mu.
+func (e *linkAudioEngine) retireStreamLocked(key affinity.Key, st *emitStream) {
+	for _, sk := range st.sinks {
+		sk.Close()
+	}
+	e.retired.EmitIntervalsIncomplete += st.intervalsIncomplete.Load()
+	e.retired.EmitSinkUnderrunEvents += st.sinkUnderrunEvents.Load()
+	e.retired.EmitSinkUnderrunFrames += st.sinkUnderrunFrames.Load()
+	e.retired.EmitFramesMissingAtPlay += st.framesMissedAtPlay.Load()
+	e.retired.EmitFramesConcealed += st.framesConcealed.Load()
+	e.retired.EmitFramesTooLate += st.framesTooLate.Load()
+	e.retired.EmitSinkWriteRejected += st.sinkWriteRejected.Load()
+	e.retired.OpusDecodeFailures += st.decodeFailures.Load()
+	delete(e.emit, key)
+	log.Printf("[audio] retired Link Audio channel %q (%s stream %d — sender stopped publishing it)",
+		affinity.FormatRoomChannelName(st.lastDisplayName, streamLabel(st.lastStreamName, key.Stream)),
+		key.Identity, key.Stream)
+}
+
 // Health sums the per-channel and per-stream diagnostic counters. Capture-side
 // values are drain-goroutine mirrors (atomics); emit-side counters are atomics
 // on their streams; the maps themselves are guarded by e.mu.
 func (e *linkAudioEngine) Health() EngineHealth {
-	var h EngineHealth
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// Seed with retired streams' counters so the totals only ever climb: the
+	// session logs a counter only when it exceeds the previous snapshot, so a
+	// dip would silently swallow every later event until it recovered.
+	h := e.retired
 	for _, ch := range e.capture {
 		h.CaptureRingDropped += ch.statRingDropped.Load()
 		h.CaptureLANLostBuffers += ch.statLANLost.Load()
@@ -1195,6 +1370,7 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.sweepRetiredLocked(time.Now())
 	for _, st := range e.emit {
 		release, advanced := st.sched.OnBoundary(roomLabel)
 		if !advanced {

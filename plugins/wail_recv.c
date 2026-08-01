@@ -1,10 +1,15 @@
 // WAIL Recv (ADR-0007) — a 16-port Link Audio receiver for WAIL room
-// streams. Subscribes only to room-published channels (names starting with
-// "WAIL " — remote streams "WAIL · {peer} · {stream}" and the WAIL Metronome),
-// one port per channel, auto-assigned and live-renamed (first-wins dedupe on
-// the channel name, so two WAILs on one LAN publishing the same room don't
-// double a port). A peer joining the jam appears as a named sub-chain with no
-// user action.
+// streams. Subscribes only to room-published channels (names carrying the
+// "WAIL · " room prefix — remote streams "WAIL · {peer} · {stream}" and the
+// metronome), one port per channel, auto-assigned and live-renamed. A peer
+// joining the jam appears as a named sub-chain with no user action.
+//
+// Slot identity is the channel id, not its name: the app renames a room
+// channel in place once the sender's stream name arrives (affinity — the id
+// survives), so a name-keyed slot would take a second port for the renamed
+// channel and never release the first (its id is still live, so the
+// disappeared-channel reclaim never fires). Name matching remains only as a
+// first-wins guard so two WAILs bridging one room don't double a port.
 //
 // Rendering is stamp-aligned: per-slot anchor ring (chunk start frame ↔ begin
 // beat / play-at µs), pad when early, skip when late, 32-frame deadband. Two
@@ -36,9 +41,12 @@
 #define LBR_RING_FRAMES 32768 // power of two; ~0.68s stereo @48k
 #define LBR_ANCHORS 512
 #define LBR_QUANTUM 4.0
-#define LBR_NAME_PREFIX "WAIL "         // filter: room-published channels
-#define LBR_NAME_PREFIX_DOT "WAIL · "   // stripped for port display names
-#define LBR_GONE_POLLS 6                // ~3s of discovery misses → slot freed
+// One prefix, one meaning: it both selects room-published channels and is
+// stripped for the port label. A looser filter here than the app's publish
+// prefix would subscribe raw LAN channels that merely start with "WAIL" — a
+// WAIL Send track named "WAIL Bass" would come back as a receive port.
+#define LBR_ROOM_PREFIX "WAIL · "
+#define LBR_GONE_POLLS 6 // ~3s of discovery misses → slot freed
 
 typedef struct {
    int64_t  micros; // session-clock µs at which frame should play (mono mode)
@@ -53,10 +61,9 @@ typedef struct {
 
 typedef struct {
    _Atomic bool assigned; // manager writes, process reads
-   _Atomic bool gone;     // manager: free this slot at next opportunity
    uint64_t   channel_id;
-   char       chan_name[128]; // full channel name (dedupe key)
-   lb_source *source;         // created before assigned=true; destroyed after gone
+   char       chan_name[128]; // last-seen channel name (rename detection)
+   lb_source *source;         // created before assigned=true; destroyed after clearing it
 
    // process()-owned render state:
    lbr_ring    ring;
@@ -281,8 +288,8 @@ static void set_port_name(lbr_recv *self, int slot, const char *name) {
 
 // display_name strips the room-published dot-prefix for the port label.
 static const char *display_name(const char *chan, char *buf, size_t cap) {
-   size_t p = strlen(LBR_NAME_PREFIX_DOT);
-   if (strncmp(chan, LBR_NAME_PREFIX_DOT, p) == 0) {
+   size_t p = strlen(LBR_ROOM_PREFIX);
+   if (strncmp(chan, LBR_ROOM_PREFIX, p) == 0) {
       snprintf(buf, cap, "%s", chan + p);
       return buf;
    }
@@ -316,15 +323,43 @@ static void *mgr_main(void *arg) {
          }
       }
 
-      // Assign new room-published channels (first-wins dedupe on the name).
+      // Assign new room-published channels.
       for (size_t c = 0; c < nch; c++) {
-         if (strncmp(chans[c].name, LBR_NAME_PREFIX, strlen(LBR_NAME_PREFIX)) != 0) continue;
-         bool have = false;
+         if (strncmp(chans[c].name, LBR_ROOM_PREFIX, strlen(LBR_ROOM_PREFIX)) != 0) continue;
+
+         // Already ours? Match on channel id first, so an in-place rename
+         // relabels the port this channel already holds instead of taking a
+         // second one. Checked across every slot before falling back to the
+         // name guard, else two channels swapping names would strand a label.
+         int owner = -1;
+         for (int i = 0; i < LBR_SLOTS; i++) {
+            if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire) &&
+                self->slots[i].channel_id == chans[c].id_u64) {
+               owner = i;
+               break;
+            }
+         }
+         if (owner >= 0) {
+            if (strcmp(self->slots[owner].chan_name, chans[c].name) != 0) {
+               lbr_log(self, "renamed: \"%s\" → \"%s\" (port %d)", self->slots[owner].chan_name,
+                       chans[c].name, owner + 1);
+               snprintf(self->slots[owner].chan_name, sizeof(self->slots[owner].chan_name), "%s",
+                        chans[c].name);
+               char disp[128];
+               set_port_name(self, owner, display_name(chans[c].name, disp, sizeof(disp)));
+            }
+            continue;
+         }
+
+         // Distinct channel under a name we already carry: first-wins, so two
+         // WAILs bridging the same room don't double a port.
+         bool dup_name = false;
          for (int i = 0; i < LBR_SLOTS; i++)
             if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire) &&
                 strcmp(self->slots[i].chan_name, chans[c].name) == 0)
-               have = true;
-         if (have) continue;
+               dup_name = true;
+         if (dup_name) continue;
+
          for (int i = 0; i < LBR_SLOTS; i++) {
             if (atomic_load_explicit(&self->slots[i].assigned, memory_order_acquire)) continue;
             lbr_slot *s = &self->slots[i];

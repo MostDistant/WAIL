@@ -24,8 +24,24 @@ type Key struct {
 const RoomChannelPrefix = "WAIL · "
 
 // FormatRoomChannelName builds the published channel name for room content.
+// Both inputs are user-controlled (a peer's display name, a DAW track or
+// stream name), so a leading room prefix is stripped from each: re-prefixing
+// one produces a name that reads as two stacked room channels, and the
+// receive side would strip only the outer one.
 func FormatRoomChannelName(peerName, streamName string) string {
-	return RoomChannelPrefix + FormatName(peerName, streamName)
+	return RoomChannelPrefix + FormatName(stripRoomPrefix(peerName), stripRoomPrefix(streamName))
+}
+
+// stripRoomPrefix removes every leading room prefix from a user-supplied name.
+// Matching ignores the prefix's trailing space so a name that is nothing but
+// the prefix strips to empty (FormatName then degrades it gracefully).
+func stripRoomPrefix(s string) string {
+	bare := strings.TrimSpace(RoomChannelPrefix)
+	s = strings.TrimSpace(s)
+	for strings.HasPrefix(s, bare) {
+		s = strings.TrimSpace(strings.TrimPrefix(s, bare))
+	}
+	return s
 }
 
 // FormatName builds a channel display name from peer and stream names. Missing
