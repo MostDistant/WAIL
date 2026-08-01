@@ -210,10 +210,17 @@ if [ "$MODE" = step ]; then
         # Per-second VOTE for the capture room of what is heard now (no edge
         # margins anywhere): each receiver interval tallies its seconds and
         # the majority wins, so the odd skewed/straddle second is harmless.
-        c = (freq - f0)/step * blockdur
+        # Bin by the block we just classified to, NOT by the raw frequency.
+        # The estimate is routinely tens of Hz flat (Opus + resample), which
+        # the ±step/2 check above tolerates on purpose — but deriving the
+        # content position from the raw value then drops the tone into the
+        # PREVIOUS block, reporting a placement failure for audio that landed
+        # exactly where it should. 672Hz is a 720Hz tone: accepted as block 3,
+        # binned as block 2. That was the intermittent off-by-one.
+        c = k * blockdur
         if (c < -1) next
         bi = 0
-        for (i = nb; i >= 1; i--) if (cs[i] <= c) { bi = i; break }
+        for (i = nb; i >= 1; i--) if (cs[i] <= c + 0.001) { bi = i; break }
         if (bi == 0) next
         # Join-transition exclusion: intervals captured before the room
         # tempo settled carry skewed labels by design (ADR-0006 entry
