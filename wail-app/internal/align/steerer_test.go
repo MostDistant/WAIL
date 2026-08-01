@@ -867,7 +867,7 @@ func TestSnapshotAdoptionOscillator(t *testing.T) {
 	}
 }
 
-// The audibility invariant ADR-0006 promises and ADR-0008 makes structural:
+// The audibility invariant ADR-0006 promises and ADR-0009 makes structural:
 // every tempo the slew writes is within SlewMaxFraction of the tempo it
 // OBSERVED, so no single write can be heard. Keyed to the room tempo instead,
 // the write is an absolute teleport whenever the session sits away from the

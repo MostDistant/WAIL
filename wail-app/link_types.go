@@ -84,7 +84,7 @@ type LinkState struct {
 }
 
 // tempoDetectorConfig is the detector's tuning, split out from the constants so
-// a simulation can sweep it (ADR-0008: these are measured, not chosen — and the
+// a simulation can sweep it (ADR-0009: these are measured, not chosen — and the
 // pre-#499 bar has to stay reachable, since reproducing the wobble bug is how
 // the simulation proves it models reality). Zero fields take the package
 // default, so production constructs it empty and behaves exactly as before.
@@ -200,7 +200,7 @@ func (d *TempoChangeDetector) Check(bpm float64, now time.Time) (float64, bool) 
 	// the slew's authority and so nothing the room needs to hear, while every
 	// individual excursion is outside it — magnitude alone cannot tell that
 	// wobble from a deliberate 0.1 nudge, because they are the same size, and
-	// the mean can (ADR-0008). But averaging costs its window in lag, and lag is
+	// the mean can (ADR-0009). But averaging costs its window in lag, and lag is
 	// phase, so it is spent only where noise is a live explanation.
 	observed := bpm
 	if math.Abs(bpm-d.lastTempo) <= d.cfg.meanRegime {
@@ -245,7 +245,7 @@ func snapToIntegerTempo(bpm, radius float64) float64 {
 // tempo (0.06 BPM at 120). The slew silently holds everything inside it, so the
 // room only needs to hear what the slew cannot — the two tile with no band
 // between them that is neither reported nor correctable, which is the fault
-// ADR-0008 exists to fix. Caller holds the lock.
+// ADR-0009 exists to fix. Caller holds the lock.
 func (d *TempoChangeDetector) reportBar() float64 {
 	if d.cfg.reportBarFixed > 0 {
 		return d.cfg.reportBarFixed

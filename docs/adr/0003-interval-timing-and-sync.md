@@ -2,7 +2,7 @@
 
 How WAIL keeps intervalic audio beat-aligned across the WAN, given that Ableton Link shares only tempo and beat *phase* (mod quantum) within a session and shares nothing across separate LAN sessions (`Link.hpp:265-273`). This supersedes the previous model where each peer computed its interval index independently and a joining peer's beat was `ForceBeat`-snapped to the room owner.
 
-**Amended by ADR-0008 (2026-08-01):** the relay-authoritative interval clock and the shared room index (decisions 2 and 4 below) are superseded — rounds become sender-relative and playback adaptive, because the shared round's only remaining customer (coordinated same-round changes) is not how WAIL jams work. The index/phase split, the BPI lens, hold-until-boundary, and live-append all stand.
+**Amended by ADR-0009 (2026-08-01):** the relay-authoritative interval clock and the shared room index (decisions 2 and 4 below) are superseded — rounds become sender-relative and playback adaptive, because the shared round's only remaining customer (coordinated same-round changes) is not how WAIL jams work. The index/phase split, the BPI lens, hold-until-boundary, and live-append all stand.
 
 ## Decisions
 

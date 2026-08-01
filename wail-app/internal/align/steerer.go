@@ -129,7 +129,7 @@ type Steerer struct {
 	// restored on settle. Zero when no episode is in flight. Keeping the base as
 	// an observation rather than deriving targets from the room tempo is what
 	// makes "the slew never overwrites a deliberate change" a property of the
-	// writer instead of an accident of threshold spacing (ADR-0008).
+	// writer instead of an accident of threshold spacing (ADR-0009).
 	episodeBase      float64
 	slewTarget       float64 // 0 = no episode in flight
 	slewDir          int     // sign of the active episode's δ (0 = not slewing)
@@ -546,7 +546,7 @@ func (s *Steerer) measureDelta(bpi float64) (int64, bool) {
 // wider than that is someone else's to resolve — reported as intent, or
 // enforced back. Keyed to the authority rather than the flat 0.5% it used to
 // be, so "what we can fix" and "what the room must be told" tile with no band
-// between them that is neither (ADR-0008).
+// between them that is neither (ADR-0009).
 //
 // A wandering clock no longer trips it, because the gate judges the windowed
 // mean: that was the failure the 0.5% band was widened to avoid, and widening

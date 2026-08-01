@@ -1,6 +1,6 @@
 package main
 
-// The jitter shapes the tempo simulation replays (ADR-0008). Every one is a
+// The jitter shapes the tempo simulation replays (ADR-0009). Every one is a
 // disturbance this repo has actually observed in the field or in a bug report;
 // the citation on each is where the evidence lives. They move the session tempo
 // or the local grid the way a DAW, a LAN Link peer or a WAN path would — never
@@ -56,7 +56,7 @@ func insistentLAN(want, rate float64) func(*simPeer, int) {
 }
 
 // wobble: the reported field bug — a clock wandering between two values around
-// one intended tempo, dwelling `dwell` at each (ADR-0008, 2026-07-31).
+// one intended tempo, dwelling `dwell` at each (ADR-0009, 2026-07-31).
 func wobble(low, high float64, dwell time.Duration) func(*simPeer, int) {
 	half := stepsIn(dwell)
 	return func(p *simPeer, step int) {
@@ -110,7 +110,7 @@ func knobTurn(at int, to float64) func(*simPeer, int) {
 
 // insistentDAW: automation or an external clock re-asserting its tempo after
 // every correction. Enforcement must yield to this rather than fight forever
-// (the #424 two-enforcer lesson, ADR-0008 Consequences).
+// (the #424 two-enforcer lesson, ADR-0009 Consequences).
 func insistentDAW(at int, want float64) func(*simPeer, int) {
 	return afterStep(at, func(p *simPeer, _ int) { p.link.disturb(want) })
 }
@@ -228,7 +228,7 @@ func shapeScenarios() []simConfig {
 	}
 }
 
-// TestTempoSimCharacterise runs every shape and prints the table the ADR-0008
+// TestTempoSimCharacterise runs every shape and prints the table the ADR-0009
 // thresholds are set from. It asserts nothing: the point is to measure what
 // today's code does before changing it. The two assertions that DO gate this
 // work live in TestTempoSimFidelityGate below.
@@ -374,7 +374,7 @@ func declareOnce(at int, to float64) func(*simPeer, int) {
 // know today's code has. A model that cannot show us a bug we have seen in the
 // field cannot be trusted to tell us a threshold is right.
 //
-// Both assertions stay after ADR-0008 lands, inverted — the wobble stops
+// Both assertions stay after ADR-0009 lands, inverted — the wobble stops
 // reporting, and the deliberate nudge survives instead of being reverted.
 func TestTempoSimFidelityGate(t *testing.T) {
 	oneMin := stepsIn(time.Minute)
@@ -423,7 +423,7 @@ func TestTempoSimFidelityGate(t *testing.T) {
 	})
 
 	// 2. The dead band that used to sit between the slew's authority (0.06 BPM at
-	//    120) and the reporting bar (0.25). Measured on the pre-ADR-0008 code,
+	//    120) and the reporting bar (0.25). Measured on the pre-ADR-0009 code,
 	//    this scenario ended with the session back at exactly 120.0000 and a
 	//    single steering write of 0.002163 — 0.216%, 3.75 cents, four times the
 	//    cap's own audibility budget — with the room never told. The user's

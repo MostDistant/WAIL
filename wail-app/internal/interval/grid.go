@@ -221,7 +221,7 @@ func (g *GridAligner) Delta(localNextBoundaryUs int64) (int64, bool) {
 // SlewAuthorityBPM is the largest tempo offset the slew can hold, expressed in
 // BPM at a given tempo (0.06 at 120). Both the tempo-settling gate and the
 // detector's reporting bar key off it, so "what the slew can correct" and "what
-// the room has to be told about" tile exactly — ADR-0008 exists because they
+// the room has to be told about" tile exactly — ADR-0009 exists because they
 // used to be tuned independently and left a band that was neither.
 func SlewAuthorityBPM(bpm float64) float64 {
 	if bpm <= 0 {
@@ -239,7 +239,7 @@ func SlewAuthorityBPM(bpm float64) float64 {
 // the room tempo. Keyed to the room, the returned target is an absolute
 // teleport whenever the session sits away from it: a session at 120.2 in a 120
 // room was written to 119.94 — 3.75 cents, four times the cap's own audibility
-// budget, and the user's change silently reverted (ADR-0008, reproduced at
+// budget, and the user's change silently reverted (ADR-0009, reproduced at
 // 0.0022 by the tempo simulation). Keyed to what was observed, every tempo this
 // returns is within SlewMaxFraction of it by construction.
 func SlewTempo(baseBPM float64, deltaUs, periodUs int64) (target float64, active bool) {

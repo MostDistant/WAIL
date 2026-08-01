@@ -1,12 +1,12 @@
 package main
 
-// Deterministic multi-LAN simulation of WAIL's tempo path (ADR-0008): one WAIL
+// Deterministic multi-LAN simulation of WAIL's tempo path (ADR-0009): one WAIL
 // per LAN, coupled only through a simulated relay, replaying the jitter shapes
 // this repo has actually observed so the tempo thresholds can be set from
 // measurement instead of argument.
 //
 // It drives the REAL TempoChangeDetector, alignBridge, align.Steerer and
-// interval.GridAligner — the question ADR-0008 asks is exactly how those
+// interval.GridAligner — the question ADR-0009 asks is exactly how those
 // interact, so a reimplementation of any of them would measure the wrong thing.
 // Only the session select loop is transcribed (see simPeer.step, which cites
 // the session.go line for each of its six call sites).
@@ -113,7 +113,7 @@ func (l *simLink) TimeAtBeat(beat float64) int64 {
 
 // SetTempo mirrors LinkBridge.SetTempo (link_real.go:56): the beat stays put and
 // only its rate changes, and the detector baseline plus echo guard move with the
-// write. That coupling is the thing ADR-0008's NoteSteering revises, so the sim
+// write. That coupling is the thing ADR-0009's NoteSteering revises, so the sim
 // has to carry it rather than assume it away.
 func (l *simLink) SetTempo(bpm float64) {
 	l.writes = append(l.writes, tempoWrite{atUs: l.atUs, from: l.bpm, to: bpm, source: l.source})
@@ -304,7 +304,7 @@ func (p *simPeer) onSnapshot(bpm float64) {
 
 // declare models a tempo change made in WAIL's own UI: intent by construction,
 // so it broadcasts immediately and never passes through the detector at all
-// (ADR-0008 decision 3). This is the sanctioned path a declared-only
+// (ADR-0009 decision 3). This is the sanctioned path a declared-only
 // architecture leaves for changing the room tempo — and it is the path
 // App.ChangeBPM does NOT currently take, which is why a UI tempo change never
 // reaches the room today.
