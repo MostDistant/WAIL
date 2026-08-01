@@ -22,10 +22,9 @@ const (
 	// snapSettle is the post-entry settling window during which the slew
 	// stays out of the way of the snap's aftershocks.
 	snapSettle = 5 * time.Second
-	// gateWedgeTimeout is how long the same-rate gate may stay shut before the
-	// steerer stops waiting for the tempo to come back and re-enters
-	// conformance. Long enough to sit out an ordinary tempo change and its
-	// re-anchor; short enough that a wedge is a blip, not a lost session.
+	// gateWedgeTimeout is how long the tempo-settling gate may stay shut before
+	// the steerer says so. Long enough to sit out an ordinary tempo change and
+	// its re-anchor, so the ordinary case stays quiet.
 	gateWedgeTimeout = 10 * time.Second
 	// tempoGate suppresses the slew after any tempo commit (local user's
 	// hand, remote change, or entry adoption) so WAIL never fights a hand
@@ -59,9 +58,25 @@ const (
 // State is the slice of Link session state the steerer samples. Beat is
 // phase-encoded at the room BPI (the interval-quantum lens, ADR-0003).
 type State struct {
-	BPM         float64
+	BPM float64
+	// MeanBPM is the session tempo averaged over the detector's window. The
+	// tempo-settling gate judges this rather than BPM: a peer whose clock
+	// wanders 119.9↔120 has a mean of 119.95 — inside the slew's authority —
+	// so drift correction keeps running through the wobble instead of stopping
+	// dead on every excursion. Zero falls back to BPM (bridges that do not
+	// track a mean, and the first ticks before any sample).
+	MeanBPM     float64
 	Beat        float64
 	TimestampUs int64
+}
+
+// settlingBPM is the reading the tempo-settling gate judges: the windowed mean
+// when the bridge supplies one, else the instantaneous tempo.
+func (s State) settlingBPM() float64 {
+	if s.MeanBPM > 0 {
+		return s.MeanBPM
+	}
+	return s.BPM
 }
 
 // LinkGrid is the narrow Link bridge seam the steerer needs — the four
@@ -102,10 +117,21 @@ type Steerer struct {
 	entryPending bool
 	lastSnapAt   time.Time
 	lastTempoAt  time.Time
-	// gateShutSince is when the same-rate gate last started blocking, zero
-	// while it is open — the wedge timer (see noteGateShut).
-	gateShutSince    time.Time
-	slewTarget       float64 // 0 = sitting at exact room tempo
+	// gateShutSince is when the tempo-settling gate last started blocking, zero
+	// while it is open — the deferral timer (see noteGateShut).
+	gateShutSince time.Time
+	// gateOpen is the gate's current side, so its band can be hysteretic: it
+	// takes the full band to shut and 0.9x to reopen, and a tempo hovering at
+	// the edge cannot chatter.
+	gateOpen bool
+	// episodeBase is the tempo the session was observed at when the current slew
+	// episode began — the tempo every nudge is measured against and the tempo
+	// restored on settle. Zero when no episode is in flight. Keeping the base as
+	// an observation rather than deriving targets from the room tempo is what
+	// makes "the slew never overwrites a deliberate change" a property of the
+	// writer instead of an accident of threshold spacing (ADR-0008).
+	episodeBase      float64
+	slewTarget       float64 // 0 = no episode in flight
 	slewDir          int     // sign of the active episode's δ (0 = not slewing)
 	slewPendingDir   int     // sign of the δ being confirmed (0 = none)
 	slewPendingCount int     // consecutive same-direction ticks past the deadband
@@ -146,6 +172,7 @@ func NewSteerer(link LinkGrid, initialBPM float64, emit func(state string, errMs
 		aligner:        interval.NewGridAligner(),
 		enabled:        true,
 		entryPending:   true,
+		gateOpen:       true, // nothing has shut it yet
 		currentBPM:     initialBPM,
 	}
 }
@@ -179,16 +206,16 @@ func (s *Steerer) OnServerPong(serverNowEstUs, rttUs int64, bpi float64, now tim
 // user's change, a remote TempoChange, an adopted snapshot, or a UI command.
 // This is the fused write that used to be two variables at five call sites:
 // it updates the committed-tempo record AND arms the slew's tempo gate.
-// A commit is an ownership move, so it also cancels any in-flight slew:
-// pre-fix the stale slew target survived, and the same-rate gate then
+// A commit is an ownership move, so it also drops any in-flight episode:
+// pre-fix the stale slew target survived, and the tempo-settling gate then
 // blocked the slew forever (the session at the new room tempo never matched
 // the old target) — drift correction silently died for the rest of the
-// session on every mid-slew tempo change.
+// session on every mid-slew tempo change. No restore: the commit itself is
+// writing the tempo, so putting the episode's base back would fight it.
 func (s *Steerer) NoteTempoCommitted(bpm float64, now time.Time) {
 	s.currentBPM = bpm
 	s.lastTempoAt = now
-	s.slewTarget = 0
-	s.slewPendingDir, s.slewPendingCount = 0, 0
+	s.clearEpisode()
 }
 
 // CurrentBPM returns the tempo the session last committed to. The session
@@ -217,7 +244,7 @@ func (s *Steerer) SnapshotTempoAdopt(msgBPM float64) bool {
 // restore"), not the committed tempo — they can differ by the adoption
 // threshold. Slew nudges deliberately do NOT touch the committed-tempo
 // record: that would arm the tempo gate and suppress the slew itself. See
-// Tick for the same-rate gate that keeps the slew from fighting tempo
+// Tick for the tempo-settling gate that keeps the slew from fighting tempo
 // changes in flight.
 func (s *Steerer) Tick(bpi float64, now time.Time) {
 	// Every path that returns before the gate clears the wedge timer: it
@@ -256,34 +283,58 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 		s.gateShutSince = time.Time{}
 		return
 	}
-	baseline := roomBPM
-	if s.slewTarget != 0 {
-		baseline = s.slewTarget
+	st := s.link.State()
+	// An episode holds the session away from where we found it. If the session
+	// is no longer sitting at our nudge, someone else has taken the tempo: the
+	// base we are measuring against is stale, so drop the episode and judge the
+	// fresh reading on its own merits. No write — a session that is not at our
+	// target has nothing of ours left in force to put back. This is what used to
+	// need a ten-second wedge timer to escape (the gate compared against the
+	// stale target, and the gate then prevented clearing it: sixteen minutes of
+	// no alignment at all, in the field).
+	if s.slewTarget != 0 && math.Abs(st.BPM-s.slewTarget) > tempoThreshold {
+		s.logf("[align] slew episode dropped: session %.4f BPM is no longer our target %.4f — re-measuring",
+			st.BPM, s.slewTarget)
+		s.clearEpisode()
 	}
-	if st := s.link.State(); math.Abs(st.BPM-baseline) > sameRateBand(baseline) {
+	// Tempo-settling gate: δ is a phase measurement, meaningful only while both
+	// grids tick at the same rate. The reading judged is the session tempo with
+	// our own nudge taken back out — episodeBase while an episode is in flight —
+	// so an active slew can never gate itself off.
+	settling := st.settlingBPM()
+	if s.slewTarget != 0 {
+		settling = s.episodeBase
+	}
+	if !s.tempoSettled(settling, roomBPM) {
 		// Bucket only while the gate is shut. δ is a phase measurement between
 		// grids ticking at different rates, so it sweeps and wraps at ±period/2
 		// — publishing that at tick rate would trade a stale number for a
 		// meaningless one. The bucket still moves if things get materially
 		// worse, and the recovery paths bound how long this can last.
 		s.emitBucket(delta, now)
-		s.noteGateShut(now, roomBPM, st.BPM)
+		s.noteGateShut(now, roomBPM, settling)
 		return
 	}
 	s.gateShutSince = time.Time{}
 	periodUs := int64(bpi * 60.0 / roomBPM * 1e6)
-	target, active := interval.SlewTempo(roomBPM, delta, periodUs)
+	// A new episode nudges from what we just observed; a running one keeps the
+	// base it started with, so a settle restores the session's own tempo rather
+	// than pulling it onto the room's.
+	base := s.episodeBase
+	if s.slewTarget == 0 {
+		base = st.BPM
+	}
+	target, active := interval.SlewTempo(base, delta, periodUs)
 	if s.slewTarget != 0 && !active {
 		// Settle hysteresis: an active slew restores only when δ is truly
 		// closed (≤ SlewSettleUs) or has flipped sign — in between it holds
 		// the nudge so the episode settles deep instead of stopping at the
 		// deadband edge and re-firing when skew walks δ back out.
 		if abs64(delta) <= interval.SlewSettleUs || (delta > 0) != (s.slewDir > 0) {
-			s.link.SetTempo(roomBPM)
-			s.slewTarget = 0
-			s.slewDir = 0
-			s.slewPendingDir, s.slewPendingCount = 0, 0
-			s.logf("[align] slew settled (δ=%+.1f ms), restored %.1f BPM", float64(delta)/1000, roomBPM)
+			restored := s.episodeBase
+			s.link.SetTempo(restored)
+			s.clearEpisode()
+			s.logf("[align] slew settled (δ=%+.1f ms), restored %.4f BPM", float64(delta)/1000, restored)
 		}
 		s.emitState(delta, now)
 		return
@@ -307,9 +358,10 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 		}
 		if target != s.slewTarget {
 			s.link.SetTempo(target)
+			s.episodeBase = base
 			s.slewTarget = target
 			s.slewDir = dir
-			s.logf("[align] slew: δ=%+.1f ms → tempo %.4f BPM", float64(delta)/1000, target)
+			s.logf("[align] slew: δ=%+.1f ms → tempo %.4f BPM (from %.4f)", float64(delta)/1000, target, base)
 		}
 	} else {
 		s.slewPendingDir, s.slewPendingCount = 0, 0
@@ -324,10 +376,7 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 func (s *Steerer) SetEnabled(on bool, bpi float64, now time.Time) {
 	s.enabled = on
 	if !on {
-		if s.slewTarget != 0 {
-			s.link.SetTempo(s.currentBPM)
-			s.slewTarget = 0
-		}
+		s.cancelSlew() // restores the episode's own base, not the committed tempo
 		s.lastState = ""
 		s.emit("off", 0)
 		s.logf("[align] grid alignment disabled")
@@ -341,13 +390,12 @@ func (s *Steerer) SetEnabled(on bool, bpi float64, now time.Time) {
 // OnRejoin re-arms entry conformance after a signaling reconnect (ADR-0006:
 // rejoin is an entry). The fresh anchor + relay pongs re-measure δ; a
 // mid-blip rejoin finds δ ≈ 0 and no-ops, a genuinely diverged grid snaps
-// back onto the room. A rejoin also cancels any in-flight slew target — the
-// room may have moved while we were gone, and a stale target would wedge
-// the same-rate gate exactly as a mid-slew tempo commit does.
+// back onto the room. A rejoin also drops any in-flight episode — the room may
+// have moved while we were gone, so the base we were nudging from no longer
+// describes anything, and entry conformance is about to re-measure regardless.
 func (s *Steerer) OnRejoin() {
 	s.entryPending = true
-	s.slewTarget = 0
-	s.slewPendingDir, s.slewPendingCount = 0, 0
+	s.clearEpisode()
 }
 
 // Status returns the debug-panel readout: ("off", 0, true) when disabled,
@@ -492,37 +540,59 @@ func (s *Steerer) measureDelta(bpi float64) (int64, bool) {
 	return s.aligner.Delta(s.link.TimeAtBeat(boundaryBeat))
 }
 
-// sameRateBand is how far the session tempo may sit from the slew's baseline
-// before δ stops meaning anything. Proportional, not the flat adoption
-// threshold it used to share: the gate exists to avoid fighting a real tempo
-// move (120→122 is 1.7%), but at 0.01 BPM a peer whose clock wanders by a
-// tenth also tripped it — and then the slew went dormant and phase drifted
-// uncorrected for the rest of the session. At half a percent, δ is still a
-// sound measurement over the tens of seconds a slew episode takes.
-func sameRateBand(baselineBPM float64) float64 {
-	return math.Max(tempoThreshold, 0.005*baselineBPM)
+// tempoSettlingBand is how far the session tempo may sit from the room tempo
+// before δ stops meaning anything. It is exactly the slew's authority (0.06 BPM
+// at 120): the slew may steer precisely what it can hold, and a divergence
+// wider than that is someone else's to resolve — reported as intent, or
+// enforced back. Keyed to the authority rather than the flat 0.5% it used to
+// be, so "what we can fix" and "what the room must be told" tile with no band
+// between them that is neither (ADR-0008).
+//
+// A wandering clock no longer trips it, because the gate judges the windowed
+// mean: that was the failure the 0.5% band was widened to avoid, and widening
+// is no longer the mechanism doing the work.
+func tempoSettlingBand(roomBPM float64) float64 {
+	return math.Max(tempoThreshold, interval.SlewAuthorityBPM(roomBPM))
 }
 
-// noteGateShut clears a slew target that has been holding the gate shut
-// against itself.
-//
-// The gate compares the session tempo against the slew's target while a slew
-// is in flight, and returns before the settle branch that would clear that
-// target — so once something else moves the tempo, the stale target keeps the
-// gate shut and the gate prevents clearing the target. Sixteen minutes of no
-// alignment at all, in the field.
-//
-// Clearing the target is the whole fix: the baseline falls back to the room
-// tempo, and the gate re-evaluates honestly. If it opens, normal steering
-// resumes; if it stays shut, the tempo really has moved and waiting is
-// correct — the room adopts it shortly and the gate opens then. Deliberately
-// no tempo write and no forced re-entry here: both would fight whoever
-// legitimately owns the tempo, and a re-entry snap is audible.
-func (s *Steerer) noteGateShut(now time.Time, roomBPM, sessionBPM float64) {
-	if s.slewTarget == 0 {
-		s.gateShutSince = time.Time{}
-		return
+// gateReopenFraction makes the band hysteretic: it takes the full band to shut
+// the gate and 0.9× to reopen it, so a tempo sitting on the edge cannot chatter
+// the slew on and off tick by tick.
+const gateReopenFraction = 0.9
+
+// tempoSettled reports whether the session is close enough to the room tempo
+// for δ to be a real measurement, and records which side of the band we are on.
+func (s *Steerer) tempoSettled(settlingBPM, roomBPM float64) bool {
+	band := tempoSettlingBand(roomBPM)
+	if !s.gateOpen {
+		band *= gateReopenFraction
 	}
+	s.gateOpen = math.Abs(settlingBPM-roomBPM) <= band
+	return s.gateOpen
+}
+
+// clearEpisode drops all slew-episode bookkeeping without writing a tempo.
+func (s *Steerer) clearEpisode() {
+	s.episodeBase = 0
+	s.slewTarget, s.slewDir = 0, 0
+	s.slewPendingDir, s.slewPendingCount = 0, 0
+}
+
+// noteGateShut reports a gate that has been deferring for a long time.
+//
+// It used to be the escape from a wedge: the gate compared the session tempo
+// against the slew's own target, so once something else moved the tempo the
+// stale target held the gate shut and the shut gate prevented clearing the
+// target — sixteen minutes of no alignment at all, in the field. Tick now drops
+// an episode the moment the session stops sitting at our nudge, and the gate
+// judges the session against the ROOM tempo rather than against our target, so
+// the loop cannot form. What remains is worth saying out loud: a gate shut this
+// long means the peer's tempo has genuinely diverged and drift is going
+// uncorrected while we defer to whoever owns it.
+//
+// Deliberately still no tempo write and no forced re-entry: both would fight
+// whoever legitimately owns the tempo, and a re-entry snap is audible.
+func (s *Steerer) noteGateShut(now time.Time, roomBPM, settlingBPM float64) {
 	if s.gateShutSince.IsZero() {
 		s.gateShutSince = now
 		return
@@ -530,13 +600,9 @@ func (s *Steerer) noteGateShut(now time.Time, roomBPM, sessionBPM float64) {
 	if now.Sub(s.gateShutSince) < gateWedgeTimeout {
 		return
 	}
-	s.gateShutSince = time.Time{}
-	// No restore: a shut gate is proof the session is not at our slew target,
-	// so there is nothing of ours still in force to put back.
-	s.slewTarget, s.slewDir = 0, 0
-	s.slewPendingDir, s.slewPendingCount = 0, 0
-	s.logf("[align] slew target abandoned after %s of a shut gate (session %.4f BPM vs room %.4f) — re-measuring against the room tempo",
-		gateWedgeTimeout, sessionBPM, roomBPM)
+	s.gateShutSince = now // re-arm, so this repeats rather than logging once
+	s.logf("[align] deferring for %s: session %.4f BPM vs room %.4f — drift uncorrected while the tempo is someone else's",
+		gateWedgeTimeout, settlingBPM, roomBPM)
 }
 
 // OnGridJump re-arms entry conformance after the local Link grid moved out
@@ -572,16 +638,21 @@ func (s *Steerer) OnGridJump(beats float64, now time.Time) {
 // cleared — leaving the session parked on a slew tempo with nothing tracking it.
 func (s *Steerer) cancelSlew() {
 	if s.slewTarget != 0 {
-		restore := s.currentBPM
-		if roomBPM, ok := s.aligner.RoomBPM(); ok && roomBPM > 0 {
-			restore = roomBPM
+		// The episode's own base first: it is the tempo the session had before
+		// we nudged it, so putting it back is exact. The room tempo is only a
+		// fallback for an episode with no base recorded.
+		restore := s.episodeBase
+		if restore <= 0 {
+			restore = s.currentBPM
+			if roomBPM, ok := s.aligner.RoomBPM(); ok && roomBPM > 0 {
+				restore = roomBPM
+			}
 		}
 		if restore > 0 {
 			s.link.SetTempo(restore)
 		}
 	}
-	s.slewTarget, s.slewDir = 0, 0
-	s.slewPendingDir, s.slewPendingCount = 0, 0
+	s.clearEpisode()
 }
 
 // emitState reports alignment to the UI on a bucket change, and also when δ

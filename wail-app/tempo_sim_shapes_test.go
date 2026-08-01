@@ -12,6 +12,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 )
 
 // --- injectors -------------------------------------------------------------
@@ -242,7 +244,7 @@ func TestTempoSimFidelityGate(t *testing.T) {
 			name: "gate-wobble", duration: 5 * time.Minute,
 			peers: []simPeerSpec{
 				{name: "A-wobble", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
-					detector: tempoDetectorConfig{reportThreshold: 0.01, noIntegerSnap: true},
+					detector: tempoDetectorConfig{reportBarFixed: 0.01, noIntegerSnap: true},
 					disturb:  afterStep(oneMin, wobble(119.9, 120.0, 2*time.Second))},
 				{name: "B", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
 			},
@@ -274,11 +276,18 @@ func TestTempoSimFidelityGate(t *testing.T) {
 		}
 	})
 
-	// 2. The dead band between the slew's authority (0.06 BPM at 120) and the
-	//    reporting bar (0.25): a deliberate 120→120.2 is never told to the room,
-	//    and the slew — whose target is derived from the ROOM tempo — writes
-	//    over it. The user's change disappears silently.
-	t.Run("deliberate nudge is silently reverted", func(t *testing.T) {
+	// 2. The dead band that used to sit between the slew's authority (0.06 BPM at
+	//    120) and the reporting bar (0.25). Measured on the pre-ADR-0008 code,
+	//    this scenario ended with the session back at exactly 120.0000 and a
+	//    single steering write of 0.002163 — 0.216%, 3.75 cents, four times the
+	//    cap's own audibility budget — with the room never told. The user's
+	//    deliberate change vanished silently.
+	//
+	//    Now: the slew nudges from what it observed, so it cannot write over the
+	//    user's tempo at any threshold setting; and the reporting bar is the
+	//    slew's authority, so what the slew cannot hold is what the room hears.
+	//    The change survives locally AND reaches the room.
+	t.Run("deliberate nudge survives and reaches the room", func(t *testing.T) {
 		res := runSim(simConfig{
 			name: "gate-nudge", duration: 5 * time.Minute,
 			peers: []simPeerSpec{
@@ -288,14 +297,27 @@ func TestTempoSimFidelityGate(t *testing.T) {
 			},
 		})
 		got := res.peers[0].endBPM
-		t.Logf("reports=%d endBPM=%.4f steerWrites=%d maxSteerFraction=%.6f",
-			res.peers[0].reports, got, res.peers[0].steerWrites, res.peers[0].maxSteerFraction)
-		if res.peers[0].reports != 0 {
-			t.Errorf("expected the 0.2 BPM nudge to fall below the reporting bar, got %d reports", res.peers[0].reports)
+		t.Logf("reports=%d endBPM=%.4f roomEnd=%.4f steerWrites=%d maxSteerFraction=%.6f",
+			res.peers[0].reports, got, res.roomEndBPM, res.peers[0].steerWrites, res.peers[0].maxSteerFraction)
+		// The user's tempo survives: nearer 120.2 than 120.
+		if math.Abs(got-120.2) > math.Abs(got-120.0) {
+			t.Errorf("the nudge was reverted: session held %.4f, want ~120.2", got)
 		}
-		// Reverted means it ended nearer the room tempo than the user's value.
-		if math.Abs(got-120.2) < math.Abs(got-120.0) {
-			t.Errorf("harness does not reproduce the silent revert: session held %.4f, near the user's 120.2", got)
+		// And the room hears it, so no peer is left steering against a tempo the
+		// room does not know about.
+		if res.peers[0].reports == 0 {
+			t.Errorf("the 0.2 BPM nudge was never reported — the dead band is still open")
+		}
+		if math.Abs(res.roomEndBPM-120.2) > 0.01 {
+			t.Errorf("room tempo ended at %.4f, want ~120.2", res.roomEndBPM)
+		}
+		// Pre-fix this was 0.002163 (3.75 cents). The audibility invariant itself
+		// is pinned in internal/align, where the episode base is visible —
+		// maxSteerFraction here is the step between consecutive writes, which a
+		// mid-episode sign flip can legitimately double.
+		if f := res.peers[0].maxSteerFraction; f > 2*interval.SlewMaxFraction+1e-9 {
+			t.Errorf("steering step of %.6f is more than a sign flip's worth of the %.6f cap",
+				f, interval.SlewMaxFraction)
 		}
 	})
 }

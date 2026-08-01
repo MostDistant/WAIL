@@ -10,7 +10,10 @@ type alignBridge struct{ lb LinkBridgeInterface }
 
 func (a alignBridge) State() align.State {
 	st := a.lb.State()
-	return align.State{BPM: st.BPM, Beat: st.Beat, TimestampUs: st.TimestampUs}
+	return align.State{
+		BPM: st.BPM, MeanBPM: a.lb.Detector().MeanTempo(),
+		Beat: st.Beat, TimestampUs: st.TimestampUs,
+	}
 }
 
 func (a alignBridge) TimeAtBeat(beat float64) int64 { return a.lb.TimeAtBeat(beat) }

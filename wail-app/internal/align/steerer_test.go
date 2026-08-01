@@ -349,7 +349,7 @@ func TestTempoCommitMidSlewClearsSlewTarget(t *testing.T) {
 	// A tempo commit lands mid-slew (user knob, or a remote TempoChange —
 	// the room moved to 121). Ownership cancels steering: the in-flight
 	// slew target must be dropped. Pre-fix it stayed stuck, and the
-	// same-rate gate then blocked the slew FOREVER — the session at the new
+	// tempo-settling gate then blocked the slew FOREVER — the session at the new
 	// room tempo never matched the stale target, so drift correction
 	// silently died for the rest of the session.
 	s.NoteTempoCommitted(121, now.Add(8*time.Second))
@@ -382,7 +382,7 @@ func TestRejoinMidSlewClearsSlewTarget(t *testing.T) {
 		t.Fatal("precondition: slew should be active")
 	}
 	// A reconnect lands mid-slew: the in-flight target must be dropped, or
-	// it wedges the same-rate gate if the room moved during the blip.
+	// it wedges the tempo-settling gate if the room moved during the blip.
 	s.OnRejoin()
 	if s.slewTarget != 0 {
 		t.Fatalf("slewTarget = %v after rejoin, want 0", s.slewTarget)
@@ -867,17 +867,77 @@ func TestSnapshotAdoptionOscillator(t *testing.T) {
 	}
 }
 
+// The audibility invariant ADR-0006 promises and ADR-0008 makes structural:
+// every tempo the slew writes is within SlewMaxFraction of the tempo it
+// OBSERVED, so no single write can be heard. Keyed to the room tempo instead,
+// the write is an absolute teleport whenever the session sits away from the
+// room — a 120.2 session was written to 119.94, 3.75 cents, over four times the
+// cap's own budget, and the user's change silently reverted.
+//
+// Driven over a long randomised walk of session tempo and grid error rather than
+// one scripted case: the property has to hold for every combination, and the
+// combinations are where the old design failed.
+func TestEveryWriteIsWithinSlewAuthorityOfWhatWeObserved(t *testing.T) {
+	now := time.Now()
+	s, f, _ := newSteerer(14_000_000)
+	observe(s, now)
+	now = now.Add(snapSettle + time.Second)
+
+	// A cheap deterministic walk — no math/rand, so a failure is reproducible.
+	seed := uint64(12345)
+	next := func(n int) int {
+		seed = seed*6364136223846793005 + 1442695040888963407
+		return int((seed >> 33) % uint64(n))
+	}
+	for i := 0; i < 4000; i++ {
+		// The DAW/LAN moves the tempo around, sometimes far from the room's 120.
+		if next(10) == 0 {
+			f.state.BPM = 118 + float64(next(400))/100 // 118.00 .. 121.99
+		}
+		// And the grid error wanders across the deadband, both signs.
+		f.timeAtBeat = 14_000_000 + int64(next(200_000)) - 100_000
+
+		// Both references have to be captured BEFORE the tick: a settle writes
+		// the base and clears it in the same tick, so reading episodeBase
+		// afterwards would leave only the nudged tempo to measure against — and
+		// a restore looks like a full-cap move from there.
+		baseBefore, sessionBefore := s.episodeBase, f.state.BPM
+		nWrites := len(f.tempos)
+		s.Tick(16, now.Add(time.Duration(i)*time.Second))
+
+		for _, wrote := range f.tempos[nWrites:] {
+			// The reference is the tempo the episode is nudging around: the base
+			// it already had, or the reading it just took if this write opened one.
+			base := baseBefore
+			if base == 0 {
+				base = sessionBefore
+			}
+			if off := math.Abs(wrote-base) / base; off > interval.SlewMaxFraction+1e-9 {
+				t.Fatalf("tick %d: wrote %.6f from base %.6f — %.6f off, past the %.6f cap",
+					i, wrote, base, off, interval.SlewMaxFraction)
+			}
+		}
+	}
+	if len(f.tempos) == 0 {
+		t.Fatal("no tempo writes at all over 4000 ticks — the walk never engaged the slew")
+	}
+	t.Logf("%d writes, all within %.4f%% of what was observed", len(f.tempos), interval.SlewMaxFraction*100)
+}
+
 // --- recovery from a grid that moved out from under us ---
 
-// The wedge: the gate compares the session tempo against the slew's target
-// while slewing, and returns before the settle that would clear that target,
-// so once something else moves the tempo the stale target holds the gate shut
-// against itself. Sixteen minutes of no alignment, in the field.
+// The wedge, and why it can no longer form: the gate used to compare the
+// session tempo against the slew's own target and return before the settle that
+// would clear it, so once something else moved the tempo the stale target held
+// the gate shut against itself. Sixteen minutes of no alignment, in the field.
 //
-// The fix is to abandon the target so the baseline falls back to the room
-// tempo — not to seize the tempo or force an audible re-entry, either of
-// which would fight whoever legitimately owns it.
-func TestShutGateAbandonsAStaleSlewTarget(t *testing.T) {
+// Now an episode is dropped the moment the session stops sitting at our nudge,
+// and the gate judges the session against the ROOM tempo, so the loop has no
+// way to close. Dropping is free — no tempo write, no snap — so it needs no
+// timeout to wait out an ordinary tempo change, which is what the old escape
+// had to do. What must NOT happen is unchanged: seizing the tempo, or forcing
+// an audible re-entry over a tempo nobody asked us to take.
+func TestStaleSlewTargetIsDroppedNotWedged(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_020_000)
 	observe(s, now)
@@ -889,18 +949,16 @@ func TestShutGateAbandonsAStaleSlewTarget(t *testing.T) {
 		t.Fatal("expected an active slew to set up the wedge")
 	}
 
-	// A real tempo move, well outside the same-rate band, shuts the gate.
+	// A real tempo move, well outside the tempo-settling band, shuts the gate.
 	f.state.BPM = 130
 	f.snaps, f.tempos = nil, nil
 
 	s.Tick(16, now)
-	if s.slewTarget == 0 {
-		t.Fatal("abandoned the target immediately — the gate must first wait out an ordinary tempo change")
-	}
-
-	s.Tick(16, now.Add(gateWedgeTimeout+time.Second))
 	if s.slewTarget != 0 {
-		t.Fatal("stale slew target survived the timeout — it holds the gate shut against itself")
+		t.Fatal("stale slew target survived — it is what holds the gate shut against itself")
+	}
+	if s.episodeBase != 0 {
+		t.Fatalf("stale episode base survived: %v", s.episodeBase)
 	}
 	if len(f.tempos) != 0 {
 		t.Fatalf("wrote the tempo while another owner held it: %v", f.tempos)
@@ -1045,11 +1103,13 @@ func TestGateShutWithNoSlewNeverEscalates(t *testing.T) {
 	}
 }
 
-// The wedge timer must measure ticks that actually evaluated the gate, not
-// wall time. Otherwise a spell where Tick returns early — a tempo-commit
-// burst, or alignment switched off — leaves it accruing, and the first
-// evaluated tick escalates with no grace at all.
-func TestWedgeTimerCountsOnlyEvaluatedTicks(t *testing.T) {
+// A disable/enable cycle must leave no episode state behind. This used to be a
+// wedge-timer test; the timer no longer abandons anything, but the cycle it
+// exercises exposed a sharper property: the persistence counter used to survive
+// SetEnabled(false), so the first tick after re-enabling could write a tempo
+// with no fresh confirmation at all — the very thing slewPersistenceTicks
+// exists to prevent.
+func TestDisableClearsEpisodeConfirmation(t *testing.T) {
 	now := time.Now()
 	s, f, _ := newSteerer(14_020_000)
 	observe(s, now)
@@ -1061,18 +1121,23 @@ func TestWedgeTimerCountsOnlyEvaluatedTicks(t *testing.T) {
 		t.Fatal("expected an active slew")
 	}
 
-	f.state.BPM = 130 // gate shuts
-	s.Tick(16, now)   // timer starts
-
-	// Alignment goes off for well past the timeout, then comes back.
 	s.SetEnabled(false, 16, now.Add(time.Second))
+	if s.slewTarget != 0 || s.episodeBase != 0 || s.slewPendingCount != 0 {
+		t.Fatalf("disable left episode state behind: target=%v base=%v pending=%d",
+			s.slewTarget, s.episodeBase, s.slewPendingCount)
+	}
 	s.SetEnabled(true, 16, now.Add(time.Minute))
 	observe(s, now.Add(time.Minute)) // entry runs, clearing entryPending
+	f.tempos = nil
 
-	// The very next evaluated tick must not act on a minute-old timer.
+	// The first tick back must confirm from scratch, not inherit the old count.
 	s.Tick(16, now.Add(time.Minute+snapSettle+time.Second))
+	if len(f.tempos) != 0 {
+		t.Fatalf("wrote a tempo on the first tick after re-enabling, with no fresh confirmation: %v", f.tempos)
+	}
+	s.Tick(16, now.Add(time.Minute+snapSettle+2*time.Second))
 	if s.slewTarget == 0 {
-		t.Fatal("abandoned the slew instantly on a stale timer — the gate was not continuously shut")
+		t.Fatal("slew never resumed after re-enabling")
 	}
 }
 
