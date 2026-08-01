@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/nicholasgasior/wail/wail-app/internal/abllink"
+	"github.com/nicholasgasior/wail/wail-app/internal/affinity"
 	"github.com/nicholasgasior/wail/wail-app/internal/capture"
 	"github.com/nicholasgasior/wail/wail-app/internal/interval"
 )
@@ -305,5 +307,173 @@ func TestSyncCaptureConfigReGridsAssemblerOnRoomConfigChange(t *testing.T) {
 
 	if got := ch.asm.Config(); got != (interval.Config{Bars: 2, Quantum: 4}) {
 		t.Fatalf("assembler still on old grid after room config change: %+v", got)
+	}
+}
+
+// --- stream retirement ---
+
+const retireTestInterval = int64(5)
+
+// feedRemoteStream publishes one remote stream by pushing a real one-interval
+// WAIF stream through the ingestion path, exactly as the relay would.
+func feedRemoteStream(t *testing.T, le *linkAudioEngine, identity, display, streamName string, streamID uint16) {
+	t.Helper()
+	enc, err := NewIntervalEncoder(2, engineInternalRate, 128)
+	if err != nil {
+		t.Fatalf("encoder: %v", err)
+	}
+	pcm := make([]int16, 960*2*2) // 2 stereo 20ms frames
+	frames, _, err := enc.EncodeInterval(pcm, retireTestInterval, streamID, 0, 120, 4, 4)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	for _, f := range frames {
+		le.HandleRemoteAudio(identity, display, streamName, f)
+	}
+}
+
+// drainPlayout simulates the interval having finished playing out, which the
+// boundary handler does via reasm.Drop once the release window passes.
+func drainPlayout(le *linkAudioEngine) {
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	for _, st := range le.emit {
+		st.reasm.Drop(retireTestInterval)
+	}
+}
+
+func sweep(le *linkAudioEngine, at time.Time) {
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	le.sweepRetiredLocked(at)
+}
+
+func hasStream(le *linkAudioEngine, identity string, streamID uint16) bool {
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	_, ok := le.emit[affinity.Key{Identity: identity, Stream: streamID}]
+	return ok
+}
+
+// A stream its sender no longer lists in StreamNames must stop being published:
+// e.emit only ever grew within a session, so a dropped stream's channel kept
+// publishing silence on the LAN and held a port on every WAIL Receive.
+func TestEmitStreamRetiredWhenSenderDropsIt(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
+	feedRemoteStream(t, le, "id-A", "Alice", "bass", 1)
+	if len(le.emit) != 2 {
+		t.Fatalf("expected 2 published streams, got %d", len(le.emit))
+	}
+
+	// Alice now sends only stream 0.
+	le.SetPeerStreams("id-A", map[uint16]bool{0: true})
+	past := time.Now().Add(24 * time.Hour)
+
+	// Still buffered: retiring here would cut the tail off the last interval,
+	// which playout is still holding (release runs D boundaries behind).
+	sweep(le, past)
+	if !hasStream(le, "id-A", 1) {
+		t.Fatal("retired a stream that still had audio buffered — that truncates the last interval")
+	}
+
+	drainPlayout(le)
+
+	// Inside the grace, frames could still be in flight.
+	sweep(le, time.Now())
+	if !hasStream(le, "id-A", 1) {
+		t.Fatal("retired inside the grace period")
+	}
+
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	if hasStream(le, "id-A", 1) {
+		t.Fatal("dropped stream still published after its grace expired")
+	}
+	if !hasStream(le, "id-A", 0) {
+		t.Fatal("retired a stream the sender still lists")
+	}
+}
+
+// An empty declared set means "I send nothing" — the case that reaches us with
+// the wire field absent (Names is omitempty), which used to be discarded.
+func TestEmitStreamsRetiredWhenSenderDeclaresNone(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
+	le.SetPeerStreams("id-A", map[uint16]bool{})
+	drainPlayout(le)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	if len(le.emit) != 0 {
+		t.Fatalf("expected every stream retired, %d still published", len(le.emit))
+	}
+}
+
+// A peer that left gets a much longer grace than one that dropped a stream:
+// affinity exists so a reconnect blip keeps the same channel and the far
+// side's routing survives.
+func TestDepartedPeerKeepsChannelsThroughLongerGrace(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
+	le.DropPeer("id-A")
+	drainPlayout(le)
+
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	if !hasStream(le, "id-A", 0) {
+		t.Fatal("a departed peer's channel went away on the short grace — a brief reconnect loses routing")
+	}
+	sweep(le, time.Now().Add(retireGracePeerGone+time.Second))
+	if hasStream(le, "id-A", 0) {
+		t.Fatal("departed peer's channel still published after the peer-gone grace")
+	}
+}
+
+// Rejoining inside the grace revives the channel rather than minting a new one.
+func TestRejoinInsideGraceKeepsTheSameChannel(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
+	before := le.emit[affinity.Key{Identity: "id-A", Stream: 0}].sinks[0]
+
+	le.DropPeer("id-A")
+	le.SetPeerStreams("id-A", map[uint16]bool{0: true}) // rejoined, still sending stream 0
+	drainPlayout(le)
+	sweep(le, time.Now().Add(24*time.Hour))
+
+	st, ok := le.emit[affinity.Key{Identity: "id-A", Stream: 0}]
+	if !ok {
+		t.Fatal("channel retired despite the peer rejoining and re-declaring the stream")
+	}
+	if st.sinks[0] != before {
+		t.Fatal("re-minted the sink instead of keeping it (affinity)")
+	}
+}
+
+// Silence from a peer we have heard nothing about is not evidence: with no
+// declared intent the stream stays, however long it has been idle.
+func TestStreamWithoutDeclaredIntentIsNeverRetired(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
+	drainPlayout(le)
+	sweep(le, time.Now().Add(24*time.Hour))
+	if !hasStream(le, "id-A", 0) {
+		t.Fatal("retired a stream with no declared intent")
+	}
+}
+
+// Retirement must not lower the cumulative Health totals: the session logs a
+// counter only when it exceeds the previous snapshot, so a dip would silently
+// swallow every later event on the surviving streams until it recovered.
+func TestRetirementKeepsHealthTotalsMonotonic(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
+	le.emit[affinity.Key{Identity: "id-A", Stream: 0}].framesMissedAtPlay.Add(7)
+	if got := le.Health().EmitFramesMissingAtPlay; got != 7 {
+		t.Fatalf("pre-retirement total = %d, want 7", got)
+	}
+
+	le.SetPeerStreams("id-A", map[uint16]bool{})
+	drainPlayout(le)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+
+	if got := le.Health().EmitFramesMissingAtPlay; got != 7 {
+		t.Fatalf("total dropped to %d after retiring the stream, want 7 retained", got)
 	}
 }

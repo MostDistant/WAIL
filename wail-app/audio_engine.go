@@ -19,6 +19,17 @@ type AudioEngine interface {
 	// streamName is the sender's display name for the stream (may be empty until
 	// StreamNames sync arrives); it labels the republished channel.
 	HandleRemoteAudio(fromIdentity, displayName, streamName string, waif []byte)
+	// SetPeerStreams records the set of stream ids an identity says it is still
+	// sending (their StreamNames sync). Published streams of theirs outside the
+	// set are retired once drained and idle, so a channel the sender stopped
+	// publishing stops holding a port on every WAIL Receive on the LAN. An
+	// empty set means "sending nothing", not "unknown".
+	SetPeerStreams(identity string, keep map[uint16]bool)
+	// DropPeer marks everything an identity publishes for retirement on a
+	// longer grace — they left the room (or, for the loopback identity, the
+	// server echo was turned off). The grace is what lets affinity hold a
+	// channel across a reconnect blip.
+	DropPeer(identity string)
 	// SetRoomAnchor applies a fresh relay interval_anchor: aligns the local→room
 	// interval labeler and adopts the room tempo/config.
 	SetRoomAnchor(currentIndex int64, bpm float64, bars uint32, quantum float64)

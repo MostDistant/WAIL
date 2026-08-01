@@ -37,3 +37,21 @@ func TestFormatRoomChannelName(t *testing.T) {
 		t.Error("room channel name must carry RoomChannelPrefix")
 	}
 }
+
+// A user's own track or stream name may already carry the room prefix; the
+// published name must still have exactly one, or the receive side (which
+// strips one) shows a name that reads as a nested room channel.
+func TestFormatRoomChannelNameStripsPrefixFromUserNames(t *testing.T) {
+	cases := []struct{ peer, stream, want string }{
+		{"alice", "Guitar", "WAIL · alice · Guitar"},
+		{"alice", "WAIL · Guitar", "WAIL · alice · Guitar"},
+		{"WAIL · alice", "Guitar", "WAIL · alice · Guitar"},
+		{"alice", "WAIL · WAIL · Guitar", "WAIL · alice · Guitar"},
+		{"alice", "WAIL · ", "WAIL · alice"},
+	}
+	for _, c := range cases {
+		if got := FormatRoomChannelName(c.peer, c.stream); got != c.want {
+			t.Errorf("FormatRoomChannelName(%q, %q) = %q, want %q", c.peer, c.stream, got, c.want)
+		}
+	}
+}
