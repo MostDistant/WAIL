@@ -89,6 +89,10 @@ static inline void lb_module_stamp(char *stamp, unsigned long stampCap, char *pa
    time_t   mt = st.st_mtime;
    struct tm tmv;
 #ifdef _WIN32
+   // MSVCRT's localtime_s(struct tm*, const time_t*) — what MinGW-w64 gives
+   // by default. Deliberately NOT C11 Annex K's localtime_s, whose arguments
+   // are the other way round and which appears if __STDC_WANT_LIB_EXT1__ is
+   // ever defined. Same name, reversed signature: worth stating.
    if (localtime_s(&tmv, &mt) != 0) return;
 #else
    if (!localtime_r(&mt, &tmv)) return;

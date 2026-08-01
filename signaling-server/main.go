@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/bcrypt"
@@ -831,18 +832,35 @@ const serverLoggedTarget = "align"
 // websocket read limit, and this text reaches the operator's log pipeline.
 const maxServerLoggedMessage = 512
 
+// shouldMirrorToServerLog reports whether a client log line is mirrored into
+// the relay's own log. Deliberately narrow, and a named predicate so it stays
+// that way: every field below is unauthenticated client input, and peers
+// already echo each other's logs, so widening this multiplies a room's chatter
+// into the operator's log.
+func shouldMirrorToServerLog(level, target string) bool {
+	return target == serverLoggedTarget && (level == "warn" || level == "error")
+}
+
 // sanitizeForLog makes an unauthenticated client string safe to write into the
-// relay's log: control characters (newlines above all — they let a client forge
-// whole log lines and assert anything about any room) become spaces, and the
-// result is truncated.
+// relay's log. Every control character becomes a space — the newline above all,
+// since it lets a client forge whole log lines and assert anything about any
+// room — and the result is truncated on a rune boundary.
 func sanitizeForLog(s string) string {
 	if len(s) > maxServerLoggedMessage {
-		s = s[:maxServerLoggedMessage] + "…(truncated)"
+		// Back up to a rune start: slicing bytes can cut a multi-byte rune in
+		// half and emit a replacement character.
+		cut := maxServerLoggedMessage
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "…(truncated)"
 	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		if r == '\n' || r == '\r' || r == '\t' || unicode.IsControl(r) {
+		// IsControl already covers \n, \r, \t and everything else below 0x20;
+		// listing them separately as well was dead.
+		if unicode.IsControl(r) {
 			b.WriteByte(' ')
 			continue
 		}
@@ -867,9 +885,11 @@ func (h *hub) broadcastLog(room, peerID string, c *conn, msg clientMsg) {
 	// stream. Peers already echo each other's logs, so mirroring everything
 	// would multiply a room's chatter into the operator's log — and every
 	// field here is unauthenticated client input.
-	if msg.Target == serverLoggedTarget && (msg.Level == "warn" || msg.Level == "error") {
-		log.Printf("room %s peer %s %s [%s] %s", room, peerID, msg.Level, msg.Target,
-			sanitizeForLog(msg.Message))
+	if shouldMirrorToServerLog(msg.Level, msg.Target) {
+		// room and peerID are client-supplied too — join() takes both verbatim —
+		// so sanitizing only the message left half the line forgeable.
+		log.Printf("room %s peer %s %s [%s] %s", sanitizeForLog(room), sanitizeForLog(peerID),
+			msg.Level, msg.Target, sanitizeForLog(msg.Message))
 	}
 	raw, err := json.Marshal(map[string]any{
 		"type": "log", "from": peerID, "level": msg.Level,

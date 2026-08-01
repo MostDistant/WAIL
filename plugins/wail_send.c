@@ -171,6 +171,16 @@ static bool CLAP_ABI lbs_activate(const clap_plugin_t *plugin, double sr, uint32
 }
 static void CLAP_ABI lbs_deactivate(const clap_plugin_t *plugin) {
    lb_send *self = plugin->plugin_data;
+   // Flush a first-commit result the main thread never got to write.
+   // request_callback is optional in CLAP, so a host that omits it would
+   // otherwise drop this line entirely — including its WITHHELD case, which
+   // is the one worth having. Recv has no equivalent problem: its manager
+   // thread always runs. Safe here because process() has stopped by now.
+   if (atomic_load_explicit(&self->commit_pending, memory_order_acquire)) {
+      atomic_store_explicit(&self->commit_pending, false, memory_order_relaxed);
+      lbs_log(self, "first commit: %s (frames=%u)",
+              self->commit_ok ? "ok" : "WITHHELD (no source subscribed?)", self->commit_frames);
+   }
    if (self->sink) {
       lb_sink_destroy(self->sink);
       self->sink = NULL;

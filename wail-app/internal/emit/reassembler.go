@@ -216,6 +216,12 @@ func (r *Reassembler) MinIndex() (min int64, ok bool) {
 	return min, ok
 }
 
+// Count returns how many intervals are currently buffered. Distinct from the
+// index span MaxIndex−MinIndex: the buffer is a map, and the sender this is
+// reported for — one whose labels run far from ours — is exactly what makes it
+// sparse, so a span would claim 96 for two held intervals.
+func (r *Reassembler) Count() int { return len(r.partials) }
+
 // Drop discards any partial for interval `index` and every earlier interval
 // (they can never be played once we've moved past them).
 func (r *Reassembler) Drop(upToInclusive int64) {

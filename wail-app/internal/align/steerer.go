@@ -31,8 +31,12 @@ const (
 	// hand, remote change, or entry adoption) so WAIL never fights a hand
 	// on the tempo knob. Deliberately longer than the 150ms echo guard.
 	tempoGate = 3 * time.Second
-	// tempoThreshold mirrors the Link poller's tempoChangeThreshold (0.01
-	// BPM): below it two tempos are "the same" for adoption decisions.
+	// tempoThreshold is the equality epsilon for adoption decisions: below it
+	// two tempos are "the same". It matches the detector's tempoSteadyBand
+	// (link_types.go), which asks a different question — has a reading stopped
+	// moving — and is deliberately NOT the detector's reporting bar, which is
+	// far coarser. It used to be described as mirroring a single shared
+	// constant; that constant was split, and the mirroring stopped being true.
 	tempoThreshold = 0.01
 	// slewPersistenceTicks is how many consecutive ticks δ must hold outside
 	// the deadband in the same direction before the slew acts. Real grid
@@ -262,7 +266,7 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 		// — publishing that at tick rate would trade a stale number for a
 		// meaningless one. The bucket still moves if things get materially
 		// worse, and the recovery paths bound how long this can last.
-		s.emitBucket(delta)
+		s.emitBucket(delta, now)
 		s.noteGateShut(now, roomBPM, st.BPM)
 		return
 	}
@@ -488,7 +492,6 @@ func (s *Steerer) measureDelta(bpi float64) (int64, bool) {
 	return s.aligner.Delta(s.link.TimeAtBeat(boundaryBeat))
 }
 
-// emitState reports the bucketed alignment state on change only.
 // sameRateBand is how far the session tempo may sit from the slew's baseline
 // before δ stops meaning anything. Proportional, not the flat adoption
 // threshold it used to share: the gate exists to avoid fighting a real tempo
@@ -608,9 +611,13 @@ func (s *Steerer) emitState(deltaUs int64, now time.Time) {
 
 // emitBucket reports a state change only, ignoring δ movement — for ticks
 // where the measurement itself is not trustworthy enough to publish.
-func (s *Steerer) emitBucket(deltaUs int64) {
+func (s *Steerer) emitBucket(deltaUs int64, now time.Time) {
 	if state := stateName(deltaUs); state != s.lastState {
-		s.publish(state, deltaUs, time.Time{})
+		// now, not the zero time: publishing with a zero stamp left lastEmitAt
+		// zero, and the next emitState then saw IsZero() and skipped the
+		// same-bucket rate limit entirely — a gated stretch quietly re-armed
+		// the limiter it was supposed to be bounded by.
+		s.publish(state, deltaUs, now)
 	}
 }
 
