@@ -1,0 +1,42 @@
+name: Verify release config
+
+# Hermetic check of the beta channel's version numbering (docs/adr/0008): runs
+# scripts/verify-beta-versioning.sh, which drives the real knope.toml
+# prepare-beta workflow against a throwaway repo — no release is cut. Guards
+# against a knope upgrade or a knope.toml edit silently changing beta numbering,
+# without waiting for a live beta to reveal it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - knope.toml
+      - scripts/verify-beta-versioning.sh
+      - .github/workflows/beta.yml
+      - .github/workflows/auto-release.yml
+      - .github/workflows/release-on-merge.yml
+      - .github/workflows/verify-release-config.yml
+  pull_request:
+    paths:
+      - knope.toml
+      - scripts/verify-beta-versioning.sh
+      - .github/workflows/beta.yml
+      - .github/workflows/auto-release.yml
+      - .github/workflows/release-on-merge.yml
+      - .github/workflows/verify-release-config.yml
+  workflow_dispatch:
+
+jobs:
+  verify-beta-versioning:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install knope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -sSfL "https://github.com/knope-dev/knope/releases/latest/download/knope-x86_64-unknown-linux-musl.tgz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin/
+
+      - name: Verify beta version progression
+        run: scripts/verify-beta-versioning.sh

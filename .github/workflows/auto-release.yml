@@ -76,9 +76,19 @@ jobs:
           VERSION=$(cat VERSION)
           EXISTING_PR=$(gh pr list --head release --base main --json number --jq '.[0].number' 2>/dev/null || echo "")
 
+          # Betas for this cycle are exactly v<stable>-beta.* (docs/adr/0008).
+          # Listing them lets you confirm at merge time that the beta you
+          # actually tested is the newest one — promotion is by judgment, not a
+          # gate, so this is the only "did I ship what was tested" signal.
+          git fetch --tags origin >/dev/null 2>&1 || true
+          BETAS=$(git tag --list "v${VERSION}-beta.*" --sort=v:refname | tr '\n' ' ' | sed 's/ $//')
+          [ -z "$BETAS" ] && BETAS="(none — no betas cut this cycle)"
+
           BODY="Automated release preparation for v${VERSION}.
 
-          Merging this PR will create GitHub release v${VERSION} and trigger artifact builds."
+          Merging this PR will create GitHub release v${VERSION} and trigger artifact builds.
+
+          Betas soaked this cycle: ${BETAS}"
 
           if [ -n "$EXISTING_PR" ]; then
             gh pr edit "$EXISTING_PR" \

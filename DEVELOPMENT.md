@@ -252,3 +252,76 @@ one process. `cmd/gen-complex` generates dense music-like test material (detuned
 pad, bass, percussive transients) that stresses the codec path harder than the
 sweep; `TestComplexProgramRoundTrip` runs the same material through the streaming
 encode/decode path in-process and asserts it comes back gap-free.
+
+## Beta channel
+
+Main is the beta channel. Every merge to `main` with a `feat:`/`fix:` (or a
+changeset) is cut as a prerelease `v4.2.0-beta.N` on the long-lived `beta`
+branch and published as a GitHub **prerelease** with the same platform artifacts
+as stable. Stable is a separate, deliberate promotion: merging the standing
+`release` PR ships `v4.2.0`. See `docs/adr/0008-beta-channel.md` for the full
+model; this section is how a tester installs and runs a beta.
+
+Betas are a small, invite-only circle — they share the **production relay and
+real rooms** with stable users, so keep them among people you've asked. A beta
+build self-identifies: the version in the app header and Debug tab reads
+`v4.2.0-beta.N` (zero-indexed — the first beta of a cycle is `beta.0`).
+
+The numbering is checked without cutting a release by
+`scripts/verify-beta-versioning.sh` (drives the real `prepare-beta` against a
+throwaway repo; `verify-release-config.yml` runs it in CI on release-config
+changes). It needs `knope` on `PATH`; grab the binary from
+[knope releases](https://github.com/knope-dev/knope/releases) to run it locally.
+
+### macOS
+
+Betas ship a **separate `wail-beta` formula** in the same tap, so stable `wail`
+stays installed and you flip between them with `brew link` — no rebuild either
+way. Both build the same binary from source (Go + cgo Link + CLAP plugins, a few
+minutes, needs the Xcode command-line tools).
+
+```sh
+brew install MostDistant/wail/wail-beta
+```
+
+If stable `wail` is already installed, that command finishes the build and then
+prints a "Could not symlink bin/wail" error — **expected**, because both
+formulae install `bin/wail` and only one can be linked at a time. Switch which
+one is on your `PATH`:
+
+```sh
+brew unlink wail && brew link --overwrite wail-beta   # run the beta
+brew unlink wail-beta && brew link --overwrite wail   # back to stable, instantly
+```
+
+`brew upgrade wail-beta` rebuilds the newest beta from source. Both kegs stay on
+disk, so falling back to stable mid-session is a `link`, not a reinstall.
+
+### Windows
+
+Download the `wail-windows-x64-<version>.zip` asset from the beta's prerelease on
+the Releases page, unzip it anywhere (alongside a stable copy is fine — they're
+just folders), and run `bin\wail.exe`. Same unsigned-binary SmartScreen prompt as
+stable ("More info" → "Run anyway").
+
+### Data and identity
+
+A beta shares the stable data dir (`~/.wail`): same identity, stream names, and
+capture selections, so you're testing your real setup and the room sees your
+usual peer identity. (`-instance N` still gives an isolated `~/.wail-N` if you
+want one.)
+
+> **Plugin caveat (until the follow-up ships):** the CLAP bridge plugins
+> auto-install only *if missing*, so a machine that already has stable's plugins
+> keeps running them under a beta app — beta plugin changes won't reach a DAW
+> that already has the bundles. A forced-reinstall control (a Debug-tab button /
+> `-install-plugins` flag / `wail-beta-install-plugins`) lands with the app PR;
+> until then, to test beta plugins, delete the `wail-send.clap` / `wail-recv.clap`
+> bundles from your CLAP folder and relaunch the beta so it reinstalls its own.
+
+### Crash evidence (follow-up)
+
+The app PR removes the crash reporter and starts writing a panic stack to
+`~/.wail/logs/crash.log`. Until then, the rotating `wail.log` and the room-shared
+log are what to collect — "send me your logs" means those.
+
