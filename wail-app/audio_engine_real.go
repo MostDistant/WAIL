@@ -82,7 +82,6 @@ type linkAudioEngine struct {
 	wg     sync.WaitGroup
 
 	wireDecodeFailures atomic.Uint64 // WAIF wire-decode errors (pre-Opus)
-	unlabeledWindows   atomic.Uint64 // capture windows dropped before a room anchor
 
 	// localBoundary is the local interval index the emit loop last processed —
 	// a monotonic boundary counter, published each tick so the frame path can
@@ -950,25 +949,17 @@ func (e *linkAudioEngine) drainCapture(ctx context.Context, ch *captureChannel) 
 	}
 }
 
-// emitWindow labels one capture window with the room index, encodes it, and
-// ships it. Windows arrive as their 20ms of audio fills, so WAIF frames leave
-// in real time during the interval — the receiver has nearly the whole
-// interval before its N+D playout boundary instead of racing the playhead.
+// emitWindow stamps one capture window with our local interval index
+// (ADR-0009: rounds are sender-relative — receivers treat the number as an
+// opaque per-sender sequence, so no room label is needed and capture never
+// waits for an anchor), encodes it, and ships it. Windows arrive as their
+// 20ms of audio fills, so WAIF frames leave in real time during the interval.
 func (e *linkAudioEngine) emitWindow(ch *captureChannel, w capture.Window) {
 	e.mu.Lock()
-	roomIdx, ok := e.labeler.RoomIndex(w.IntervalIndex)
 	bpm, cfg := e.tempoBPM, e.cfg
 	e.mu.Unlock()
-	if !ok {
-		// No room anchor yet; can't label. Same drop as the old whole-interval
-		// path, now per window.
-		if n := e.unlabeledWindows.Add(1); n == 1 || n%1000 == 0 {
-			log.Printf("[audio] warn: dropping unlabeled capture windows on %q (%d total)", ch.name, n)
-		}
-		return
-	}
 	wire, err := ch.enc.EncodeWindow(w.Samples, WindowMeta{
-		RoomIndex:   roomIdx,
+		RoomIndex:   w.IntervalIndex,
 		StreamID:    ch.streamID,
 		FrameNumber: uint32(w.Number),
 		Seq:         ch.seq,

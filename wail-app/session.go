@@ -326,12 +326,10 @@ func sessionLoop(
 
 	// handleBoundary fires on each Link event: if the given beat crossed into a
 	// new local interval, it logs the boundary, records timing drift, and hands
-	// the room-labeled boundary to the in-app senders (test tone / WAV). It closes
-	// over sessionLoop state (interval config, frame counters, drift, sender
+	// the boundary to the in-app senders (test tone / WAV). It closes over
+	// sessionLoop state (interval config, frame counters, drift, sender
 	// channels) so the call sites pass only the beat.
 	handleBoundary := func(beat float64) {
-		// idx is the local interval index (drives boundary detection); roomIdx is
-		// the shared room index it maps to (relay clock) — what senders tag with.
 		idx := intervalCfg.IndexAtBeat(beat)
 		if lastIntervalIndex != nil && idx <= *lastIntervalIndex {
 			return
@@ -339,12 +337,7 @@ func sessionLoop(
 		newIdx := idx
 		lastIntervalIndex = &newIdx
 
-		roomIdx := idx
-		if ri, ok := audioEngine.RoomIndex(idx); ok {
-			roomIdx = ri
-		}
-
-		log.Printf("[session] >>> INTERVAL local=%d room=%d <<< beat=%.1f sent=%d recv=%d", idx, roomIdx, beat, intervalFramesSent+engineFramesSent.Swap(0), intervalFramesRecv)
+		log.Printf("[session] >>> INTERVAL local=%d <<< beat=%.1f sent=%d recv=%d", idx, beat, intervalFramesSent+engineFramesSent.Swap(0), intervalFramesRecv)
 		intervalFramesSent = 0
 		intervalFramesRecv = 0
 		intervalBytesSent = 0
@@ -359,7 +352,9 @@ func sessionLoop(
 		now := time.Now()
 		lastBoundaryTime = &now
 
-		info := IntervalBoundaryInfo{Index: roomIdx, BPM: steer.CurrentBPM(), Cfg: intervalCfg}
+		// In-app senders stamp the LOCAL interval index (ADR-0009): rounds are
+		// sender-relative, so no room mapping exists or is needed.
+		info := IntervalBoundaryInfo{Index: idx, BPM: steer.CurrentBPM(), Cfg: intervalCfg}
 		if testToneBoundaryCh != nil {
 			select {
 			case testToneBoundaryCh <- info:

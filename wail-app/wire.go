@@ -65,18 +65,6 @@ func PeekWaifHeader(data []byte) *WaifHeaderPeek {
 	}
 }
 
-// RewriteWaifIntervalIndex rewrites the interval_index field in a WAIF frame in-place.
-// Returns true if the rewrite was performed.
-func RewriteWaifIntervalIndex(data []byte, newIndex int64) bool {
-	if len(data) >= frameHeaderSize &&
-		data[0] == frameMagic[0] && data[1] == frameMagic[1] &&
-		data[2] == frameMagic[2] && data[3] == frameMagic[3] {
-		binary.LittleEndian.PutUint64(data[7:15], uint64(newIndex))
-		return true
-	}
-	return false
-}
-
 // AudioFrame represents a decoded WAIF streaming audio frame.
 type AudioFrame struct {
 	IntervalIndex int64
