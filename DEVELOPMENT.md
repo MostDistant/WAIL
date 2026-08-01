@@ -89,6 +89,10 @@ For measuring a peer's rhythmic phase offset against the room grid (the
   `wail-app -debug`. This is the one to hand a tester: it needs no room name
   and no settings change, and every debug session then carries the same
   diagnostics, so captures are comparable across machines.
+  - `-debug` **implies developer mode** for that run, so the Debug tab (stream
+    offsets, cushion) is there without talking anyone through a checkbox. The
+    saved preference is left alone — relaunching without the flag restores it —
+    and unticking Developer mode in settings still wins for the session.
   - Add `-room NAME` for a private debug room instead of the shared one
     (`wail-app -debug -room debug-geren`) when you don't want testers landing
     on top of each other's audio.

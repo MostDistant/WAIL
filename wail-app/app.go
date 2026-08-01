@@ -38,6 +38,10 @@ type App struct {
 	// rememberEnabled mirrors the frontend "Remember settings" checkbox (pushed
 	// via SetRememberEnabled); it gates persisting captureEnabled to disk.
 	rememberEnabled bool
+	// debugMode records that the app was launched with -debug. The frontend
+	// reads it to imply developer mode: someone handed a debug build should get
+	// the Debug tab without being talked through a setting first.
+	debugMode bool
 	// captureEnabled is the remembered set of enabled capture channels, keyed
 	// by (peer, channel) name; restored into each session's audio engine.
 	captureEnabled []CaptureChannelKey
@@ -381,6 +385,22 @@ func (a *App) DebugRoom(displayName string, linkAudioName *string) (*JoinResult,
 	}
 	a.ArmDebugDiagnostics()
 	return res, nil
+}
+
+// SetDebugMode records the -debug launch flag (main, before the UI starts).
+func (a *App) SetDebugMode(on bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.debugMode = on
+}
+
+// IsDebugMode reports whether the app was launched with -debug. The frontend
+// treats it as developer mode: the flag is the whole opt-in, so making a tester
+// also find a checkbox is a step that only loses us diagnostics.
+func (a *App) IsDebugMode() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.debugMode
 }
 
 // ArmDebugDiagnostics turns on what a debug session is expected to carry: the

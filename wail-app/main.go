@@ -50,6 +50,7 @@ func main() {
 	log.Println("WAIL - WebSocket Audio Interchange for Link (Go/Wails)")
 
 	appBackend := NewApp(*instance)
+	appBackend.SetDebugMode(*debugMode)
 
 	// Set up rotating file logger + WebSocket log broadcaster
 	logDir := filepath.Join(appBackend.dataDir, "logs")
