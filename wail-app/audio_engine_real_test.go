@@ -24,7 +24,7 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 	lb := NewLinkBridge(120, 4)
 
 	var sent [][]byte
-	eng := newAudioEngine(lb, "TestPeer", func(w []byte) { sent = append(sent, w) }, 1)
+	eng := newAudioEngine(lb, "TestPeer", func(w []byte) { sent = append(sent, w) })
 	le, ok := eng.(*linkAudioEngine)
 	if !ok {
 		t.Fatalf("expected *linkAudioEngine, got %T", eng)
@@ -79,10 +79,7 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 	}
 
 	// Control surface is safe.
-	eng.SetRoomAnchor(100, 120, 4, 4)
-	if !le.labeler.Aligned() {
-		t.Fatal("SetRoomAnchor should align the labeler")
-	}
+	eng.SetRoomConfig(120, 4, 4)
 	if len(eng.CaptureChannels()) != 0 {
 		t.Fatal("no capture channels expected before discovery runs")
 	}
@@ -99,12 +96,12 @@ func TestAudioEngineEmitIngestion(t *testing.T) {
 // as received), and the late real frame must replace the concealment.
 func TestEngineConcealsSeqGapWithPLC(t *testing.T) {
 	lb := NewLinkBridge(120, 4)
-	eng := newAudioEngine(lb, "TestPeer", func([]byte) {}, 1)
+	eng := newAudioEngine(lb, "TestPeer", func([]byte) {})
 	le := eng.(*linkAudioEngine)
 	defer eng.Stop()
 
-	// Anchor so cfg/tempo-derived interval totals exist for the slot walk.
-	eng.SetRoomAnchor(0, 120, 4, 4)
+	// Room config so cfg/tempo-derived interval totals exist for the slot walk.
+	eng.SetRoomConfig(120, 4, 4)
 
 	enc, err := NewIntervalEncoder(2, 48000, 128)
 	if err != nil {
@@ -173,7 +170,7 @@ func TestEngineConcealsSeqGapWithPLC(t *testing.T) {
 // auto-enabled channels are exercisable. Stop runs at cleanup.
 func newCaptureTestEngine(t *testing.T) *linkAudioEngine {
 	t.Helper()
-	eng := newAudioEngine(NewLinkBridge(120, 4), "WAIL", func([]byte) {}, 1)
+	eng := newAudioEngine(NewLinkBridge(120, 4), "WAIL", func([]byte) {})
 	le, ok := eng.(*linkAudioEngine)
 	if !ok {
 		t.Fatalf("expected *linkAudioEngine, got %T", eng)
@@ -294,16 +291,16 @@ func TestCaptureExcludesWAILPrefixedChannelsFromAnyPeer(t *testing.T) {
 // with everyone else, worse every interval, until the channel is restarted.
 func TestSyncCaptureConfigReGridsAssemblerOnRoomConfigChange(t *testing.T) {
 	le := newCaptureTestEngine(t)
-	le.SetRoomAnchor(0, 120, 4, 4)
+	le.SetRoomConfig(120, 4, 4)
 	ch := &captureChannel{
 		name: "Main",
 		asm:  capture.NewWindowed(interval.Config{Bars: 4, Quantum: 4}, 2, engineInternalRate, samplesPerWaifFrame(engineInternalRate)),
 	}
 	le.capture["deadbeef"] = ch
 
-	// Room switches 4 bars → 2 bars. SetRoomAnchor adopts it engine-wide; the
+	// Room switches 4 bars → 2 bars. SetRoomConfig adopts it engine-wide; the
 	// drain goroutine follows on its next tick (syncCaptureConfig).
-	le.SetRoomAnchor(1, 120, 2, 4)
+	le.SetRoomConfig(120, 2, 4)
 	le.syncCaptureConfig(ch)
 
 	if got := ch.asm.Config(); got != (interval.Config{Bars: 2, Quantum: 4}) {
@@ -350,12 +347,11 @@ func drainPlayout(le *linkAudioEngine) {
 	}
 }
 
-// sweep runs the retirement pass for the boundary labeled roomLabel, the same
-// way onBoundary does: before any scheduler has advanced for that boundary.
-func sweep(le *linkAudioEngine, at time.Time, roomLabel int64) {
+// sweep runs the retirement pass the same way onBoundary does.
+func sweep(le *linkAudioEngine, at time.Time) {
 	le.mu.Lock()
 	defer le.mu.Unlock()
-	le.sweepRetiredLocked(at, roomLabel)
+	le.sweepRetiredLocked(at)
 }
 
 func hasStream(le *linkAudioEngine, identity string, streamID uint16) bool {
@@ -382,7 +378,7 @@ func TestEmitStreamRetiredWhenSenderDropsIt(t *testing.T) {
 
 	// Still buffered: retiring here would cut the tail off the last interval,
 	// which playout is still holding (release runs D boundaries behind).
-	sweep(le, past, retireTestInterval+10)
+	sweep(le, past)
 	if !hasStream(le, "id-A", 1) {
 		t.Fatal("retired a stream that still had audio buffered — that truncates the last interval")
 	}
@@ -390,12 +386,12 @@ func TestEmitStreamRetiredWhenSenderDropsIt(t *testing.T) {
 	drainPlayout(le)
 
 	// Inside the grace, frames could still be in flight.
-	sweep(le, time.Now(), retireTestInterval+10)
+	sweep(le, time.Now())
 	if !hasStream(le, "id-A", 1) {
 		t.Fatal("retired inside the grace period")
 	}
 
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second), retireTestInterval+10)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
 	if hasStream(le, "id-A", 1) {
 		t.Fatal("dropped stream still published after its grace expired")
 	}
@@ -411,7 +407,7 @@ func TestEmitStreamsRetiredWhenSenderDeclaresNone(t *testing.T) {
 	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
 	le.SetPeerStreams("id-A", map[uint16]bool{})
 	drainPlayout(le)
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second), retireTestInterval+10)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
 	if len(le.emit) != 0 {
 		t.Fatalf("expected every stream retired, %d still published", len(le.emit))
 	}
@@ -426,11 +422,11 @@ func TestDepartedPeerKeepsChannelsThroughLongerGrace(t *testing.T) {
 	le.DropPeer("id-A")
 	drainPlayout(le)
 
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second), retireTestInterval+10)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
 	if !hasStream(le, "id-A", 0) {
 		t.Fatal("a departed peer's channel went away on the short grace — a brief reconnect loses routing")
 	}
-	sweep(le, time.Now().Add(retireGracePeerGone+time.Second), retireTestInterval+10)
+	sweep(le, time.Now().Add(retireGracePeerGone+time.Second))
 	if hasStream(le, "id-A", 0) {
 		t.Fatal("departed peer's channel still published after the peer-gone grace")
 	}
@@ -445,7 +441,7 @@ func TestRejoinInsideGraceKeepsTheSameChannel(t *testing.T) {
 	le.DropPeer("id-A")
 	le.SetPeerStreams("id-A", map[uint16]bool{0: true}) // rejoined, still sending stream 0
 	drainPlayout(le)
-	sweep(le, time.Now().Add(24*time.Hour), retireTestInterval+10)
+	sweep(le, time.Now().Add(24*time.Hour))
 
 	st, ok := le.emit[affinity.Key{Identity: "id-A", Stream: 0}]
 	if !ok {
@@ -462,7 +458,7 @@ func TestStreamWithoutDeclaredIntentIsNeverRetired(t *testing.T) {
 	le := newCaptureTestEngine(t)
 	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
 	drainPlayout(le)
-	sweep(le, time.Now().Add(24*time.Hour), retireTestInterval+10)
+	sweep(le, time.Now().Add(24*time.Hour))
 	if !hasStream(le, "id-A", 0) {
 		t.Fatal("retired a stream with no declared intent")
 	}
@@ -481,7 +477,7 @@ func TestRetirementKeepsHealthTotalsMonotonic(t *testing.T) {
 
 	le.SetPeerStreams("id-A", map[uint16]bool{})
 	drainPlayout(le)
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second), retireTestInterval+10)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
 
 	if got := le.Health().EmitFramesMissingAtPlay; got != 7 {
 		t.Fatalf("total dropped to %d after retiring the stream, want 7 retained", got)
@@ -497,7 +493,7 @@ func TestPeerIdKeyedStreamsAreRetirable(t *testing.T) {
 	feedRemoteStream(t, le, "peer-id-P", "", "", 0) // no Hello yet / peer already removed
 	le.DropPeer("peer-id-P")
 	drainPlayout(le)
-	sweep(le, time.Now().Add(retireGracePeerGone+time.Second), retireTestInterval+10)
+	sweep(le, time.Now().Add(retireGracePeerGone+time.Second))
 	if hasStream(le, "peer-id-P", 0) {
 		t.Fatal("a stream published under the peer-id fallback never retires")
 	}
@@ -512,35 +508,43 @@ func TestClearPeerIntentMakesStreamsWantedAgain(t *testing.T) {
 	le.DropPeer("id-A:loopback")
 	le.ClearPeerIntent("id-A:loopback")
 	drainPlayout(le)
-	sweep(le, time.Now().Add(24*time.Hour), retireTestInterval+10)
+	sweep(le, time.Now().Add(24*time.Hour))
 	if !hasStream(le, "id-A:loopback", 0) {
 		t.Fatal("cleared intent still retired the stream")
 	}
 }
 
-// A sender whose room labels run far ahead of our playout leaves stragglers
-// buffered beyond the playout horizon. Drop only clears at or below the release
-// cursor, so requiring an empty reassembler kept a dead channel published for
-// as many boundaries as that peer was mislabeled — unbounded in practice.
-func TestFarAheadStragglerDoesNotBlockRetirement(t *testing.T) {
+// Under adaptive playout (ADR-0009) round indices are the sender's own, so
+// there is no "mislabeled straggler" — a buffered round at ANY index is simply
+// the sender's next round and will play at the next boundary. It must block
+// retirement until then, and stop blocking once a boundary has released it:
+// the old horizon rule (retire audio labeled far ahead) would have silently
+// discarded playable audio here.
+func TestBufferedRoundBlocksRetirementUntilPlayed(t *testing.T) {
 	le := newCaptureTestEngine(t)
 	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 5000)
 	if le.emit[affinity.Key{Identity: "id-A", Stream: 0}] == nil {
 		t.Fatal("stream not published")
 	}
 
-	// Boundary 3: the straggler at 5000 sits far past the horizon (3+2).
 	le.SetPeerStreams("id-A", map[uint16]bool{})
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second), 3)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	if !hasStream(le, "id-A", 0) {
+		t.Fatal("retired a stream whose round had not played — that discards playable audio")
+	}
 
+	// A boundary releases the round (it is complete, so it is ready at once);
+	// the round is now the playing one and no longer blocks.
+	le.onBoundary(le.cfg, 120, 3)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
 	if hasStream(le, "id-A", 0) {
-		t.Fatal("a straggler beyond the playout horizon still blocks retirement")
+		t.Fatal("stream still published after its last round played and the grace expired")
 	}
 }
 
-// The other side of that horizon: audio due imminently — including the interval
-// that just played, which playout drops only a boundary later — must still hold
-// the channel open, or retirement truncates it.
+// Audio due imminently — a buffered round the cursor has not reached — must
+// hold the channel open however stale the wall clock says the stream is, or
+// retirement truncates the tail of the last thing the sender played.
 func TestImminentAudioStillBlocksRetirement(t *testing.T) {
 	le := newCaptureTestEngine(t)
 	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 5)
@@ -548,10 +552,8 @@ func TestImminentAudioStillBlocksRetirement(t *testing.T) {
 		t.Fatal("stream not published")
 	}
 
-	// Boundary 3: interval 5 sits exactly on the horizon (3+2), the edge that
-	// must still hold the channel open.
 	le.SetPeerStreams("id-A", map[uint16]bool{})
-	sweep(le, time.Now().Add(24*time.Hour), 3)
+	sweep(le, time.Now().Add(24*time.Hour))
 
 	if !hasStream(le, "id-A", 0) {
 		t.Fatal("retired a stream with audio still due to play")
@@ -560,60 +562,9 @@ func TestImminentAudioStillBlocksRetirement(t *testing.T) {
 
 // --- grid-jump attribution ---
 
-// A jump is only actionable if you can tell what moved the grid. The most
-// important case to get right is our own entry snap: it moves the grid on
-// purpose and trips the same detector, so reporting it would send someone
-// hunting a session merge that never happened — and acting on it would
-// re-align a grid we just aligned.
-func TestGridJumpAttributesOurOwnSnap(t *testing.T) {
+// Jumps are handed to the session exactly once (observability, ADR-0009).
+func TestGridJumpIsDeliveredOnce(t *testing.T) {
 	le := newCaptureTestEngine(t)
-	le.OnGridSnap(2_600_000) // entry conformance just snapped +2.6s
-
-	now := time.Now()
-	// 5.22 beats at 120 BPM is 2610ms — the snap we just made.
-	j := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, now)
-
-	if !j.SelfCaused {
-		t.Fatalf("snap not recognised as self-caused: %+v", j)
-	}
-	if j.Cause != "our own grid snap" {
-		t.Fatalf("cause = %q", j.Cause)
-	}
-	// Consumed: one snap explains one jump, so a second jump in the same
-	// window is not silently absorbed by it.
-	j2 := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, now)
-	if j2.SelfCaused {
-		t.Fatal("one snap absorbed two jumps — a real one could vanish behind it")
-	}
-}
-
-// Recency alone must not credit a jump to our snap. A snap below the
-// detector's own threshold produces no jump at all, so crediting anything that
-// merely follows it would swallow a real merge and leave the grid unaligned
-// with nothing reported and nothing re-armed.
-func TestGridJumpDoesNotCreditAMismatchedSnap(t *testing.T) {
-	le := newCaptureTestEngine(t)
-	le.OnGridSnap(60_000) // a 60ms snap: far too small to have caused a 2.6s jump
-
-	j := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, time.Now())
-
-	if j.SelfCaused {
-		t.Fatalf("a 60ms snap was credited with a 2610ms jump: %+v", j)
-	}
-	if j.Cause != "unattributed" {
-		t.Fatalf("cause = %q, want \"unattributed\"", j.Cause)
-	}
-}
-
-// The emit loop must withhold self-caused jumps from the session — the actual
-// guard, not just the classification behind it.
-func TestSelfCausedJumpIsWithheldFromTheSession(t *testing.T) {
-	le := newCaptureTestEngine(t)
-
-	le.noteGridJump(GridJump{Beats: 5.22, Cause: "our own grid snap", SelfCaused: true})
-	if _, ok := le.TakeGridJump(); ok {
-		t.Fatal("a self-caused jump was handed to the session")
-	}
 
 	le.noteGridJump(GridJump{Beats: 5.22, Cause: "Link session merge"})
 	got, ok := le.TakeGridJump()
@@ -639,9 +590,6 @@ func TestGridJumpAttributesPeerAndTempoChanges(t *testing.T) {
 	j := le.classifyGridJump(5.22, 120, 120, 4, ev, 16, now)
 	if j.Cause != "Link session merge" {
 		t.Fatalf("peer change cause = %q, want \"Link session merge\"", j.Cause)
-	}
-	if j.SelfCaused {
-		t.Fatal("a merge is not self-caused")
 	}
 	if j.Peers != 4 {
 		t.Fatalf("peers = %d, want 4", j.Peers)
@@ -709,5 +657,47 @@ func TestGridJumpDetectionIsRobustToStallsAndTempoMismatch(t *testing.T) {
 	}
 	if !isGridJump(beatsAt160, gap, 120) {
 		t.Fatal("test premise wrong: judging against the room tempo should have misfired here")
+	}
+}
+
+// A sender restart mid-session resets their round indices near zero. The
+// engine must keep playing them: restart frames buffer (not too-late), the
+// cursor re-pins at the next boundary, and the old era's leftover buffers are
+// taken out — left in place they would win freshest-wins (500 > 3) and yank
+// playback back to the dead sequence, and their presence would block
+// retirement forever. This drives the REAL ingress path end to end; the
+// scheduler-level rule alone was once green while the engine dropped every
+// restart frame at the door.
+func TestSenderRestartResumesPlayback(t *testing.T) {
+	le := newCaptureTestEngine(t)
+
+	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 500)
+	le.onBoundary(le.cfg, 120, 10) // round 500 releases (complete → immediate)
+
+	// The app restarts; its first interval arrives stamped 3.
+	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 3)
+	st := le.emit[affinity.Key{Identity: "id-A", Stream: 0}]
+	if st == nil {
+		t.Fatal("stream not published")
+	}
+	if !st.reasm.Has(3) {
+		t.Fatal("restart-era frames were dropped at the door instead of buffered")
+	}
+
+	le.onBoundary(le.cfg, 120, 11) // re-pins to the new era
+	sr := le.roundsLocked("id-A")
+	if playing, ok := sr.adaptive.Playing(); !ok || playing != 3 {
+		t.Fatalf("playing = (%d,%v), want (3,true) after the re-pin", playing, ok)
+	}
+	if st.reasm.Has(500) {
+		t.Fatal("old-era buffer at 500 survived the re-pin — it would win freshest-wins next boundary")
+	}
+
+	// And with the old era gone, the stream can retire once idle + drained.
+	le.SetPeerStreams("id-A", map[uint16]bool{})
+	st.reasm.Drop(3)
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	if hasStream(le, "id-A", 0) {
+		t.Fatal("stream still published — old-era leftovers blocked retirement")
 	}
 }

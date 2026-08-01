@@ -83,12 +83,6 @@ if (loopbackToggle) {
 }
 
 // WAIL Metronome toggle (live; engine defaults to off per session).
-const gridAlignToggle = document.getElementById('grid-align-toggle');
-if (gridAlignToggle) {
-  gridAlignToggle.addEventListener('change', () => {
-    invoke('set_grid_align', { enabled: gridAlignToggle.checked }).catch(() => {});
-  });
-}
 
 const metronomeToggle = document.getElementById('metronome-toggle');
 if (metronomeToggle) {
@@ -706,7 +700,6 @@ function showSession(room) {
   if (loopbackToggle) loopbackToggle.checked = false; // new session → loopback off
   if (metronomeToggle) metronomeToggle.checked = false; // new session → metronome off
   if (metronomeBroadcastToggle) metronomeBroadcastToggle.checked = false; // new session → broadcast off
-  if (gridAlignToggle) gridAlignToggle.checked = true; // new session → grid alignment on (default)
   cushionUserSet = false; // re-sync the cushion slider from the new engine
   resetStatsWindow();
   clearLog();
@@ -717,8 +710,6 @@ function showSession(room) {
   const peerCount = document.getElementById('peer-count');
   peerCount.textContent = '0/0';
   peerCount.className = 'log-badge';
-  const alignBadge = document.getElementById('align-state');
-  if (alignBadge) alignBadge.style.display = 'none';
   document.getElementById('session-audio').textContent = '0 / 0';
   document.getElementById('session-audio-bytes').textContent = '0 B / 0 B';
   document.getElementById('session-link-peers').textContent = '0';
@@ -843,6 +834,41 @@ sessionBpiInput.addEventListener('keydown', (e) => {
 });
 sessionBpiInput.addEventListener('change', applyBpi);
 
+// --- Room tempo control (ADR-0009): a change made here is a declaration —
+// broadcast to the room directly, no inference. Display updates skip while
+// the field is focused so typing isn't clobbered by tempo events.
+let lastShownBpm = null;
+function setBpmDisplay(bpm) {
+  lastShownBpm = bpm;
+  if (document.activeElement === sessionBpmInput) return;
+  sessionBpmInput.value = bpm != null ? Number(bpm.toFixed(1)) : '';
+}
+
+async function applyBpm() {
+  const bpm = parseFloat(sessionBpmInput.value);
+  if (!(bpm >= 20 && bpm <= 999)) {
+    setBpmDisplay(lastShownBpm);
+    return;
+  }
+  if (lastShownBpm != null && Math.abs(bpm - lastShownBpm) < 0.05) return;
+  try {
+    await invoke('change_bpm', { bpm });
+    lastShownBpm = bpm; // optimistic; tempo:changed confirms shortly
+  } catch (err) {
+    showError(sessionError, err);
+    setBpmDisplay(lastShownBpm);
+  }
+}
+
+sessionBpmInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    sessionBpmInput.blur();
+  }
+});
+sessionBpmInput.addEventListener('change', applyBpm);
+sessionBpmInput.addEventListener('blur', () => setBpmDisplay(lastShownBpm));
+
 // --- Stats mode toggle click handlers ---
 document.getElementById('stats-mode-btn').addEventListener('click', toggleStatsMode);
 
@@ -882,7 +908,7 @@ function updateSetupCallout(s) {
 }
 
 function renderStatus(s) {
-  sessionBpmInput.textContent = (typeof s.bpm === 'number') ? s.bpm.toFixed(1) : '—';
+  setBpmDisplay(typeof s.bpm === 'number' ? s.bpm : null);
   document.getElementById('session-link-peers').textContent = s.link_peers;
   updateSetupCallout(s);
 
@@ -1158,34 +1184,14 @@ function renderPeerDetail(s) {
     const name = p.display_name || p.peer_id.slice(0, 8);
     const rtt = p.rtt_ms != null ? `${p.rtt_ms.toFixed(0)}ms` : '—';
     const state = p.is_receiving ? 'sending' : (p.status || 'connecting');
-    // Interval-label confirmation (ADR-0006): nonzero = their audio silently
-    // plays that many intervals off. Warn visibly; suppress healthy zeros.
-    let labelWarn = '';
-    if (p.label_offset != null && p.label_offset !== 0) {
-      const n = p.label_offset;
-      // Frames labeled ahead of our room index (n > 0) are held one extra
-      // boundary by playout (release = label − D) → the audio plays LATE.
-      const dir = n > 0 ? 'late' : 'early';
-      labelWarn = ` · <span class="label-offset-warn" title="This peer's interval labels are off by ${Math.abs(n)} — their audio plays ${Math.abs(n)} interval(s) ${dir}. They may be running an older WAIL or still aligning.">⏱ ${Math.abs(n)} interval${Math.abs(n) !== 1 ? 's' : ''} ${dir}</span>`;
-    }
-    return `<div class="health-row"><span>${escapeHtml(name)}</span><span>${rtt} · ${escapeHtml(state)}${labelWarn}</span></div>`;
+    return `<div class="health-row"><span>${escapeHtml(name)}</span><span>${rtt} · ${escapeHtml(state)}</span></div>`;
   }).join('');
 }
 
-// Grid alignment debug-panel readout (ADR-0006), driven by status:update.
+// Relay RTT debug readout (grid alignment retired, ADR-0009).
 function renderAlignDetail(s) {
-  const detail = document.getElementById('align-detail');
-  if (!detail) return;
-  const delta = document.getElementById('align-delta');
   const rtt = document.getElementById('align-relay-rtt');
-  if (!s.align_state) {
-    detail.textContent = '—';
-    delta.textContent = '—';
-    rtt.textContent = '—';
-    return;
-  }
-  detail.textContent = s.align_state;
-  delta.textContent = s.align_error_ms != null ? `${s.align_error_ms.toFixed(1)} ms` : '—';
+  if (!rtt) return;
   rtt.textContent = s.relay_rtt_ms != null ? `${s.relay_rtt_ms.toFixed(0)} ms` : '—';
 }
 
@@ -1207,35 +1213,7 @@ async function setupListeners() {
   }));
 
   unlisten.push(await listen('tempo:changed', (event) => {
-    sessionBpmInput.textContent = event.payload.bpm.toFixed(1);
-  }));
-
-  // Grid alignment with the room grid (ADR-0006): quiet header badge.
-  unlisten.push(await listen('align:state', (event) => {
-    const p = event.payload;
-    const badge = document.getElementById('align-state');
-    if (!badge) return;
-    const ms = Math.abs(p.error_ms);
-    const errText = ms >= 10 ? ` ${Math.round(ms)}ms` : '';
-    if (p.state === 'off') {
-      badge.textContent = 'grid off';
-      badge.className = 'align-badge align-off';
-      badge.title = 'Grid alignment is disabled (debug tab)';
-      badge.style.display = '';
-      return;
-    }
-    if (p.state === 'aligned') {
-      badge.textContent = 'grid \u2713';
-      badge.className = 'align-badge align-ok';
-    } else if (p.state === 'aligning') {
-      badge.textContent = `aligning${errText}`;
-      badge.className = 'align-badge align-warn';
-    } else {
-      badge.textContent = `drifted${errText}`;
-      badge.className = 'align-badge align-bad';
-    }
-    badge.title = `Grid alignment with the room: ${p.state} (δ ${p.error_ms.toFixed(1)} ms)`;
-    badge.style.display = '';
+    setBpmDisplay(event.payload.bpm);
   }));
 
   unlisten.push(await listen('session:error', (event) => {

@@ -112,7 +112,6 @@
         <span id="session-room" class="room-badge"></span>
         <span id="peer-count" class="log-badge" title="Room peers sending / connected">0/0</span>
         <span id="link-clock" class="link-clock" title="Interval progress" style="display:none"></span>
-        <span id="align-state" class="align-badge" title="Grid alignment with the room" style="display:none"></span>
       </div>
       <button type="button" id="session-settings-btn" class="icon-btn" title="Settings">&#9881;</button>
     </div>
@@ -132,7 +131,7 @@
         <div class="status-grid">
           <div class="status-cell">
             <label>BPM</label>
-            <span class="status-value" id="session-bpm" title="Tempo is set by your DAW via Ableton Link — WAIL follows it">—</span>
+            <input type="number" id="session-bpm" min="20" max="999" step="0.5" class="bpm-inline" title="The room tempo. Change it here (or in your DAW) and everyone follows — a change made here is declared to the room directly.">
           </div>
           <div class="status-cell">
             <label>Interval (BPI)</label>
@@ -220,16 +219,10 @@
         </div>
       </section>
 
-      <!-- Grid alignment (ADR-0006): toggle + live alignment readout -->
+      <!-- Network readout -->
       <section class="session-section">
-        <h3 class="section-label">Grid alignment</h3>
-        <label class="capture-dump" title="Aligns your local Link session to the room's interval grid: a one-time snap when you join (only if you're materially off), then gentle tempo nudges to correct drift. Leave this on unless it misbehaves with your rig.">
-          <input type="checkbox" id="grid-align-toggle" checked>
-          <span>Align my grid to the room</span>
-        </label>
+        <h3 class="section-label">Network</h3>
         <div class="debug-stats">
-          <div class="health-row"><span>Alignment</span><span id="align-detail">—</span></div>
-          <div class="health-row"><span>Grid error (δ)</span><span id="align-delta">—</span></div>
           <div class="health-row"><span>Relay round-trip</span><span id="align-relay-rtt">—</span></div>
         </div>
       </section>

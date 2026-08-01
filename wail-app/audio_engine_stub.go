@@ -7,27 +7,23 @@ package main
 // without the Link SDK; there is no real audio path in stub builds.
 type stubAudioEngine struct{}
 
-func newAudioEngine(_ *LinkBridge, _ string, _ func(waif []byte), _ int) AudioEngine {
+func newAudioEngine(_ *LinkBridge, _ string, _ func(waif []byte)) AudioEngine {
 	return &stubAudioEngine{}
 }
 
-func (s *stubAudioEngine) Start() error                                          { return nil }
-func (s *stubAudioEngine) Stop()                                                 {}
-func (s *stubAudioEngine) HandleRemoteAudio(_, _, _ string, _ []byte)            {}
-func (s *stubAudioEngine) SetPeerStreams(_ string, _ map[uint16]bool)            {}
-func (s *stubAudioEngine) TakeGridJump() (GridJump, bool)                        { return GridJump{}, false }
-func (s *stubAudioEngine) DropPeer(_ string)                                     {}
-func (s *stubAudioEngine) ClearPeerIntent(_ string)                              {}
-func (s *stubAudioEngine) SetRoomAnchor(_ int64, _ float64, _ uint32, _ float64) {}
-func (s *stubAudioEngine) AlignRoomLabel(_, _ int64)                             {}
-func (s *stubAudioEngine) OnGridSnap(_ int64)                                    {}
-func (s *stubAudioEngine) RoomIndex(_ int64) (int64, bool)                       { return 0, false }
-func (s *stubAudioEngine) CaptureChannels() []CaptureChannelInfo                 { return nil }
-func (s *stubAudioEngine) SetCaptureEnabled(_ string, _ bool)                    {}
-func (s *stubAudioEngine) SetCaptureRestore(_ []CaptureChannelKey)               {}
-func (s *stubAudioEngine) SetCaptureDump(_ bool)                                 {}
-func (s *stubAudioEngine) SetMetronome(_ bool)                                   {}
-func (s *stubAudioEngine) SetCushionMs(ms int) int                               { return ms }
-func (s *stubAudioEngine) SetIntervalOffset(d int) int                           { return d }
-func (s *stubAudioEngine) LabelOffsetFor(identity string) (int64, bool)          { return 0, false }
-func (s *stubAudioEngine) Health() EngineHealth                                  { return EngineHealth{} }
+func (s *stubAudioEngine) Start() error                                 { return nil }
+func (s *stubAudioEngine) Stop()                                        {}
+func (s *stubAudioEngine) HandleRemoteAudio(_, _, _ string, _ []byte)   {}
+func (s *stubAudioEngine) SetPeerStreams(_ string, _ map[uint16]bool)   {}
+func (s *stubAudioEngine) TakeGridJump() (GridJump, bool)               { return GridJump{}, false }
+func (s *stubAudioEngine) DropPeer(_ string)                            {}
+func (s *stubAudioEngine) ClearPeerIntent(_ string)                     {}
+func (s *stubAudioEngine) SetRoomConfig(_ float64, _ uint32, _ float64) {}
+func (s *stubAudioEngine) CaptureChannels() []CaptureChannelInfo        { return nil }
+func (s *stubAudioEngine) SetCaptureEnabled(_ string, _ bool)           {}
+func (s *stubAudioEngine) SetCaptureRestore(_ []CaptureChannelKey)      {}
+func (s *stubAudioEngine) SetCaptureDump(_ bool)                        {}
+func (s *stubAudioEngine) SetMetronome(_ bool)                          {}
+func (s *stubAudioEngine) SetCushionMs(ms int) int                      { return ms }
+func (s *stubAudioEngine) SetIntervalOffset(d int) int                  { return d }
+func (s *stubAudioEngine) Health() EngineHealth                         { return EngineHealth{} }

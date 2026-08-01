@@ -36,10 +36,6 @@ type PeerInfo struct {
 	Status      string   `json:"status"`
 	IsSending   bool     `json:"is_sending"`
 	IsReceiving bool     `json:"is_receiving"`
-	// LabelOffset is the peer's interval-label verdict (ADR-0006 follow-up):
-	// 0 = labels agree with our room index; k = their audio silently plays
-	// k intervals off (positive = late). nil until a verdict finalizes.
-	LabelOffset *int64 `json:"label_offset,omitempty"`
 }
 
 type LocalSendInfo struct {
@@ -71,15 +67,6 @@ type IntervalPromptEvent struct {
 	BPM     float64 `json:"bpm"`
 }
 
-// AlignStateEvent reports grid alignment with the room grid (ADR-0006):
-// aligned inside the slew deadband, aligning while the grid slew is closing
-// the error, drifted past the perceptual threshold, off when the user has
-// disabled grid alignment in the debug panel.
-type AlignStateEvent struct {
-	State   string  `json:"state"` // "aligned", "aligning", "drifted", "off"
-	ErrorMs float64 `json:"error_ms"`
-}
-
 type StatusUpdate struct {
 	BPM                float64         `json:"bpm"`
 	Beat               float64         `json:"beat"`
@@ -101,11 +88,7 @@ type StatusUpdate struct {
 	TestToneStream     *uint16         `json:"test_tone_stream,omitempty"`
 	// Discovered local Link Audio channels for the capture send-mixer (Step 4).
 	CaptureChannels []CaptureChannelInfo `json:"capture_channels,omitempty"`
-	// Grid alignment (ADR-0006): live readout for the debug panel. State is
-	// "aligned"/"aligning"/"drifted"/"off"; empty until the aligner is ready.
-	AlignState   string   `json:"align_state,omitempty"`
-	AlignErrorMs *float64 `json:"align_error_ms,omitempty"`
-	RelayRTTMs   *float64 `json:"relay_rtt_ms,omitempty"`
+	RelayRTTMs      *float64             `json:"relay_rtt_ms,omitempty"`
 	// StreamOffsets is the debug-room readout: per-stream rhythmic phase
 	// offset vs the room grid (internal/offset), empty until enough rhythmic
 	// content has arrived to judge.

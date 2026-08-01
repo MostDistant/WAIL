@@ -60,6 +60,16 @@ type SyncMessage struct {
 	ServerNowMicros    int64 `json:"server_now_micros,omitempty"`
 	NextBoundaryMicros int64 `json:"next_boundary_micros,omitempty"`
 
+	// TempoDeclare (ADR-0009): a tempo declaration, arbitrated by Link's own
+	// timeline-priority rule run WAN-side — strictly-greater origin adopts,
+	// lowest owner id breaks exact ties (Sessions.hpp:224/:163). The origin is
+	// a wall-clock stamp rather than Link's beat counter: peers only need a
+	// roughly-comparable total order (ms-level clock skew shifts near-
+	// simultaneous conflicts toward one side, which the tie-break already
+	// makes arbitrary), and monotonicity is forced locally via max(now, cur+1).
+	OriginMicros int64  `json:"origin_micros,omitempty"`
+	Owner        string `json:"owner,omitempty"`
+
 	// ChatMessage
 	SenderName string `json:"sender_name,omitempty"`
 	Text       string `json:"text,omitempty"`
@@ -81,6 +91,27 @@ func NewPong(id uint64, pingSentAtUs, pongSentAtUs int64) SyncMessage {
 // NewTempoChange creates a TempoChange sync message.
 func NewTempoChange(bpm, quantum float64, timestampUs int64) SyncMessage {
 	return SyncMessage{Type: "TempoChange", BPM: bpm, Quantum: quantum, TimestampUs: timestampUs}
+}
+
+// NewTempoDeclare creates a TempoDeclare sync message (ADR-0009).
+func NewTempoDeclare(bpm float64, originMicros int64, owner string) SyncMessage {
+	return SyncMessage{Type: "TempoDeclare", BPM: bpm, OriginMicros: originMicros, Owner: owner}
+}
+
+// tempoDeclareAdopts is the declaration arbitration rule: adopt a received
+// declaration iff its origin is strictly greater than ours, with the lowest
+// owner id winning an exact tie. Duplicates and echoes carry an equal origin
+// AND equal owner, so they are structurally inert — no echo guard needed.
+// Measured over the relay at 100-300ms RTT in tempo_sim_wan_test.go:
+// convergence in one RTT, no split-brain, at most two tempo changes per peer.
+func tempoDeclareAdopts(msgOrigin int64, msgOwner string, curOrigin int64, curOwner string) bool {
+	if msgOrigin != curOrigin {
+		return msgOrigin > curOrigin
+	}
+	if curOwner == "" {
+		return msgOwner != ""
+	}
+	return msgOwner != "" && msgOwner < curOwner
 }
 
 // NewStateSnapshot creates a StateSnapshot sync message.

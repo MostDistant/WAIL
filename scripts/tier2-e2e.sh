@@ -17,21 +17,22 @@
 #   step  (default) — the WAV is stepped tones: one constant frequency per
 #         interval-length block, so received audio identifies WHICH content
 #         block is playing. On top of the integrity checks, this verifies
-#         NINJAM-like interval placement end-to-end: a block captured in room
-#         interval N must arrive during the receiver's local grid interval
-#         labeled N+D. Ground truth: the sender logs (room, content) per
-#         boundary, the receiver's boundary log gives the local→room offset,
-#         and the probe bins received frames by shared-grid interval (BPI-lens
-#         beat stamps). Every second of received audio is checked.
+#         NINJAM-like round placement end-to-end (ADR-0009): each receiver
+#         boundary must play the sender's NEXT captured round — consecutive,
+#         no skip or repeat — and play it fresh (within ~2.5 intervals of
+#         capture; adaptive playout runs one boundary behind the live edge).
+#         Ground truth: the sender logs (round, content) per boundary, the
+#         receiver logs its boundaries, the probe identifies content by tone.
+#         Every second of received audio is checked.
 #   sweep — the original rising log sweep: integrity/order/loss only.
 #
 # Exercises the parts the in-process `go test` suite can't: the real Link Audio
 # Sink/Source UDP path, the paced emit loop, the capture drain, the relay round
-# trip, real-time timing, and (step mode) hold-until-N+D playout placement.
+# trip, real-time timing, and (step mode) adaptive round placement.
 #
 # Usage:   scripts/tier2-e2e.sh
 # Tunables (env): TIER2_PORT TIER2_BPM TIER2_SWEEP_DUR TIER2_PROBE_SECS TIER2_ROOM
-#                 TIER2_MODE TIER2_BPI TIER2_D
+#                 TIER2_MODE TIER2_BPI
 #
 # Exit code 0 = PASS, 1 = FAIL. Needs a working cgo toolchain + libopus + the
 # Link SDK submodule (same as a normal build).
@@ -42,7 +43,9 @@ PORT="${TIER2_PORT:-8899}"
 BPM="${TIER2_BPM:-240}"                 # higher BPM ⇒ shorter intervals ⇒ audio flows sooner
 MODE="${TIER2_MODE:-step}"              # step = interval placement check; sweep = integrity only
 BPI="${TIER2_BPI:-16}"                  # room beats-per-interval (app default: 4 bars × 4)
-D="${TIER2_D:-1}"                       # NINJAM interval offset (WAIL_INTERVAL_OFFSET default)
+# The interval offset D is retired (ADR-0009): playout is adaptive — each
+# round plays at the receiver's next boundary once ready, one round behind
+# the live edge for a healthy real-time sender.
 PROBE_SECS="${TIER2_PROBE_SECS:-40}"
 ROOM="${TIER2_ROOM:-tier2-$$}"
 # Stepped-tone params (step mode): block k plays at F0 + k*STEP Hz, one block
@@ -163,10 +166,7 @@ if [ "$MODE" = step ]; then
     }' "$WORK/sender.log" > "$WORK/blockroom.txt"
   awk '/>>> INTERVAL local=/ {
       t = $1; gsub(/[:.]/, " ", t); split(t, p, " ")
-      secs = p[1]*3600 + p[2]*60 + p[3] + p[4]/1e6
-      r = 0
-      for (i=1; i<=NF; i++) if ($i ~ /^room=/) r = substr($i,6)+0
-      print secs, r
+      print p[1]*3600 + p[2]*60 + p[3] + p[4]/1e6
     }' "$WORK/receiver.log" > "$WORK/releases.txt"
   echo "---------------------------------------------------------------- ground truth"
   echo "sender room/content ranges: $(wc -l < "$WORK/blockroom.txt" | tr -d ' ')   receiver playout boundaries: $(wc -l < "$WORK/releases.txt" | tr -d ' ')   settle: ${SETTLE:-0 (matched LAN tempo)}"
@@ -174,9 +174,9 @@ if [ "$MODE" = step ]; then
     echo "VERDICT=FAIL" | tee "$WORK/verdict.txt"
     echo "missing ground truth (sender markers or receiver boundary log)" | tee -a "$WORK/verdict.txt"
   else
-  awk -v d="$D" -v f0="$F0" -v step="$STEP" -v blockdur="$BLOCK" -v settle="${SETTLE:-0}" '
-    FILENAME == ARGV[1] { cs[++nb] = $1; cr[nb] = $2; ct[nb] = $3; next }   # blockroom.txt: content-sec, room, wall-sec
-    FILENAME == ARGV[2] { rt[++nr] = $1; rr[nr] = $2; next }   # releases.txt: wall-sec → room playing
+  awk -v f0="$F0" -v step="$STEP" -v blockdur="$BLOCK" -v settle="${SETTLE:-0}" '
+    FILENAME == ARGV[1] { cs[++nb] = $1; cr[nb] = $2; ct[nb] = $3; next }   # blockroom.txt: content-sec, sender round, wall-sec
+    FILENAME == ARGV[2] { rt[++nr] = $1; next }   # releases.txt: receiver boundary wall-sec
     /→ subscribed/          { subs++ }
     /! LAN loss/            { lossev++ }
     /silent \(no buffers/   { silent++ }
@@ -223,34 +223,51 @@ if [ "$MODE" = step ]; then
         for (i = nb; i >= 1; i--) if (cs[i] <= c + 0.001) { bi = i; break }
         if (bi == 0) next
         # Join-transition exclusion: intervals captured before the room
-        # tempo settled carry skewed labels by design (ADR-0006 entry
-        # re-rolls alignment); judge steady-state only.
+        # tempo settled carry skewed timing by design (tempo adoption is
+        # boundary-quantized); judge steady-state only.
         if (ct[bi] < settle) { skipped++; next }
-        votes[rr[ri] SUBSEP cr[bi]]++
+        votes[ri SUBSEP cr[bi]]++
       }
     }
     END {
       printf "subscribed=%d  non-silent-sec=%d  silent-sec=%d  maxLost=%d  lossEvents=%d  freq=%d..%d Hz\n", \
              subs+0, nonsilent+0, silent+0, maxlost+0, lossev+0, fmin+0, fmax+0
-      # Assert per receiver interval: its majority capture room must equal
-      # the playing room - D (>=2 votes; a tie or split majority abstains —
-      # that interval says nothing, it does not fail).
+      # Placement under adaptive rounds (ADR-0009): sender round indices are
+      # opaque, so nothing compares them to receiver labels. Instead, per
+      # receiver boundary the majority capture round must (a) ADVANCE BY
+      # EXACTLY ONE boundary to boundary — no skip, no repeat, in order —
+      # and (b) be FRESH: captured within ~2.5 intervals of when it played
+      # (adaptive releases one boundary behind the live edge). A tie or a
+      # split majority abstains; that boundary says nothing.
       for (key in votes) {
-        split(key, a, SUBSEP); playing = a[1]; cap = a[2]+0; n = votes[key]
-        if (n > best[playing]) { second[playing] = best[playing]; best[playing] = n; winner[playing] = cap }
-        else if (n > second[playing]) { second[playing] = n }
+        split(key, a, SUBSEP); ri = a[1]+0; cap = a[2]+0; n = votes[key]
+        if (n > best[ri]) { second[ri] = best[ri]; best[ri] = n; winner[ri] = cap }
+        else if (n > second[ri]) { second[ri] = n }
       }
-      for (playing in best) {
-        if (best[playing] < 2 || best[playing] == second[playing]) continue
-        checks++
-        want = winner[playing] + d
-        if (playing+0 != want) {
-          fails++
-          printf "  ! placement: room %d majority-captured room %d (%d/%d votes), want room %d\n", \
-                 playing, winner[playing], best[playing], best[playing]+second[playing], want
+      dt = (nb > 1) ? (ct[nb] - ct[1]) / (nb - 1) : blockdur
+      prev = -1
+      for (ri = 1; ri <= nr; ri++) {
+        if (!(ri in best) || best[ri] < 2 || best[ri] == second[ri]) { prev = -1; continue }
+        w = winner[ri]
+        if (prev >= 0) {
+          checks++
+          if (w != prev + 1) {
+            fails++
+            printf "  ! placement: boundary %d plays captured round %d after round %d — want consecutive\n", ri, w, prev
+          }
         }
+        # Freshness: the round playing now started being captured 1-2
+        # intervals ago; a stale or future round is a scheduler fault.
+        for (i = 1; i <= nb; i++) if (cr[i] == w) { cwall = ct[i]; break }
+        age = rt[ri] - cwall
+        checks++
+        if (age <= 0 || age > 2.5 * dt) {
+          fails++
+          printf "  ! freshness: boundary %d plays round %d captured %.1fs earlier (want 0 < age <= %.1fs)\n", ri, w, age, 2.5*dt
+        }
+        prev = w
       }
-      printf "placement: %d checks, %d failures (%d skipped: join-transition) — every receiver interval: playing room == majority capture room + D\n", checks+0, fails+0, skipped+0
+      printf "placement: %d checks, %d failures (%d skipped: join-transition) — every receiver boundary plays the sender'\''s next round, one behind the live edge\n", checks+0, fails+0, skipped+0
       pass = (subs>=1 && nonsilent>=10 && maxlost==0 && lossev==0 && checks>=3 && fails==0)
       print (pass ? "VERDICT=PASS" : "VERDICT=FAIL")
     }
@@ -286,7 +303,7 @@ fi
 
 if grep -q "VERDICT=PASS" "$WORK/verdict.txt"; then
   if [ "$MODE" = step ]; then
-    log "PASS — intact, lossless audio + every receiver interval majority-verified at captured-room + D"
+    log "PASS — intact, lossless audio + every receiver boundary plays the next captured round, fresh"
   else
     log "PASS — intact, in-order, lossless audio through the real Link Audio path"
   fi

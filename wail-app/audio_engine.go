@@ -52,28 +52,13 @@ type AudioEngine interface {
 	DropPeer(identity string)
 	// TakeGridJump reports (and clears) a local Link grid jump detected since
 	// the last call — something moved the beat timeline out from under us.
-	// The session re-arms grid alignment on it (the slew cannot walk back a
-	// jump of whole beats) and reports it to the room. Jumps WAIL caused
-	// itself are attributed and withheld rather than reported.
+	// Observability only (ADR-0009): playout re-quantizes onto the local grid
+	// wherever it sits, so nothing corrects a jump — but a musician whose bar
+	// lines just moved deserves the attribution, and so does the relay log.
 	TakeGridJump() (GridJump, bool)
-	// SetRoomAnchor applies a fresh relay interval_anchor: aligns the local→room
-	// interval labeler and adopts the room tempo/config.
-	SetRoomAnchor(currentIndex int64, bpm float64, bars uint32, quantum float64)
-	// AlignRoomLabel aligns the local→room labeler to an explicitly derived
-	// local index (ADR-0006 "known by construction": the session computed
-	// localIndex from the anchor's boundary time on an aligned grid). Exact
-	// regardless of when in the interval it runs, unlike SetRoomAnchor's
-	// sample align; overrides it whenever grid alignment is active.
-	AlignRoomLabel(roomIndex, localIndex int64)
-	// OnGridSnap re-anchors emit feeders after an entry-conformance grid
-	// snap: the snap moved the playhead, not the audio — the jumped frames
-	// skip silently, never counting as underruns.
-	OnGridSnap(deltaUs int64)
-	// RoomIndex maps a local interval index to the shared room index via the
-	// labeler aligned by SetRoomAnchor; ok is false until an anchor has arrived.
-	// The session uses it for boundary logging and to tag in-app-sender frames,
-	// so there is a single source of truth for the local→room mapping.
-	RoomIndex(localIndex int64) (roomIndex int64, ok bool)
+	// SetRoomConfig adopts the room's tempo and interval shape for the
+	// engine's interval math. The anchor's one remaining job (ADR-0009).
+	SetRoomConfig(bpm float64, bars uint32, quantum float64)
 	// CaptureChannels lists discovered local Link Audio channels for the
 	// send-mixer UI, marking which are currently bridged.
 	CaptureChannels() []CaptureChannelInfo
@@ -91,16 +76,12 @@ type AudioEngine interface {
 	// Link Audio channel — a click on every beat (accented on bar downbeats) on
 	// the local Link grid, for aligning against the DAW's own metronome.
 	SetMetronome(enabled bool)
-	// SetIntervalOffset live-adjusts the receive playout offset D for all
-	// streams (the NINJAM latency/reliability knob); returns the effective D.
+	// SetIntervalOffset is retired (ADR-0009): playout is adaptive per sender,
+	// so there is no D. Kept so the Debug control degrades gracefully.
 	SetIntervalOffset(d int) int
 	// SetCushionMs live-adjusts the emit feed-ahead depth (ms) for all streams
 	// and the metronome; returns the effective clamped value.
 	SetCushionMs(ms int) int
-	// LabelOffsetFor returns the worst interval-label verdict across one
-	// identity's streams (ADR-0006 follow-up): 0 = the peer's labels agree
-	// with our room index, k = their audio silently plays k intervals off.
-	LabelOffsetFor(identity string) (int64, bool)
 	// Health snapshots the engine's cumulative diagnostic counters. Each
 	// increment marks an event that risks an audible artifact; the session
 	// diffs snapshots to surface them in the log panel and Network tab.
@@ -108,32 +89,21 @@ type AudioEngine interface {
 }
 
 // GridJump is a detected discontinuity in the local Link beat timeline,
-// with what the engine could attribute it to. The cause is the point: a jump
-// is only actionable if you can tell a peer joining from a tempo change from
-// something WAIL did to itself.
+// with what the engine could attribute it to (observability only, ADR-0009).
 type GridJump struct {
-	Beats      float64 // signed jump, in beats
-	Ms         float64 // the same jump in milliseconds at the room tempo
-	Intervals  int64   // ≈ how many interval boundaries that is
-	Peers      uint64  // LAN Link peer count when it happened
-	Cause      string  // short attribution, for the headline
-	Detail     string  // the evidence behind it
-	SelfCaused bool    // WAIL moved its own grid (an entry snap) — not a fault
+	Beats     float64 // signed jump, in beats
+	Ms        float64 // the same jump in milliseconds at the room tempo
+	Intervals int64   // ≈ how many interval boundaries that is
+	Peers     uint64  // LAN Link peer count when it happened
+	Cause     string  // short attribution, for the headline
+	Detail    string  // the evidence behind it
 }
 
 const (
-	// gridSnapAttributionWindow is how recently our own snap must have run for
-	// a detected jump to be credited to it. Recency is necessary but never
-	// sufficient — see matchesOwnSnap, which also requires the magnitudes to
-	// agree, so one snap cannot blanket-absorb an unrelated jump.
-	gridSnapAttributionWindow = 2 * time.Second
-	// snapMatchToleranceMs is the floor on that magnitude agreement, for snaps
-	// small enough that a percentage would be tighter than measurement noise.
-	snapMatchToleranceMs = 50
 	// jumpDetectMaxGapSec bounds the tick spacing the jump detector will judge.
 	// Beyond it the loop stalled (GC, a starved scheduler on a loaded machine)
-	// and the expected-beat arithmetic is guesswork — and a false jump is not
-	// free, it costs an audible re-entry snap.
+	// and the expected-beat arithmetic is guesswork — a false jump would put a
+	// phantom merge in the room log.
 	jumpDetectMaxGapSec = 1.0
 	// gridJumpEvidenceWindow is how far back peer/tempo movement still counts
 	// as the explanation. Link's peer discovery and the timeline merge it
