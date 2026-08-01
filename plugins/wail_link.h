@@ -13,6 +13,15 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +39,50 @@ static inline void lb_temp_log_path(const char *filename, char *buf, unsigned lo
 #else
    snprintf(buf, cap, "/tmp/%s", filename);
 #endif
+}
+
+// lb_module_stamp identifies the binary this code was loaded from, by the
+// mtime of that file, and reports its path.
+//
+// A compile-time macro cannot answer the question it looks like it answers.
+// __DATE__/__TIME__ record when one translation unit was compiled, not when
+// the bundle was linked or installed — edit a sibling source, rebuild, and the
+// bundle changes while the stamp does not. And a DAW keeps a plugin mapped for
+// the life of the process, so "which build is actually running" is exactly the
+// question that comes up, and it must not be answerable wrongly. Reading the
+// loaded module's own file cannot go stale: it is the file the running code
+// came from.
+static inline void lb_module_stamp(char *stamp, unsigned long stampCap, char *path,
+                                   unsigned long pathCap) {
+   snprintf(stamp, stampCap, "unknown");
+   if (path && pathCap) snprintf(path, pathCap, "?");
+   const char *found = NULL;
+#ifdef _WIN32
+   char self[MAX_PATH];
+   HMODULE mod = NULL;
+   if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCSTR)(void *)&lb_module_stamp, &mod) &&
+       GetModuleFileNameA(mod, self, (DWORD)sizeof(self)))
+      found = self;
+#else
+   Dl_info info;
+   if (dladdr((void *)&lb_module_stamp, &info) && info.dli_fname) found = info.dli_fname;
+#endif
+   if (!found) return;
+   if (path && pathCap) snprintf(path, pathCap, "%s", found);
+
+   struct stat st;
+   if (stat(found, &st) != 0) return;
+   time_t   mt = st.st_mtime;
+   struct tm tmv;
+#ifdef _WIN32
+   if (localtime_s(&tmv, &mt) != 0) return;
+#else
+   if (!localtime_r(&mt, &tmv)) return;
+#endif
+   if (strftime(stamp, stampCap, "%Y-%m-%d %H:%M:%S", &tmv) == 0)
+      snprintf(stamp, stampCap, "unknown");
 }
 
 typedef struct lb_link lb_link;
