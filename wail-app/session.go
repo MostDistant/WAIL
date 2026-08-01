@@ -253,7 +253,12 @@ func sessionLoop(
 	// all session long (capture toggles, restore-set auto-enable, in-app
 	// senders). The status tick pushes an update_streams whenever the live
 	// count drifts from what we last declared. Initialized to the join value.
+	// If the relay rejects a declaration (room_full), streamUpdateRejected
+	// arms a retry after streamUpdateRetryBackoff — otherwise a rejection
+	// would leave the bucket undersized until the next drift.
 	lastDeclaredStreams := int(config.StreamCount)
+	streamUpdateRejected := false
+	streamUpdateRetryAt := time.Time{}
 
 	// Test tone state
 	var testToneBoundaryCh chan IntervalBoundaryInfo
@@ -638,6 +643,13 @@ func sessionLoop(
 
 			case "PeerListReceived":
 				peers.SeedLastSeen()
+
+			case "UpdateStreamsError":
+				// The relay kept the OLD count; arm a retry so a freed slot heals
+				// the undersized rate-limit bucket without waiting for drift.
+				streamUpdateRejected = true
+				streamUpdateRetryAt = time.Now().Add(streamUpdateRetryBackoff)
+				logWarn("[signaling] relay rejected stream update (%s, %d slots available) — retrying in %s", ev.Code, ev.SlotsAvailable, streamUpdateRetryBackoff)
 				logInfo("Joined room with %d peer(s)", ev.PeerCount)
 				if ev.PeerCount == 0 {
 					// Founding an empty room: assert tempo + interval config so the
@@ -1332,10 +1344,11 @@ func sessionLoop(
 			}
 			sendStreams := activeSendStreamCount(captureEnabled,
 				testToneStream != nil, wavSenderStream != nil, metronomeSendCancelFn != nil)
-			if sendStreams != lastDeclaredStreams {
-				logInfo("[signaling] send streams changed %d -> %d, declaring to relay (update_streams)", lastDeclaredStreams, sendStreams)
+			if shouldDeclareStreams(sendStreams, lastDeclaredStreams, streamUpdateRejected, streamUpdateRetryAt, time.Now()) {
+				logInfo("[signaling] declaring %d send streams to relay (update_streams, was %d)", sendStreams, lastDeclaredStreams)
 				mesh.SendUpdateStreams(uint16(sendStreams))
 				lastDeclaredStreams = sendStreams
+				streamUpdateRejected = false
 			}
 		}
 	}
@@ -1358,6 +1371,22 @@ func connectMesh(ctx context.Context, config SessionConfig, peerID string) (*Pee
 	}
 	mesh := NewPeerMesh(peerID, client, channels, config.StreamCount, peerNames)
 	return mesh, channels.SyncCh, channels.AudioCh, nil
+}
+
+// streamUpdateRetryBackoff is how long the session waits before re-declaring
+// its stream count after the relay rejects an update (room_full) — long
+// enough not to spam a full room, short enough to heal when slots free up.
+const streamUpdateRetryBackoff = 30 * time.Second
+
+// shouldDeclareStreams reports whether an update_streams declaration is due
+// this tick: the desired count drifted from the last declaration (always
+// immediate), or the relay rejected the previous declaration and the retry
+// backoff has elapsed.
+func shouldDeclareStreams(desired, lastDeclared int, rejected bool, retryAt, now time.Time) bool {
+	if desired != lastDeclared {
+		return true
+	}
+	return rejected && !now.Before(retryAt)
 }
 
 // activeSendStreamCount computes how many concurrent WAIF audio streams this

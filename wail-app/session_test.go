@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // The relay scales its per-peer binary rate limit by the declared stream
 // count, so the count the app declares must track the number of streams it
@@ -26,6 +29,38 @@ func TestActiveSendStreamCount(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("activeSendStreamCount(%d, %v, %v, %v) = %d, want %d",
 					tc.captureEnabled, tc.testTone, tc.wavSender, tc.metronome, got, tc.want)
+			}
+		})
+	}
+}
+
+// A rejected update_streams declaration must not be a dead end: the session
+// re-declares once the retry backoff elapses, and any drift in the desired
+// count always declares immediately.
+func TestShouldDeclareStreams(t *testing.T) {
+	now := time.Now()
+	past := now.Add(-time.Second)
+	future := now.Add(30 * time.Second)
+	cases := []struct {
+		name                  string
+		desired, lastDeclared int
+		rejected              bool
+		retryAt               time.Time
+		want                  bool
+	}{
+		{"declared matches, no rejection", 3, 3, false, time.Time{}, false},
+		{"drift declares immediately", 4, 3, false, time.Time{}, true},
+		{"shrink declares immediately", 2, 3, false, time.Time{}, true},
+		{"rejected but backoff pending", 3, 3, true, future, false},
+		{"rejected and backoff elapsed", 3, 3, true, past, true},
+		{"drift wins over pending backoff", 4, 3, true, future, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldDeclareStreams(tc.desired, tc.lastDeclared, tc.rejected, tc.retryAt, now)
+			if got != tc.want {
+				t.Fatalf("shouldDeclareStreams(%d, %d, %v, retryAt, now) = %v, want %v",
+					tc.desired, tc.lastDeclared, tc.rejected, got, tc.want)
 			}
 		})
 	}

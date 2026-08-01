@@ -278,6 +278,10 @@ func ConnectSignaling(
 					slots = *msg.SlotsAvailable
 				}
 				log.Printf("[signaling] WARN: relay rejected stream update (%s, %d slots available) — extra streams may be rate-limited", msg.Code, slots)
+				select {
+				case incomingCh <- SignalMessage{Type: "UpdateStreamsError", Code: msg.Code, SlotsAvailable: slots}:
+				default:
+				}
 			case "log":
 				incomingCh <- SignalMessage{
 					Type:        "LogBroadcast",
@@ -490,6 +494,8 @@ func (m *PeerMesh) handleSignalMessage(msg SignalMessage) *MeshEvent {
 			Level: msg.Level, Target: msg.Target,
 			Message: msg.Message, TimestampUs: msg.TimestampUs,
 		}
+	case "UpdateStreamsError":
+		return &MeshEvent{Type: "UpdateStreamsError", Code: msg.Code, SlotsAvailable: msg.SlotsAvailable}
 	}
 	return nil
 }

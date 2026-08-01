@@ -148,6 +148,10 @@ type SignalMessage struct {
 	// relay rescales the per-peer binary rate limit mid-session)
 	StreamCount uint16 `json:"stream_count,omitempty"`
 
+	// UpdateStreamsError (update_streams_error from the relay)
+	Code           string `json:"code,omitempty"`
+	SlotsAvailable uint64 `json:"slots_available,omitempty"`
+
 	// MetricsReport
 	DCOpen          bool                       `json:"dc_open,omitempty"`
 	PluginConnected bool                       `json:"plugin_connected,omitempty"`
@@ -207,6 +211,10 @@ type MeshEvent struct {
 	Target      string
 	Message     string
 	TimestampUs uint64
+
+	// UpdateStreamsError
+	Code           string
+	SlotsAvailable uint64
 }
 
 // StreamNamesToWire converts internal u16-keyed stream names to string-keyed for wire format.
