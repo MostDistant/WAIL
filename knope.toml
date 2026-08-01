@@ -3,7 +3,7 @@
 # so we point knope at it with a regex whose `version` capture group it bumps.
 # The optional prerelease suffix is load-bearing for the beta channel: knope
 # re-reads the version through this regex, so without it a beta branch sitting
-# at 4.2.0-beta.3 reads back as 4.2.0 and regenerates beta.1 forever.
+# at 4.2.0-beta.3 reads back as 4.2.0 and regenerates beta.0 forever.
 versioned_files = [{ path = "VERSION", regex = "(?<version>\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)" }]
 changelog = "CHANGELOG.md"
 

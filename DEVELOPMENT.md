@@ -265,7 +265,13 @@ model; this section is how a tester installs and runs a beta.
 Betas are a small, invite-only circle — they share the **production relay and
 real rooms** with stable users, so keep them among people you've asked. A beta
 build self-identifies: the version in the app header and Debug tab reads
-`v4.2.0-beta.N`.
+`v4.2.0-beta.N` (zero-indexed — the first beta of a cycle is `beta.0`).
+
+The numbering is checked without cutting a release by
+`scripts/verify-beta-versioning.sh` (drives the real `prepare-beta` against a
+throwaway repo; `verify-release-config.yml` runs it in CI on release-config
+changes). It needs `knope` on `PATH`; grab the binary from
+[knope releases](https://github.com/knope-dev/knope/releases) to run it locally.
 
 ### macOS
 

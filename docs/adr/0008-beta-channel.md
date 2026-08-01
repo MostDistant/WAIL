@@ -13,10 +13,12 @@ gate.
 
 ## Decisions
 
-- **Beta version identity: knope-native semver prereleases** (`v4.2.0-beta.N`),
-  promoted by dropping the suffix to `v4.2.0`. The number pins exactly which
-  build a tester is on. The base version is still computed from conventional
-  commits, so a `feat!:` on main switches betas to `v5.0.0-beta.1`.
+- **Beta version identity: knope-native semver prereleases** (`v4.2.0-beta.N`,
+  zero-indexed — the first beta of a cycle is `beta.0`), promoted by dropping the
+  suffix to `v4.2.0`. The number pins exactly which build a tester is on. The
+  base version is still computed from conventional commits, so a `feat!:` on main
+  switches betas to `v5.0.0-beta.0`. Numbering is verified without a live release
+  by `scripts/verify-beta-versioning.sh` (see below).
 - **Beta state lives on a long-lived `beta` branch, never on main.** On each push
   to main, `beta.yml` merges `origin/main` into `beta` and runs `knope
   prepare-beta` (`prerelease_label = beta`). Because `VERSION` on the branch
@@ -78,10 +80,20 @@ gate.
   have lost.
 - **Prerequisites this ADR's pipeline PR carries:** the `knope.toml` version
   regex had to accept a `-suffix` (it re-reads `VERSION` through that regex, so
-  without it knope regenerates `beta.1` forever); `release.yml` marks
+  without it knope regenerates `beta.0` forever); `release.yml` marks
   prerelease-suffixed tags as GitHub prereleases (so a beta isn't labelled
   "Latest") and branches its Homebrew-tap step to write `wail-beta.rb` rather
   than repoint `wail.rb`.
+- **Beta numbering is verified without cutting a release, not "watched in
+  prod".** `scripts/verify-beta-versioning.sh` drives the real `knope.toml`
+  `prepare-beta` workflow against a throwaway git repo (no remote, nothing
+  pushed) and asserts the invariants: each version is a `-beta.N` prerelease,
+  betas increase monotonically within a cycle, and a new cycle re-seeds to the
+  next minor above the shipped stable (leftover cycle-1 beta tags do not derail
+  it). `verify-release-config.yml` runs it in CI on any change to the release
+  config, so a knope upgrade that alters numbering fails a check instead of a
+  live beta. Confirmed sequence: `4.2.0-beta.0 → beta.1 → beta.2`, ship `4.2.0`,
+  then `4.3.0-beta.0`.
 - **Follow-up (a separate app/relay PR), not in the pipeline PR:** remove
   Honeybadger (main-goroutine-only coverage, `ReportError` never called, key in
   git history — rotate it) and redirect fd 2 to `~/.wail/logs/crash.log` so a
