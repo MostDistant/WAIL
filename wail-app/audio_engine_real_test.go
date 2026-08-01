@@ -318,12 +318,19 @@ const retireTestInterval = int64(5)
 // WAIF stream through the ingestion path, exactly as the relay would.
 func feedRemoteStream(t *testing.T, le *linkAudioEngine, identity, display, streamName string, streamID uint16) {
 	t.Helper()
+	feedRemoteStreamAt(t, le, identity, display, streamName, streamID, retireTestInterval)
+}
+
+// feedRemoteStreamAt is feedRemoteStream with an explicit room interval index,
+// for exercising senders whose labels sit far from local playout.
+func feedRemoteStreamAt(t *testing.T, le *linkAudioEngine, identity, display, streamName string, streamID uint16, roomIdx int64) {
+	t.Helper()
 	enc, err := NewIntervalEncoder(2, engineInternalRate, 128)
 	if err != nil {
 		t.Fatalf("encoder: %v", err)
 	}
 	pcm := make([]int16, 960*2*2) // 2 stereo 20ms frames
-	frames, _, err := enc.EncodeInterval(pcm, retireTestInterval, streamID, 0, 120, 4, 4)
+	frames, _, err := enc.EncodeInterval(pcm, roomIdx, streamID, 0, 120, 4, 4)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -505,5 +512,47 @@ func TestClearPeerIntentMakesStreamsWantedAgain(t *testing.T) {
 	sweep(le, time.Now().Add(24*time.Hour))
 	if !hasStream(le, "id-A:loopback", 0) {
 		t.Fatal("cleared intent still retired the stream")
+	}
+}
+
+// A sender whose room labels run far ahead of our playout leaves stragglers
+// buffered beyond the playout horizon. Drop only clears at or below the release
+// cursor, so requiring an empty reassembler kept a dead channel published for
+// as many boundaries as that peer was mislabeled — unbounded in practice.
+func TestFarAheadStragglerDoesNotBlockRetirement(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 5000)
+	st := le.emit[affinity.Key{Identity: "id-A", Stream: 0}]
+	if st == nil {
+		t.Fatal("stream not published")
+	}
+	st.sched.OnBoundary(3) // local playout is way behind the sender's labels
+
+	le.SetPeerStreams("id-A", map[uint16]bool{})
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+
+	if hasStream(le, "id-A", 0) {
+		t.Fatal("a straggler beyond the playout horizon still blocks retirement")
+	}
+}
+
+// The other side of that horizon: audio due imminently — including the interval
+// that just played, which playout drops only a boundary later — must still hold
+// the channel open, or retirement truncates it.
+func TestImminentAudioStillBlocksRetirement(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 5)
+	st := le.emit[affinity.Key{Identity: "id-A", Stream: 0}]
+	if st == nil {
+		t.Fatal("stream not published")
+	}
+	// playing = 3-D = 2, so interval 5 sits exactly on the horizon (D+2).
+	st.sched.OnBoundary(3)
+
+	le.SetPeerStreams("id-A", map[uint16]bool{})
+	sweep(le, time.Now().Add(24*time.Hour))
+
+	if !hasStream(le, "id-A", 0) {
+		t.Fatal("retired a stream with audio still due to play")
 	}
 }
