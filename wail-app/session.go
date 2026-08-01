@@ -529,12 +529,12 @@ func sessionLoop(
 					// Undo any earlier drop: nothing else ever will, since the echo
 					// identity never sends StreamNames, and a drop left in force
 					// retires the monitor channels the next time frames pause.
-					audioEngine.ClearPeerIntent(identity + ":loopback")
+					audioEngine.ClearPeerIntent(identity + loopbackIdentitySuffix)
 				} else {
 					// The echo stops, so no StreamNames or PeerLeft will ever reach
 					// these — retire them explicitly or the monitor channels stay
 					// published for the rest of the session.
-					audioEngine.DropPeer(identity + ":loopback")
+					audioEngine.DropPeer(identity + loopbackIdentitySuffix)
 				}
 				logInfo("[loopback] server echo enabled=%v", cmd.Enabled)
 			case "SetMetronome":
@@ -919,7 +919,7 @@ func sessionLoop(
 				audioBytesRecv += uint64(len(data))
 				intervalFramesRecv++
 				intervalBytesRecv += uint64(len(data))
-				audioEngine.HandleRemoteAudio(identity+":loopback", displayName+" (loopback)", loopStreamName, data)
+				audioEngine.HandleRemoteAudio(identity+loopbackIdentitySuffix, displayName+" (loopback)", loopStreamName, data)
 				continue
 			}
 
