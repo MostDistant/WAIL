@@ -521,8 +521,13 @@ func (e *linkAudioEngine) RoomIndex(localIndex int64) (int64, bool) {
 func (e *linkAudioEngine) OnGridSnap(deltaUs int64) {
 	// Recorded before the early return: a backward snap moves the grid too,
 	// so it must still be attributable when the detector sees it.
-	e.lastSnapAtNs.Store(time.Now().UnixNano())
+	//
+	// Magnitude first, timestamp second — the timestamp publishes the pair.
+	// Storing the other way round let a reader land between the two and match
+	// a fresh timestamp against the PREVIOUS snap's magnitude; they disagree,
+	// the snap reads as an external jump, and that costs an audible re-entry.
 	e.lastSnapDeltaUs.Store(deltaUs)
+	e.lastSnapAtNs.Store(time.Now().UnixNano())
 	if deltaUs <= 0 {
 		return // backward jump: the playhead pauses; nothing to skip
 	}
@@ -1260,9 +1265,7 @@ func (e *linkAudioEngine) sweepRetiredLocked(now time.Time, roomLabel int64) {
 			// discards it. Count it so the log can say so — silently dropping
 			// a decoded backlog is exactly the kind of thing that should not
 			// have to be inferred later.
-			if max, ok := st.reasm.MaxIndex(); ok {
-				backlog = int(max-min) + 1
-			}
+			backlog = st.reasm.Count()
 		}
 		e.retireStreamLocked(key, st, backlog)
 	}
@@ -1388,6 +1391,8 @@ func (e *linkAudioEngine) classifyGridJump(beats, roomBPM, sessionBPM float64, p
 // it so nothing ever re-aligns. The record is consumed, so one snap can explain
 // at most one jump.
 func (e *linkAudioEngine) matchesOwnSnap(ms float64, now time.Time) bool {
+	// Timestamp first, magnitude second — the mirror of OnGridSnap's store
+	// order, so seeing a fresh timestamp guarantees its magnitude is visible.
 	at := e.lastSnapAtNs.Load()
 	if at == 0 || now.Sub(time.Unix(0, at)) >= gridSnapAttributionWindow {
 		return false
@@ -1517,27 +1522,35 @@ func (e *linkAudioEngine) emitLoop() {
 			if beatBPM <= 0 {
 				beatBPM = tempo
 			}
-			if d := localBeat - lastBeat; haveLastBeat && isGridJump(d, elapsed, beatBPM) {
-				{
-					jump := e.classifyGridJump(d, beatBPM, sessionBPM, peers, ev, bpi, time.Now())
-					log.Printf("[audio] WARN: local Link beat jumped %+.2f beats (%+.0f ms, expected %+.2f from elapsed time) — cause: %s; %s",
-						jump.Beats, jump.Ms, elapsed*beatBPM/60.0, jump.Cause, jump.Detail)
-					// Our own snap moves the grid on purpose. Re-entering
-					// conformance over it would re-measure a grid we just
-					// aligned, and reporting it as a jump would send everyone
-					// hunting a merge that never happened.
-					e.noteGridJump(jump)
-				}
+			// Whether a PREVIOUS tick exists to compare against. Read before
+			// the assignment below sets it, or every guard downstream is
+			// trivially true.
+			hadPrevTick := haveLastBeat
+			if d := localBeat - lastBeat; hadPrevTick && isGridJump(d, elapsed, beatBPM) {
+				jump := e.classifyGridJump(d, beatBPM, sessionBPM, peers, ev, bpi, time.Now())
+				log.Printf("[audio] WARN: local Link beat jumped %+.2f beats (%+.0f ms, expected %+.2f from elapsed time) — cause: %s; %s",
+					jump.Beats, jump.Ms, elapsed*beatBPM/60.0, jump.Cause, jump.Detail)
+				// Our own snap moves the grid on purpose. Re-entering
+				// conformance over it would re-measure a grid we just
+				// aligned, and reporting it as a jump would send everyone
+				// hunting a merge that never happened.
+				e.noteGridJump(jump)
 			}
 			lastBeat, lastBeatAt, haveLastBeat = localBeat, float64(clockMicros)/1e6, true
 			// Remember *when* the evidence last moved, not just the previous
 			// tick's values: peer discovery and the timeline merge it causes
 			// are tens of milliseconds apart, so comparing across one tick
 			// reports the merge it exists to name as "unattributed".
-			if haveLastBeat && peers != lastPeers {
+			//
+			// Skipped on the bootstrap tick: lastPeers and lastSessionBPM are
+			// still zero there, so both would "change" and seed evidence of a
+			// 0→N merge and a 0→120 BPM move. A genuine jump in the next few
+			// seconds would then be blamed on that fiction — and startup is
+			// when a real merge is most likely.
+			if hadPrevTick && peers != lastPeers {
 				ev.peersChangedAt, ev.peersFrom = time.Now(), lastPeers
 			}
-			if haveLastBeat && math.Abs(sessionBPM-lastSessionBPM) > 0.01 {
+			if hadPrevTick && math.Abs(sessionBPM-lastSessionBPM) > 0.01 {
 				ev.tempoChangedAt, ev.tempoFrom = time.Now(), lastSessionBPM
 			}
 			lastPeers, lastSessionBPM = peers, sessionBPM
