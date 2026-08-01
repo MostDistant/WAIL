@@ -253,11 +253,17 @@ Description of the change.
 
 ### Release pipeline (automated via GitHub Actions)
 
-Releases are fully automated — no manual `knope` commands needed:
+There are two channels (see `docs/adr/0008-beta-channel.md`): **main is the beta channel**, and **stable is a deliberate promotion**. Both are automated — no manual `knope` commands.
 
-1. **Push to `main`** → `auto-release.yml` runs `knope prepare-release`, which consumes conventional commits (and `.changeset/` files if present as a fallback), bumps versions, updates `CHANGELOG.md`, and opens/updates a PR from the `release` branch → `main`.
-2. **Merge the release PR** → `release-on-merge.yml` runs `knope release` (creates GitHub release + git tag) and dispatches artifact builds.
+**Stable** (a promotion you choose):
+
+1. **Push to `main`** → `auto-release.yml` runs `knope prepare-release`, which consumes conventional commits (and `.changeset/` files if present as a fallback), bumps versions, updates `CHANGELOG.md`, and opens/updates a standing PR from the `release` branch → `main`. Its body lists the betas soaked this cycle. This PR is the promotion button; merging it ships stable.
+2. **Merge the release PR** → `release-on-merge.yml` runs `knope release` (creates GitHub release + git tag), dispatches artifact builds, and **resets `beta` to main** so the next cycle starts clean.
 3. **`release.yml`** builds platform artifacts (Windows/Linux app binaries + zip/tar archives, plus the Homebrew source tarball that serves as the macOS channel) and uploads them to the GitHub release. A failed platform build does not block the release: `create-release` packages and uploads whatever artifacts exist (the run still reports failure so a missing platform is visible).
+
+**Beta** (every releasable merge, automatic):
+
+- **Push to `main`** → `beta.yml` merges main into the long-lived `beta` branch, runs `knope prepare-beta` (`prerelease_label = beta`) to bump to `v4.2.0-beta.N` on that branch, tags it, and dispatches the same `release.yml`. A merge with no `feat:`/`fix:`/changeset since the last beta is skipped (no artifact burned). `release.yml` marks beta tags as GitHub prereleases and writes a **separate `wail-beta` Homebrew formula** — a beta never repoints the `wail` formula stable users track. Betas and stable share the production relay and real rooms, so wire/protocol changes must stay backward compatible for at least one cycle.
 
 ### Rules for agents
 
@@ -267,7 +273,8 @@ Releases are fully automated — no manual `knope` commands needed:
 - **Never run `knope release` or `knope prepare-release` locally** — GitHub Actions runs both automatically.
 - **Use the correct conventional commit prefix.** New features MUST use `feat:`, bug fixes MUST use `fix:`, breaking changes MUST use `feat!:` or `fix!:`. Never use `fix:` for a new feature — this causes knope to bump only the patch version instead of minor. Similarly, never use unprefixed or `chore:` commits for user-facing changes — knope ignores them entirely. Get the prefix right; it directly controls the version bump.
 - **Semver is now standard (post-1.0).** `feat:` / `default: minor` → minor bump, `fix:` / `default: patch` → patch bump, `feat!:` / `default: major` → major bump. No pre-1.0 shifting applies.
-- **Every push to `main` produces a release — there is no release-free path.** `auto-release.yml` runs on every main push; if no commit since the last tag matches `feat|fix|refactor|perf` (and no `.changeset/` files exist), its "Ensure changeset exists" step auto-creates a fallback patch changeset from the latest commit message. So `test:`/`chore:`/`docs:`-only pushes are **patch releases**, not ignored — v3.9.7 shipped with only test infrastructure (#411). (knope itself ignores `test:` commits; the fallback changeset is the mechanism, which is why the changelog gets exactly one entry, not a duplicate.) Batch infra/docs/test changes to keep release noise down.
+- **Every push to `main` cuts a beta; stable is a separate promotion.** `beta.yml` runs on every main push and cuts `v4.2.0-beta.N` for any push with a `feat:`/`fix:`/changeset since the last beta (docs/chore/test-only pushes are skipped — no fallback changeset on the beta path). Stable ships only when you merge the standing `release` PR, and `auto-release.yml` still fabricates a fallback changeset there so a docs/chore/test-only cycle can still be promoted (v3.9.7 shipped with only test infrastructure, #411). Batch infra/docs/test changes to keep beta noise down.
+- **Never touch the `beta` branch by hand.** It is CI-owned: `beta.yml` merges main onto it and knope bumps the prerelease version there; `release-on-merge.yml` force-resets it to main at each stable release. A manual commit or push will conflict with the next `beta.yml` merge or be discarded at the next reset.
 - **Keep docs in sync.** For each PR, check whether `README.md` and `docs/architecture.md` need updates to reflect the changes. User-facing features should update README; architectural changes (wire format, Link Audio engine, internal package structure, new design decisions) should update `docs/architecture.md`.
 
 ## Common Tasks

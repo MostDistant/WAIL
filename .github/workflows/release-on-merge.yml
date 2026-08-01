@@ -33,6 +33,17 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: knope release
 
+      # Reset the beta branch to the just-released main (docs/adr/0008). Within a
+      # cycle main never touches VERSION/CHANGELOG, so beta.yml's merge stays
+      # conflict-free; a stable release moves both, so beta must return to main
+      # before the next beta or every subsequent merge conflicts. Also re-seeds
+      # knope from the fresh stable VERSION, so the next cycle's beta.1 numbers
+      # itself. beta.yml recreates the branch on its next run if this races.
+      - name: Reset beta branch to main
+        run: |
+          git fetch origin main
+          git push origin origin/main:refs/heads/beta --force
+
       - name: Trigger release build
         env:
           GH_TOKEN: ${{ github.token }}

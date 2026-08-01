@@ -1,0 +1,119 @@
+name: Beta build
+
+# The beta channel (docs/adr/0008): every merge to main that carries a
+# releasable change becomes a prerelease (v4.2.0-beta.N) on the long-lived
+# `beta` branch. Betas and stable share the production relay and real rooms —
+# a beta is just a client — so wire/protocol changes must stay backward
+# compatible for at least one cycle.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  # Serialize, don't cancel: each run pushes the beta branch and a tag, so an
+  # interrupted run could leave the branch advanced with no matching tag. The
+  # queue means a fast burst of merges still ends on the newest commit.
+  group: beta
+  cancel-in-progress: false
+
+jobs:
+  beta:
+    # Skip the stable release PR merge — that commit is the stable path's, and
+    # release-on-merge.yml resets `beta` to main right after it. Running here
+    # would race that reset and conflict on VERSION/CHANGELOG.
+    if: "!startsWith(github.event.head_commit.message, 'chore: prepare release')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Check out the long-lived beta branch (create it from main on first run),
+      # then bring main's new commits onto it. Within a cycle main never touches
+      # VERSION or CHANGELOG.md (only the stable release PR does, and that path
+      # resets beta), so this merge is clean; a conflict here means the
+      # reset-after-stable didn't run and the failure should be loud.
+      - name: Sync beta branch with main
+        run: |
+          git fetch --tags origin main
+          if git ls-remote --exit-code --heads origin beta >/dev/null 2>&1; then
+            git fetch origin beta
+            git checkout -B beta origin/beta
+            git merge --no-edit origin/main
+          else
+            echo "beta branch does not exist yet — creating from main"
+            git checkout -B beta origin/main
+          fi
+
+      - name: Check for a releasable change
+        id: check
+        # Mirror auto-release.yml's detection, but INVERT it: the stable path
+        # fabricates a fallback changeset so every push ships; the beta path
+        # skips instead, so a docs/chore/test-only merge doesn't burn an
+        # artifact build or ask testers to reinstall for nothing.
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          RANGE="HEAD"
+          [ -n "$LAST_TAG" ] && RANGE="${LAST_TAG}..HEAD"
+
+          RELEASABLE=false
+          if ls .changeset/*.md 1>/dev/null 2>&1; then
+            RELEASABLE=true
+          elif git log --oneline "$RANGE" | grep -qE '^[0-9a-f]+ (feat|fix|feat!|fix!)[(:!]'; then
+            RELEASABLE=true
+          fi
+
+          echo "releasable=${RELEASABLE}" >> "$GITHUB_OUTPUT"
+          if [ "$RELEASABLE" = false ]; then
+            echo "No feat:/fix:/changeset since ${LAST_TAG:-repo start} — nothing to beta."
+          fi
+
+      - name: Install knope
+        if: steps.check.outputs.releasable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -sSfL "https://github.com/knope-dev/knope/releases/latest/download/knope-x86_64-unknown-linux-musl.tgz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin/
+
+      - name: Prepare beta (bump VERSION + CHANGELOG on beta, commit)
+        if: steps.check.outputs.releasable == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: knope prepare-beta
+
+      - name: Push beta branch and tag
+        id: tag
+        if: steps.check.outputs.releasable == 'true'
+        run: |
+          VERSION=$(cat VERSION)
+          TAG="v${VERSION}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::tag ${TAG} already exists — knope did not advance the beta number"
+            exit 1
+          fi
+          git tag -a "${TAG}" -m "Beta build ${TAG}"
+          # Atomic: if the tag collides on the remote, the branch is not advanced
+          # either, so a failed run leaves no half-state to reconcile.
+          git push --atomic origin beta "refs/tags/${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      # A tag pushed with GITHUB_TOKEN does not trigger release.yml (Actions
+      # won't recurse on its own token), so dispatch it explicitly — same reason
+      # release-on-merge.yml does for stable.
+      - name: Trigger artifact build
+        if: steps.check.outputs.releasable == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          echo "Triggering artifact build for ${TAG}"
+          gh workflow run release.yml --ref "${TAG}" -f tag="${TAG}"
