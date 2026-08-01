@@ -22,6 +22,11 @@ const (
 	// snapSettle is the post-entry settling window during which the slew
 	// stays out of the way of the snap's aftershocks.
 	snapSettle = 5 * time.Second
+	// gateWedgeTimeout is how long the same-rate gate may stay shut before the
+	// steerer stops waiting for the tempo to come back and re-enters
+	// conformance. Long enough to sit out an ordinary tempo change and its
+	// re-anchor; short enough that a wedge is a blip, not a lost session.
+	gateWedgeTimeout = 10 * time.Second
 	// tempoGate suppresses the slew after any tempo commit (local user's
 	// hand, remote change, or entry adoption) so WAIL never fights a hand
 	// on the tempo knob. Deliberately longer than the 150ms echo guard.
@@ -37,6 +42,14 @@ const (
 	// every two seconds in the field. Settling stays immediate — restoring
 	// the room tempo is always safe.
 	slewPersistenceTicks = 2
+	// emitDeltaUs is how far δ must move inside one state bucket before the
+	// UI is told again. Below it the number is jitter; above it the displayed
+	// error is stale enough to mislead. The UI only shows the figure past
+	// 10 ms, so this is the granularity that reads as "live".
+	emitDeltaUs = 10_000
+	// emitMinInterval bounds same-bucket reports. Without it the step above is
+	// no bound at all for an oscillating δ.
+	emitMinInterval = 3 * time.Second
 )
 
 // State is the slice of Link session state the steerer samples. Beat is
@@ -80,16 +93,22 @@ type Steerer struct {
 	// audio — the jumped frames must skip silently, never count as underruns.
 	onSnapGrid func(deltaUs int64)
 
-	aligner          *interval.GridAligner
-	enabled          bool
-	entryPending     bool
-	lastSnapAt       time.Time
-	lastTempoAt      time.Time
+	aligner      *interval.GridAligner
+	enabled      bool
+	entryPending bool
+	lastSnapAt   time.Time
+	lastTempoAt  time.Time
+	// gateShutSince is when the same-rate gate last started blocking, zero
+	// while it is open — the wedge timer (see noteGateShut).
+	gateShutSince    time.Time
 	slewTarget       float64 // 0 = sitting at exact room tempo
 	slewDir          int     // sign of the active episode's δ (0 = not slewing)
 	slewPendingDir   int     // sign of the δ being confirmed (0 = none)
 	slewPendingCount int     // consecutive same-direction ticks past the deadband
 	lastState        string
+	lastEmittedUs    int64     // δ at the last emit — see emitState
+	lastEmitAt       time.Time // when that emit happened (same-bucket rate limit)
+	lastJumpEntryAt  time.Time // last jump-triggered re-entry (snaps are audible)
 	currentBPM       float64
 	anchorIndex      int64
 	haveRoomAnchor   bool
@@ -197,14 +216,22 @@ func (s *Steerer) SnapshotTempoAdopt(msgBPM float64) bool {
 // Tick for the same-rate gate that keeps the slew from fighting tempo
 // changes in flight.
 func (s *Steerer) Tick(bpi float64, now time.Time) {
+	// Every path that returns before the gate clears the wedge timer: it
+	// measures how long the gate has been *continuously* shut across ticks we
+	// actually evaluated, not wall time since it first shut. Otherwise a
+	// tempo-commit burst, or alignment being switched off for five minutes,
+	// leaves it accruing and the next evaluated tick escalates instantly.
 	if !s.enabled || !s.aligner.Ready() || s.entryPending {
+		s.gateShutSince = time.Time{}
 		return
 	}
 	if !slewAllowed(now, s.lastSnapAt, s.lastTempoAt) {
+		s.gateShutSince = time.Time{}
 		return
 	}
 	roomBPM, ok := s.aligner.RoomBPM()
 	if !ok || roomBPM <= 0 {
+		s.gateShutSince = time.Time{}
 		return
 	}
 	// Same-rate gate: δ is a phase measurement that is only meaningful when
@@ -215,17 +242,31 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 	// and nudging would fight it (field finding: the slew chased a stale
 	// 120 anchor while the session moved to 122, preventing the settle the
 	// detector hold-down waits for — a live-lock).
+	// Measured before the gate: the gate suppresses *steering*, never
+	// *reporting*. Returning without emitting froze the UI on whatever δ was
+	// current when the state last changed — a reading minutes stale, shown as
+	// if it were live (field: a badge stuck at "drifted 2605ms" for a quarter
+	// of an hour while the grid sat at ~10ms).
+	delta, ok := s.measureDelta(bpi)
+	if !ok {
+		s.gateShutSince = time.Time{}
+		return
+	}
 	baseline := roomBPM
 	if s.slewTarget != 0 {
 		baseline = s.slewTarget
 	}
-	if st := s.link.State(); math.Abs(st.BPM-baseline) > tempoThreshold {
+	if st := s.link.State(); math.Abs(st.BPM-baseline) > sameRateBand(baseline) {
+		// Bucket only while the gate is shut. δ is a phase measurement between
+		// grids ticking at different rates, so it sweeps and wraps at ±period/2
+		// — publishing that at tick rate would trade a stale number for a
+		// meaningless one. The bucket still moves if things get materially
+		// worse, and the recovery paths bound how long this can last.
+		s.emitBucket(delta)
+		s.noteGateShut(now, roomBPM, st.BPM)
 		return
 	}
-	delta, ok := s.measureDelta(bpi)
-	if !ok {
-		return
-	}
+	s.gateShutSince = time.Time{}
 	periodUs := int64(bpi * 60.0 / roomBPM * 1e6)
 	target, active := interval.SlewTempo(roomBPM, delta, periodUs)
 	if s.slewTarget != 0 && !active {
@@ -240,7 +281,7 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 			s.slewPendingDir, s.slewPendingCount = 0, 0
 			s.logf("[align] slew settled (δ=%+.1f ms), restored %.1f BPM", float64(delta)/1000, roomBPM)
 		}
-		s.emitState(delta)
+		s.emitState(delta, now)
 		return
 	}
 	if active {
@@ -257,7 +298,7 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 			s.slewPendingDir, s.slewPendingCount = dir, 1
 		}
 		if s.slewPendingCount < slewPersistenceTicks {
-			s.emitState(delta)
+			s.emitState(delta, now)
 			return
 		}
 		if target != s.slewTarget {
@@ -269,7 +310,7 @@ func (s *Steerer) Tick(bpi float64, now time.Time) {
 	} else {
 		s.slewPendingDir, s.slewPendingCount = 0, 0
 	}
-	s.emitState(delta)
+	s.emitState(delta, now)
 }
 
 // SetEnabled toggles grid alignment (ADR-0006 debug control). Disabling
@@ -355,7 +396,7 @@ func (s *Steerer) tryEntry(bpi float64, now time.Time) {
 	} else {
 		s.logf("[align] entry: grid already aligned (δ=%+.1f ms)", float64(delta)/1000)
 	}
-	s.emitState(delta)
+	s.emitState(delta, now)
 	// The snap may have shifted the grid past a boundary since SetRoomAnchor
 	// sampled the labeler — re-derive the label by construction.
 	s.applyRoomLabel(bpi)
@@ -448,12 +489,133 @@ func (s *Steerer) measureDelta(bpi float64) (int64, bool) {
 }
 
 // emitState reports the bucketed alignment state on change only.
-func (s *Steerer) emitState(deltaUs int64) {
-	state := stateName(deltaUs)
-	if state == s.lastState {
+// sameRateBand is how far the session tempo may sit from the slew's baseline
+// before δ stops meaning anything. Proportional, not the flat adoption
+// threshold it used to share: the gate exists to avoid fighting a real tempo
+// move (120→122 is 1.7%), but at 0.01 BPM a peer whose clock wanders by a
+// tenth also tripped it — and then the slew went dormant and phase drifted
+// uncorrected for the rest of the session. At half a percent, δ is still a
+// sound measurement over the tens of seconds a slew episode takes.
+func sameRateBand(baselineBPM float64) float64 {
+	return math.Max(tempoThreshold, 0.005*baselineBPM)
+}
+
+// noteGateShut clears a slew target that has been holding the gate shut
+// against itself.
+//
+// The gate compares the session tempo against the slew's target while a slew
+// is in flight, and returns before the settle branch that would clear that
+// target — so once something else moves the tempo, the stale target keeps the
+// gate shut and the gate prevents clearing the target. Sixteen minutes of no
+// alignment at all, in the field.
+//
+// Clearing the target is the whole fix: the baseline falls back to the room
+// tempo, and the gate re-evaluates honestly. If it opens, normal steering
+// resumes; if it stays shut, the tempo really has moved and waiting is
+// correct — the room adopts it shortly and the gate opens then. Deliberately
+// no tempo write and no forced re-entry here: both would fight whoever
+// legitimately owns the tempo, and a re-entry snap is audible.
+func (s *Steerer) noteGateShut(now time.Time, roomBPM, sessionBPM float64) {
+	if s.slewTarget == 0 {
+		s.gateShutSince = time.Time{}
 		return
 	}
-	s.lastState = state
+	if s.gateShutSince.IsZero() {
+		s.gateShutSince = now
+		return
+	}
+	if now.Sub(s.gateShutSince) < gateWedgeTimeout {
+		return
+	}
+	s.gateShutSince = time.Time{}
+	// No restore: a shut gate is proof the session is not at our slew target,
+	// so there is nothing of ours still in force to put back.
+	s.slewTarget, s.slewDir = 0, 0
+	s.slewPendingDir, s.slewPendingCount = 0, 0
+	s.logf("[align] slew target abandoned after %s of a shut gate (session %.4f BPM vs room %.4f) — re-measuring against the room tempo",
+		gateWedgeTimeout, sessionBPM, roomBPM)
+}
+
+// OnGridJump re-arms entry conformance after the local Link grid moved out
+// from under us — a session merge or transport reset, which the engine
+// detects as a beat discontinuity. The slew only closes small phase errors at
+// a bounded rate, so a jump of whole beats is not something it can walk back;
+// without a re-snap the grid stays off for the rest of the session.
+func (s *Steerer) OnGridJump(beats float64, now time.Time) {
+	if !s.enabled {
+		return
+	}
+	// Re-entry snaps the grid, which is audible. Detection is a heuristic over
+	// a sampled beat clock, so one bad reading must not be able to snap the
+	// grid repeatedly on a peer whose machine is stalling — rate limit it to
+	// the settle window entry conformance already observes.
+	if !s.lastJumpEntryAt.IsZero() && now.Sub(s.lastJumpEntryAt) < snapSettle {
+		s.logf("[align] local grid jumped %+.2f beats — ignored, re-entered %s ago",
+			beats, now.Sub(s.lastJumpEntryAt).Round(time.Millisecond))
+		return
+	}
+	s.lastJumpEntryAt = now
+	s.gateShutSince = time.Time{}
+	s.cancelSlew()
+	s.entryPending = true
+	s.logf("[align] local grid jumped %+.2f beats — re-running entry conformance", beats)
+}
+
+// cancelSlew abandons an in-flight slew, putting the tempo back first. The
+// slew works by holding the session away from the room tempo, so clearing the
+// bookkeeping alone strands it there: entry conformance is not guaranteed to
+// commit a tempo (it only adopts past tempoThreshold, and not at all until the
+// aligner is Ready), and SetEnabled's restore keys off the very target we just
+// cleared — leaving the session parked on a slew tempo with nothing tracking it.
+func (s *Steerer) cancelSlew() {
+	if s.slewTarget != 0 {
+		restore := s.currentBPM
+		if roomBPM, ok := s.aligner.RoomBPM(); ok && roomBPM > 0 {
+			restore = roomBPM
+		}
+		if restore > 0 {
+			s.link.SetTempo(restore)
+		}
+	}
+	s.slewTarget, s.slewDir = 0, 0
+	s.slewPendingDir, s.slewPendingCount = 0, 0
+}
+
+// emitState reports alignment to the UI on a bucket change, and also when δ
+// itself has moved materially inside the same bucket. Bucket-only was a trap:
+// the reported error froze at whatever δ was when the state last changed, so a
+// grid recovering from 2.6 s to 60 ms still read "drifted 2605ms" — a number
+// with no relationship to the present.
+func (s *Steerer) emitState(deltaUs int64, now time.Time) {
+	state := stateName(deltaUs)
+	if state != s.lastState {
+		s.publish(state, deltaUs, now)
+		return
+	}
+	// Same bucket: report a materially different δ, but not more often than
+	// emitMinInterval. The step alone does not bound anything — the reference
+	// is the last *emitted* δ, so a value alternating by more than the step
+	// (±12ms jitter is squarely the slew's own operating regime) clears it on
+	// every single tick and streams events indefinitely.
+	if abs64(deltaUs-s.lastEmittedUs) < emitDeltaUs {
+		return
+	}
+	if !s.lastEmitAt.IsZero() && now.Sub(s.lastEmitAt) < emitMinInterval {
+		return
+	}
+	s.publish(state, deltaUs, now)
+}
+
+// emitBucket reports a state change only, ignoring δ movement — for ticks
+// where the measurement itself is not trustworthy enough to publish.
+func (s *Steerer) emitBucket(deltaUs int64) {
+	if state := stateName(deltaUs); state != s.lastState {
+		s.publish(state, deltaUs, time.Time{})
+	}
+}
+
+func (s *Steerer) publish(state string, deltaUs int64, now time.Time) {
+	s.lastState, s.lastEmittedUs, s.lastEmitAt = state, deltaUs, now
 	s.emit(state, float64(deltaUs)/1000)
 }
 

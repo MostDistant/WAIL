@@ -8,7 +8,25 @@ import (
 )
 
 const (
-	tempoChangeThreshold  = 0.01 // BPM
+	// tempoSteadyBand is how tightly a candidate reading must hold during the
+	// hold-down to count as steady. Tight on purpose: this asks "has it stopped
+	// moving?", not "is it different enough to matter".
+	tempoSteadyBand = 0.01 // BPM
+	// tempoReportThreshold is how far the session must sit from the last
+	// reported tempo before that counts as a deliberate change worth telling
+	// the room. WAIL never originates a tempo — it observes the Link session,
+	// which is the DAW's intent plus Link's convergence noise — so this is a
+	// denoising bar, and 0.01 was far below the noise: a peer whose clock
+	// wanders 119.9↔120 was reporting each excursion as a tempo change, which
+	// dragged the whole room's tempo and left every peer's slew gated off.
+	// A human's smallest deliberate nudge is a decimal place, not a hundredth.
+	tempoReportThreshold = 0.25 // BPM
+	// tempoIntegerSnap pulls a reported tempo onto a whole number when it is
+	// this close to one. The room tempo is the reference every peer's grid
+	// math derives from, so it should carry the intended value rather than
+	// whichever fraction the first reporter happened to sample. Deliberately
+	// narrow: 128.5 is someone's actual project tempo and must survive.
+	tempoIntegerSnap      = 0.1 // BPM
 	echoGuardDuration     = 150 * time.Millisecond
 	linkPollInterval      = 20 * time.Millisecond // 50 Hz
 	snapshotIntervalTicks = 10                    // ~200ms at 50Hz
@@ -95,14 +113,14 @@ func (d *TempoChangeDetector) Check(bpm float64, now time.Time) (float64, bool) 
 		d.echoGuardUntil = nil
 	}
 
-	if math.Abs(bpm-d.lastTempo) <= tempoChangeThreshold {
-		// Settled at (or back to) the reported tempo: nothing pending.
+	if math.Abs(bpm-d.lastTempo) <= tempoReportThreshold {
+		// Within the noise band of the reported tempo: not a change.
 		d.hasCandidate = false
 		return 0, false
 	}
 
 	// Hold-down: the reading is a candidate until it holds for tempoHoldDown.
-	if !d.hasCandidate || math.Abs(bpm-d.candidate) > tempoChangeThreshold {
+	if !d.hasCandidate || math.Abs(bpm-d.candidate) > tempoSteadyBand {
 		d.candidate = bpm
 		d.candidateSince = now
 		d.hasCandidate = true
@@ -111,9 +129,20 @@ func (d *TempoChangeDetector) Check(bpm float64, now time.Time) (float64, bool) 
 	if now.Sub(d.candidateSince) < tempoHoldDown {
 		return 0, false
 	}
-	d.lastTempo = bpm
+	reported := snapToIntegerTempo(bpm)
+	d.lastTempo = reported
 	d.hasCandidate = false
-	return bpm, true
+	return reported, true
+}
+
+// snapToIntegerTempo rounds a tempo onto a whole number when it is within
+// tempoIntegerSnap of one — recovering the value a human typed from the value
+// Link reported. Anything further out is left exactly as observed.
+func snapToIntegerTempo(bpm float64) float64 {
+	if r := math.Round(bpm); math.Abs(bpm-r) <= tempoIntegerSnap && r > 0 {
+		return r
+	}
+	return bpm
 }
 
 // LastTempo returns the last known tempo.

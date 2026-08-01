@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 // AudioEngine is WAIL's Link Audio audio path (ADR-0001/0002): capture subscribes
 // to local Link Audio channels and ships them as WAIF over the relay; playback
 // republishes remote streams as Link Audio channels one interval late. It
@@ -34,6 +36,12 @@ type AudioEngine interface {
 	// server echo was turned off). The grace is what lets affinity hold a
 	// channel across a reconnect blip.
 	DropPeer(identity string)
+	// TakeGridJump reports (and clears) a local Link grid jump detected since
+	// the last call — something moved the beat timeline out from under us.
+	// The session re-arms grid alignment on it (the slew cannot walk back a
+	// jump of whole beats) and reports it to the room. Jumps WAIL caused
+	// itself are attributed and withheld rather than reported.
+	TakeGridJump() (GridJump, bool)
 	// SetRoomAnchor applies a fresh relay interval_anchor: aligns the local→room
 	// interval labeler and adopts the room tempo/config.
 	SetRoomAnchor(currentIndex int64, bpm float64, bars uint32, quantum float64)
@@ -83,6 +91,50 @@ type AudioEngine interface {
 	// increment marks an event that risks an audible artifact; the session
 	// diffs snapshots to surface them in the log panel and Network tab.
 	Health() EngineHealth
+}
+
+// GridJump is a detected discontinuity in the local Link beat timeline,
+// with what the engine could attribute it to. The cause is the point: a jump
+// is only actionable if you can tell a peer joining from a tempo change from
+// something WAIL did to itself.
+type GridJump struct {
+	Beats      float64 // signed jump, in beats
+	Ms         float64 // the same jump in milliseconds at the room tempo
+	Intervals  int64   // ≈ how many interval boundaries that is
+	Peers      uint64  // LAN Link peer count when it happened
+	Cause      string  // short attribution, for the headline
+	Detail     string  // the evidence behind it
+	SelfCaused bool    // WAIL moved its own grid (an entry snap) — not a fault
+}
+
+const (
+	// gridSnapAttributionWindow is how recently our own snap must have run for
+	// a detected jump to be credited to it. Recency is necessary but never
+	// sufficient — see matchesOwnSnap, which also requires the magnitudes to
+	// agree, so one snap cannot blanket-absorb an unrelated jump.
+	gridSnapAttributionWindow = 2 * time.Second
+	// snapMatchToleranceMs is the floor on that magnitude agreement, for snaps
+	// small enough that a percentage would be tighter than measurement noise.
+	snapMatchToleranceMs = 50
+	// jumpDetectMaxGapSec bounds the tick spacing the jump detector will judge.
+	// Beyond it the loop stalled (GC, a starved scheduler on a loaded machine)
+	// and the expected-beat arithmetic is guesswork — and a false jump is not
+	// free, it costs an audible re-entry snap.
+	jumpDetectMaxGapSec = 1.0
+	// gridJumpEvidenceWindow is how far back peer/tempo movement still counts
+	// as the explanation. Link's peer discovery and the timeline merge it
+	// triggers are tens of milliseconds apart, so same-tick evidence misses it.
+	gridJumpEvidenceWindow = 3 * time.Second
+)
+
+// jumpEvidence is when the attributable inputs last moved, carried across
+// ticks by the emit loop so a jump can be explained by something that happened
+// slightly before it.
+type jumpEvidence struct {
+	peersChangedAt time.Time
+	peersFrom      uint64
+	tempoChangedAt time.Time
+	tempoFrom      float64
 }
 
 // EngineHealth is a snapshot of cumulative audio-path diagnostics.

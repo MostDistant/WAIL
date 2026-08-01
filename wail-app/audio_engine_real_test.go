@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"math"
 	"testing"
 	"time"
 
@@ -554,5 +555,159 @@ func TestImminentAudioStillBlocksRetirement(t *testing.T) {
 
 	if !hasStream(le, "id-A", 0) {
 		t.Fatal("retired a stream with audio still due to play")
+	}
+}
+
+// --- grid-jump attribution ---
+
+// A jump is only actionable if you can tell what moved the grid. The most
+// important case to get right is our own entry snap: it moves the grid on
+// purpose and trips the same detector, so reporting it would send someone
+// hunting a session merge that never happened — and acting on it would
+// re-align a grid we just aligned.
+func TestGridJumpAttributesOurOwnSnap(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	le.OnGridSnap(2_600_000) // entry conformance just snapped +2.6s
+
+	now := time.Now()
+	// 5.22 beats at 120 BPM is 2610ms — the snap we just made.
+	j := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, now)
+
+	if !j.SelfCaused {
+		t.Fatalf("snap not recognised as self-caused: %+v", j)
+	}
+	if j.Cause != "our own grid snap" {
+		t.Fatalf("cause = %q", j.Cause)
+	}
+	// Consumed: one snap explains one jump, so a second jump in the same
+	// window is not silently absorbed by it.
+	j2 := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, now)
+	if j2.SelfCaused {
+		t.Fatal("one snap absorbed two jumps — a real one could vanish behind it")
+	}
+}
+
+// Recency alone must not credit a jump to our snap. A snap below the
+// detector's own threshold produces no jump at all, so crediting anything that
+// merely follows it would swallow a real merge and leave the grid unaligned
+// with nothing reported and nothing re-armed.
+func TestGridJumpDoesNotCreditAMismatchedSnap(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	le.OnGridSnap(60_000) // a 60ms snap: far too small to have caused a 2.6s jump
+
+	j := le.classifyGridJump(5.22, 120, 120, 3, jumpEvidence{}, 16, time.Now())
+
+	if j.SelfCaused {
+		t.Fatalf("a 60ms snap was credited with a 2610ms jump: %+v", j)
+	}
+	if j.Cause != "unattributed" {
+		t.Fatalf("cause = %q, want \"unattributed\"", j.Cause)
+	}
+}
+
+// The emit loop must withhold self-caused jumps from the session — the actual
+// guard, not just the classification behind it.
+func TestSelfCausedJumpIsWithheldFromTheSession(t *testing.T) {
+	le := newCaptureTestEngine(t)
+
+	le.noteGridJump(GridJump{Beats: 5.22, Cause: "our own grid snap", SelfCaused: true})
+	if _, ok := le.TakeGridJump(); ok {
+		t.Fatal("a self-caused jump was handed to the session")
+	}
+
+	le.noteGridJump(GridJump{Beats: 5.22, Cause: "Link session merge"})
+	got, ok := le.TakeGridJump()
+	if !ok {
+		t.Fatal("a real jump was not handed to the session")
+	}
+	if got.Cause != "Link session merge" {
+		t.Fatalf("cause = %q", got.Cause)
+	}
+	if _, ok := le.TakeGridJump(); ok {
+		t.Fatal("the jump was delivered twice")
+	}
+}
+
+func TestGridJumpAttributesPeerAndTempoChanges(t *testing.T) {
+	le := newCaptureTestEngine(t)
+
+	now := time.Now()
+
+	// A peer joined a moment before the jump — discovery and the timeline
+	// merge it causes are tens of ms apart, so the evidence must still count.
+	ev := jumpEvidence{peersChangedAt: now.Add(-200 * time.Millisecond), peersFrom: 3}
+	j := le.classifyGridJump(5.22, 120, 120, 4, ev, 16, now)
+	if j.Cause != "Link session merge" {
+		t.Fatalf("peer change cause = %q, want \"Link session merge\"", j.Cause)
+	}
+	if j.SelfCaused {
+		t.Fatal("a merge is not self-caused")
+	}
+	if j.Peers != 4 {
+		t.Fatalf("peers = %d, want 4", j.Peers)
+	}
+
+	// Evidence older than the window is not an explanation.
+	stale := jumpEvidence{peersChangedAt: now.Add(-time.Hour), peersFrom: 3}
+	if j := le.classifyGridJump(5.22, 120, 120, 4, stale, 16, now); j.Cause != "unattributed" {
+		t.Fatalf("hour-old peer change still credited: %q", j.Cause)
+	}
+
+	// Tempo moved, peer set steady.
+	evT := jumpEvidence{tempoChangedAt: now.Add(-100 * time.Millisecond), tempoFrom: 120}
+	j = le.classifyGridJump(2.0, 120, 124, 3, evT, 16, now)
+	if j.Cause != "session tempo change" {
+		t.Fatalf("tempo change cause = %q", j.Cause)
+	}
+
+	// Nothing observable — say so rather than guessing.
+	j = le.classifyGridJump(2.0, 120, 120, 3, jumpEvidence{}, 16, now)
+	if j.Cause != "unattributed" {
+		t.Fatalf("cause = %q, want \"unattributed\"", j.Cause)
+	}
+
+	// The magnitude conversions carry the units the log quotes.
+	j = le.classifyGridJump(4.0, 120, 120, 3, jumpEvidence{}, 16, now)
+	if math.Abs(j.Ms-2000) > 1 {
+		t.Fatalf("4 beats at 120 BPM = %.0f ms, want 2000", j.Ms)
+	}
+}
+
+// The jump detector compares the beat clock against elapsed time. Two ways
+// that goes wrong on a peer whose machine stalls or whose session tempo has
+// been pulled away by another peer — both of which cost an audible re-entry
+// snap when they produce a false positive.
+func TestGridJumpDetectionIsRobustToStallsAndTempoMismatch(t *testing.T) {
+	const tick = 0.005 // the emit loop's spacing
+
+	// Normal advance at the session tempo: not a jump.
+	if isGridJump(tick*120/60, tick, 120) {
+		t.Fatal("a normal tick read as a jump")
+	}
+
+	// A real discontinuity: 5.22 beats out of nowhere.
+	if !isGridJump(5.22, tick, 120) {
+		t.Fatal("a genuine 5.22-beat jump was missed")
+	}
+
+	// A stalled loop (GC, a starved scheduler): the beat advanced honestly
+	// over 5 seconds, but the expectation across such a gap is guesswork, so
+	// the detector must decline to judge rather than manufacture a jump.
+	if isGridJump(5*120/60, 5, 120) {
+		t.Fatal("a stalled tick was judged")
+	}
+
+	// The case the room tempo got wrong: the beat advances at the SESSION
+	// tempo, so judging it against the room's manufactures a jump out of an
+	// honest advance. It takes a wide tempo gap to exceed 0.5 beats inside the
+	// window the stall guard allows — a peer whose DAW sits at 160 while the
+	// room is on 120 does it in under a second.
+	gap := 0.9
+	beatsAt160 := gap * 160 / 60
+	if isGridJump(beatsAt160, gap, 160) {
+		t.Fatal("honest advance at the session tempo read as a jump")
+	}
+	if !isGridJump(beatsAt160, gap, 120) {
+		t.Fatal("test premise wrong: judging against the room tempo should have misfired here")
 	}
 }
