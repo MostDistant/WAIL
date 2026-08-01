@@ -1214,7 +1214,11 @@ func (e *linkAudioEngine) retirableLocked(key affinity.Key) (time.Duration, bool
 // grace shorter than one interval would otherwise cut audio mid-flight.
 // Boundary-aligned (called from onBoundary under mu) so a sink never closes
 // while topUpSinks is feeding it. Caller holds e.mu.
-func (e *linkAudioEngine) sweepRetiredLocked(now time.Time) {
+// roomLabel is the boundary being processed, which is also the horizon's
+// reference: this runs before the release loop advances each scheduler, so
+// reading the cursor from the schedulers here would measure the *previous*
+// boundary and retire one interval sooner than intended.
+func (e *linkAudioEngine) sweepRetiredLocked(now time.Time, roomLabel int64) {
 	for key, st := range e.emit {
 		grace, ok := e.retirableLocked(key)
 		if !ok {
@@ -1227,17 +1231,24 @@ func (e *linkAudioEngine) sweepRetiredLocked(now time.Time) {
 		// sender whose labels run ahead of our playout leaves stragglers
 		// buffered that far ahead, and Drop only clears at or below the release
 		// cursor — so asking for an empty reassembler keeps a dead channel
-		// published for as many boundaries as that peer is mislabeled, which is
-		// unbounded. Anything at or below the horizon still blocks: playout
-		// releases label−D and drops one boundary later, so the interval that
+		// published for as many boundaries as that peer is mislabeled. Anything
+		// at or below the horizon still blocks: an interval is released at
+		// boundary index+D and dropped one boundary later, so the interval that
 		// just played is still held here and must not be cut.
+		backlog := 0
 		if min, buffered := st.reasm.MinIndex(); buffered {
-			playing, started := st.sched.Playing()
-			if !started || min <= playing+st.sched.Offset()+retireHorizonIntervals {
+			if min <= roomLabel+retireHorizonIntervals {
 				continue
 			}
+			// Past the horizon: this audio is not imminent, and retiring
+			// discards it. Count it so the log can say so — silently dropping
+			// a decoded backlog is exactly the kind of thing that should not
+			// have to be inferred later.
+			if max, ok := st.reasm.MaxIndex(); ok {
+				backlog = int(max-min) + 1
+			}
 		}
-		e.retireStreamLocked(key, st)
+		e.retireStreamLocked(key, st, backlog)
 	}
 	// Forget intent for identities with nothing published left, so the map
 	// tracks the room rather than growing for the session's lifetime.
@@ -1258,7 +1269,11 @@ func (e *linkAudioEngine) sweepRetiredLocked(now time.Time) {
 // retireStreamLocked unpublishes one stream: its Link Audio channel leaves the
 // LAN (so every WAIL Receive frees the port it held), its counters fold into
 // the engine's retired totals, and it drops out of e.emit. Caller holds e.mu.
-func (e *linkAudioEngine) retireStreamLocked(key affinity.Key, st *emitStream) {
+// backlog is how many buffered intervals go with it — nonzero only on the
+// horizon path, where the stream still held audio too far ahead to be
+// imminent. The log has to name that, or a discarded decode looks from the
+// outside like the sender simply stopping.
+func (e *linkAudioEngine) retireStreamLocked(key affinity.Key, st *emitStream, backlog int) {
 	for _, sk := range st.sinks {
 		sk.Close()
 	}
@@ -1271,9 +1286,14 @@ func (e *linkAudioEngine) retireStreamLocked(key affinity.Key, st *emitStream) {
 	e.retired.EmitSinkWriteRejected += st.sinkWriteRejected.Load()
 	e.retired.OpusDecodeFailures += st.decodeFailures.Load()
 	delete(e.emit, key)
+	name := affinity.FormatRoomChannelName(st.lastDisplayName, streamLabel(st.lastStreamName, key.Stream))
+	if backlog > 0 {
+		log.Printf("[audio] retired Link Audio channel %q (%s stream %d — sender stopped publishing it; discarded %d buffered interval(s) labeled too far ahead to play)",
+			name, key.Identity, key.Stream, backlog)
+		return
+	}
 	log.Printf("[audio] retired Link Audio channel %q (%s stream %d — sender stopped publishing it)",
-		affinity.FormatRoomChannelName(st.lastDisplayName, streamLabel(st.lastStreamName, key.Stream)),
-		key.Identity, key.Stream)
+		name, key.Identity, key.Stream)
 }
 
 // Health sums the per-channel and per-stream diagnostic counters. Capture-side
@@ -1408,7 +1428,7 @@ func (e *linkAudioEngine) onBoundary(cfg interval.Config, tempo float64, localId
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.sweepRetiredLocked(time.Now())
+	e.sweepRetiredLocked(time.Now(), roomLabel)
 	for _, st := range e.emit {
 		release, advanced := st.sched.OnBoundary(roomLabel)
 		if !advanced {

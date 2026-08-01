@@ -349,10 +349,12 @@ func drainPlayout(le *linkAudioEngine) {
 	}
 }
 
-func sweep(le *linkAudioEngine, at time.Time) {
+// sweep runs the retirement pass for the boundary labeled roomLabel, the same
+// way onBoundary does: before any scheduler has advanced for that boundary.
+func sweep(le *linkAudioEngine, at time.Time, roomLabel int64) {
 	le.mu.Lock()
 	defer le.mu.Unlock()
-	le.sweepRetiredLocked(at)
+	le.sweepRetiredLocked(at, roomLabel)
 }
 
 func hasStream(le *linkAudioEngine, identity string, streamID uint16) bool {
@@ -379,7 +381,7 @@ func TestEmitStreamRetiredWhenSenderDropsIt(t *testing.T) {
 
 	// Still buffered: retiring here would cut the tail off the last interval,
 	// which playout is still holding (release runs D boundaries behind).
-	sweep(le, past)
+	sweep(le, past, retireTestInterval+10)
 	if !hasStream(le, "id-A", 1) {
 		t.Fatal("retired a stream that still had audio buffered — that truncates the last interval")
 	}
@@ -387,12 +389,12 @@ func TestEmitStreamRetiredWhenSenderDropsIt(t *testing.T) {
 	drainPlayout(le)
 
 	// Inside the grace, frames could still be in flight.
-	sweep(le, time.Now())
+	sweep(le, time.Now(), retireTestInterval+10)
 	if !hasStream(le, "id-A", 1) {
 		t.Fatal("retired inside the grace period")
 	}
 
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second), retireTestInterval+10)
 	if hasStream(le, "id-A", 1) {
 		t.Fatal("dropped stream still published after its grace expired")
 	}
@@ -408,7 +410,7 @@ func TestEmitStreamsRetiredWhenSenderDeclaresNone(t *testing.T) {
 	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
 	le.SetPeerStreams("id-A", map[uint16]bool{})
 	drainPlayout(le)
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second), retireTestInterval+10)
 	if len(le.emit) != 0 {
 		t.Fatalf("expected every stream retired, %d still published", len(le.emit))
 	}
@@ -423,11 +425,11 @@ func TestDepartedPeerKeepsChannelsThroughLongerGrace(t *testing.T) {
 	le.DropPeer("id-A")
 	drainPlayout(le)
 
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second), retireTestInterval+10)
 	if !hasStream(le, "id-A", 0) {
 		t.Fatal("a departed peer's channel went away on the short grace — a brief reconnect loses routing")
 	}
-	sweep(le, time.Now().Add(retireGracePeerGone+time.Second))
+	sweep(le, time.Now().Add(retireGracePeerGone+time.Second), retireTestInterval+10)
 	if hasStream(le, "id-A", 0) {
 		t.Fatal("departed peer's channel still published after the peer-gone grace")
 	}
@@ -442,7 +444,7 @@ func TestRejoinInsideGraceKeepsTheSameChannel(t *testing.T) {
 	le.DropPeer("id-A")
 	le.SetPeerStreams("id-A", map[uint16]bool{0: true}) // rejoined, still sending stream 0
 	drainPlayout(le)
-	sweep(le, time.Now().Add(24*time.Hour))
+	sweep(le, time.Now().Add(24*time.Hour), retireTestInterval+10)
 
 	st, ok := le.emit[affinity.Key{Identity: "id-A", Stream: 0}]
 	if !ok {
@@ -459,7 +461,7 @@ func TestStreamWithoutDeclaredIntentIsNeverRetired(t *testing.T) {
 	le := newCaptureTestEngine(t)
 	feedRemoteStream(t, le, "id-A", "Alice", "guitar", 0)
 	drainPlayout(le)
-	sweep(le, time.Now().Add(24*time.Hour))
+	sweep(le, time.Now().Add(24*time.Hour), retireTestInterval+10)
 	if !hasStream(le, "id-A", 0) {
 		t.Fatal("retired a stream with no declared intent")
 	}
@@ -478,7 +480,7 @@ func TestRetirementKeepsHealthTotalsMonotonic(t *testing.T) {
 
 	le.SetPeerStreams("id-A", map[uint16]bool{})
 	drainPlayout(le)
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second), retireTestInterval+10)
 
 	if got := le.Health().EmitFramesMissingAtPlay; got != 7 {
 		t.Fatalf("total dropped to %d after retiring the stream, want 7 retained", got)
@@ -494,7 +496,7 @@ func TestPeerIdKeyedStreamsAreRetirable(t *testing.T) {
 	feedRemoteStream(t, le, "peer-id-P", "", "", 0) // no Hello yet / peer already removed
 	le.DropPeer("peer-id-P")
 	drainPlayout(le)
-	sweep(le, time.Now().Add(retireGracePeerGone+time.Second))
+	sweep(le, time.Now().Add(retireGracePeerGone+time.Second), retireTestInterval+10)
 	if hasStream(le, "peer-id-P", 0) {
 		t.Fatal("a stream published under the peer-id fallback never retires")
 	}
@@ -509,7 +511,7 @@ func TestClearPeerIntentMakesStreamsWantedAgain(t *testing.T) {
 	le.DropPeer("id-A:loopback")
 	le.ClearPeerIntent("id-A:loopback")
 	drainPlayout(le)
-	sweep(le, time.Now().Add(24*time.Hour))
+	sweep(le, time.Now().Add(24*time.Hour), retireTestInterval+10)
 	if !hasStream(le, "id-A:loopback", 0) {
 		t.Fatal("cleared intent still retired the stream")
 	}
@@ -522,14 +524,13 @@ func TestClearPeerIntentMakesStreamsWantedAgain(t *testing.T) {
 func TestFarAheadStragglerDoesNotBlockRetirement(t *testing.T) {
 	le := newCaptureTestEngine(t)
 	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 5000)
-	st := le.emit[affinity.Key{Identity: "id-A", Stream: 0}]
-	if st == nil {
+	if le.emit[affinity.Key{Identity: "id-A", Stream: 0}] == nil {
 		t.Fatal("stream not published")
 	}
-	st.sched.OnBoundary(3) // local playout is way behind the sender's labels
 
+	// Boundary 3: the straggler at 5000 sits far past the horizon (3+2).
 	le.SetPeerStreams("id-A", map[uint16]bool{})
-	sweep(le, time.Now().Add(retireGraceDropped+time.Second))
+	sweep(le, time.Now().Add(retireGraceDropped+time.Second), 3)
 
 	if hasStream(le, "id-A", 0) {
 		t.Fatal("a straggler beyond the playout horizon still blocks retirement")
@@ -542,15 +543,14 @@ func TestFarAheadStragglerDoesNotBlockRetirement(t *testing.T) {
 func TestImminentAudioStillBlocksRetirement(t *testing.T) {
 	le := newCaptureTestEngine(t)
 	feedRemoteStreamAt(t, le, "id-A", "Alice", "guitar", 0, 5)
-	st := le.emit[affinity.Key{Identity: "id-A", Stream: 0}]
-	if st == nil {
+	if le.emit[affinity.Key{Identity: "id-A", Stream: 0}] == nil {
 		t.Fatal("stream not published")
 	}
-	// playing = 3-D = 2, so interval 5 sits exactly on the horizon (D+2).
-	st.sched.OnBoundary(3)
 
+	// Boundary 3: interval 5 sits exactly on the horizon (3+2), the edge that
+	// must still hold the channel open.
 	le.SetPeerStreams("id-A", map[uint16]bool{})
-	sweep(le, time.Now().Add(24*time.Hour))
+	sweep(le, time.Now().Add(24*time.Hour), 3)
 
 	if !hasStream(le, "id-A", 0) {
 		t.Fatal("retired a stream with audio still due to play")
