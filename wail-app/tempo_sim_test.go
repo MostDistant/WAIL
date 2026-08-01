@@ -523,8 +523,12 @@ func runSim(cfg simConfig) simResult {
 	for _, p := range relay.peers {
 		res.peers = append(res.peers, p.result())
 	}
-	if len(relay.peers) == 2 {
-		res.heardSkewMaxMs = heardSkewMaxMs(relay.peers[0], relay.peers[1])
+	for i := range relay.peers {
+		for j := i + 1; j < len(relay.peers); j++ {
+			if s := heardSkewMaxMs(relay.peers[i], relay.peers[j]); s > res.heardSkewMaxMs {
+				res.heardSkewMaxMs = s
+			}
+		}
 	}
 	return res
 }

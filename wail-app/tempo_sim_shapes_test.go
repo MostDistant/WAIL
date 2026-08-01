@@ -71,6 +71,31 @@ func wobble(low, high float64, dwell time.Duration) func(*simPeer, int) {
 	}
 }
 
+// lanLinkDevice models the third participant a real LAN usually has: another
+// Ableton Link device alongside the DAW and WAIL — an Ableton Move, a Missing
+// Link bridging an analogue clock, a Torso T-1. It measures its own clock and
+// re-asserts the result as the session tempo, so Link arbitrates continuously
+// and the tempo the DAW and WAIL see is dragged toward the device's number every
+// poll. Nobody is touching a tempo control.
+//
+// This is what the field "wobble" almost certainly was. A square wave between
+// two setpoints — which is how this harness first modelled it — is a user
+// toggling the tempo, and behaves differently: the tug never stops, so WAIL's
+// nudges are overwritten before they can accumulate. The amplitude fits too;
+// 0.1 BPM is 833ppm, far too large for a crystal (50ppm) but unremarkable for a
+// measured clock being republished.
+func lanLinkDevice(nominal, amplitude, convergeRate float64, wanderSteps int) func(*simPeer, int) {
+	return func(p *simPeer, step int) {
+		// Two incommensurate components, so the wander does not land on a tidy
+		// repeating cycle the way a square wave does. Deterministic: no RNG.
+		t := float64(step)
+		w := math.Sin(2*math.Pi*t/float64(wanderSteps)) +
+			0.5*math.Sin(2*math.Pi*t/(float64(wanderSteps)*0.37))
+		want := nominal + amplitude*w/1.5
+		p.link.disturb(p.link.bpm + (want-p.link.bpm)*convergeRate)
+	}
+}
+
 // knobTurn: one deliberate change, held forever after — a human's hand, not a
 // disturbance. Nothing re-asserts it, so anything that moves it away wins.
 func knobTurn(at int, to float64) func(*simPeer, int) {
@@ -472,4 +497,77 @@ func TestTempoSimWobbleSweep(t *testing.T) {
 				res.peers[0].maxSteerFraction, res.peers[0].endBPM)
 		}
 	}
+}
+
+// TestTempoSimWobbleRoomTempo asks whether the wobble's harm comes from its
+// excursions or from the room sitting at the wrong centre. Against a room at
+// 120 the low excursion accrues error while the high one cannot recover it (our
+// nudge is overwritten within a poll), so the error ratchets one way. Against a
+// room at the wobble's own mean the two excursions should cancel instead.
+func TestTempoSimWobbleRoomTempo(t *testing.T) {
+	oneMin := stepsIn(time.Minute)
+	for _, room := range []float64{120.0, 119.95} {
+		res := runSim(simConfig{
+			name: fmt.Sprintf("wobble-room-%.2f", room), duration: simRun,
+			roomBPM: room, declaredOnly: true,
+			peers: []simPeerSpec{
+				{name: "A-wobble", beat0: 3.7, bpm: room, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: afterStep(oneMin, wobble(119.9, 120.0, 2*time.Second))},
+				{name: "B", beat0: 100.4, bpm: room, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		})
+		pr := res.peers[0]
+		t.Logf("room=%.2f  maxδ=%.1fms endδ=%.1fms meanδ=%.1fms drift=%.1f%% heardSkew=%.1fms",
+			room, pr.maxAbsDeltaMs, pr.endAbsDeltaMs, pr.meanAbsDeltaMs, pr.timeDriftedPct, res.heardSkewMaxMs)
+	}
+}
+
+// TestTempoSimLanDeviceTug replays the real LAN topology — WAIL, a DAW, and a
+// third Link device republishing its own measured clock — and asks the two
+// questions that decide whether the room should follow a peer's actual mean.
+//
+//  1. Does following help, with a continuous tug rather than a square wave?
+//  2. With three peers whose devices sit at different tempos, does following
+//     ping-pong the room the way the two-insistent-LANs flap does?
+func TestTempoSimLanDeviceTug(t *testing.T) {
+	oneMin := stepsIn(time.Minute)
+	// 119.90..120.00, mean 119.95 — the field wobble, as a tug.
+	device := func(nominal float64) func(*simPeer, int) {
+		return afterStep(oneMin, lanLinkDevice(nominal, 0.05, 0.02, 250))
+	}
+
+	t.Log("--- one wobbling LAN, room at 120 vs at the device's mean")
+	for _, room := range []float64{120.0, 119.95} {
+		res := runSim(simConfig{
+			name: fmt.Sprintf("tug-room-%.2f", room), duration: simRun,
+			roomBPM: room, declaredOnly: true,
+			peers: []simPeerSpec{
+				{name: "A-tugged", beat0: 3.7, bpm: room, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+					disturb: device(119.95)},
+				{name: "B", beat0: 100.4, bpm: room, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000},
+			},
+		})
+		pr := res.peers[0]
+		t.Logf("room=%.2f  maxδ=%.1fms endδ=%.1fms meanδ=%.1fms drift=%.1f%% heardSkew=%.1fms",
+			room, pr.maxAbsDeltaMs, pr.endAbsDeltaMs, pr.meanAbsDeltaMs, pr.timeDriftedPct, res.heardSkewMaxMs)
+	}
+
+	t.Log("--- three LANs, devices at 119.90 / 120.00 / 120.10, room follows")
+	res := runSim(simConfig{
+		name: "tug-three-way", duration: simRun, roomBPM: 120,
+		peers: []simPeerSpec{
+			{name: "A@119.90", beat0: 3.7, baseOffsetUs: -2_000_000, upUs: 25_000, downUs: 25_000,
+				disturb: device(119.90)},
+			{name: "B@120.00", beat0: 100.4, baseOffsetUs: 5_000_000, upUs: 30_000, downUs: 30_000,
+				disturb: device(120.00)},
+			{name: "C@120.10", beat0: -8.25, baseOffsetUs: 1_500_000, upUs: 20_000, downUs: 20_000,
+				disturb: device(120.10)},
+		},
+	})
+	for _, pr := range res.peers {
+		t.Logf("  %-10s maxδ=%.1fms meanδ=%.1fms drift=%.1f%% reports=%d endBPM=%.4f",
+			pr.name, pr.maxAbsDeltaMs, pr.meanAbsDeltaMs, pr.timeDriftedPct, pr.reports, pr.endBPM)
+	}
+	t.Logf("  room re-anchors=%d roomΔ=%.3f roomEnd=%.4f heardSkewMax=%.1fms",
+		res.tempos, res.roomExcursionBPM, res.roomEndBPM, res.heardSkewMaxMs)
 }
