@@ -37,13 +37,12 @@
 #include "wail_link.h"
 #include "wail_thread.h" // wail_thread / wail_mutex / wail_sleep_ms
 
-// Identifies the running binary in the log. The version alone can't: a DAW
-// keeps a bundle mapped for the life of the process, so the stale case is
-// "same version, older build" — the compile time is what separates them.
+// Names the release in the log; lb_module_stamp supplies which build of it is
+// actually loaded (the version alone can't — the stale case is "same version,
+// older build", which is every case during development).
 #ifndef WAIL_PLUGIN_VERSION
 #define WAIL_PLUGIN_VERSION "unknown"
 #endif
-#define WAIL_PLUGIN_BUILT __DATE__ " " __TIME__
 
 #define LBR_SLOTS 16
 #define LBR_RING_FRAMES 32768 // power of two; ~0.68s stereo @48k
@@ -514,11 +513,16 @@ static bool CLAP_ABI lbr_activate(const clap_plugin_t *plugin, double sr, uint32
    self->link = lb_create(120.0);
    lb_enable(self->link, true);
    lb_enable_audio(self->link, true);
+   char stamp[64], modpath[512];
+   lb_module_stamp(stamp, sizeof(stamp), modpath, sizeof(modpath));
    lbr_log(self, "=== recv activated: build %s (%s) host=\"%s %s\" sr=%.0f%s ===",
-           WAIL_PLUGIN_VERSION, WAIL_PLUGIN_BUILT,
+           WAIL_PLUGIN_VERSION, stamp,
            self->host && self->host->name ? self->host->name : "?",
            self->host && self->host->version ? self->host->version : "?", sr,
            self->rate_ok ? "" : " — NOT 48k: outputting silence");
+   // Which copy the host actually loaded — installed bundle, build tree, or a
+   // stale duplicate — is the other half of "is this the build I think it is".
+   lbr_log(self, "    loaded from %s", modpath);
    // Fresh log file, so forget what the previous activation had recorded —
    // otherwise an unchanged channel set means the reopened log never states
    // the state it exists to record.

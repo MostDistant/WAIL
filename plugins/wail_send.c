@@ -32,6 +32,11 @@
 // per setup (same class as the recv path's output-path constant).
 #define LBS_STAMP_AHEAD_US 10000
 
+// Names the release; lb_module_stamp supplies which build of it is loaded.
+#ifndef WAIL_PLUGIN_VERSION
+#define WAIL_PLUGIN_VERSION "unknown"
+#endif
+
 typedef struct {
    clap_plugin_t      plugin;
    const clap_host_t *host;
@@ -46,7 +51,15 @@ typedef struct {
    char track_name[CLAP_NAME_SIZE];
 
    FILE *log;
-   bool  logged_commit;
+
+   // First-commit result, handed from the audio thread to the main thread to
+   // write: lbs_log does a buffered write plus an fflush, which process() must
+   // not do. Published by commit_pending; process() sets commit_ok before the
+   // release store and never touches it again.
+   bool         logged_commit;
+   _Atomic bool commit_pending;
+   bool         commit_ok;
+   uint32_t     commit_frames;
 } lb_send;
 
 static void lbs_log(lb_send *self, const char *fmt, ...) {
@@ -111,7 +124,10 @@ static clap_process_status CLAP_ABI lbs_process(const clap_plugin_t *plugin, con
    lb_release(st);
    if (!self->logged_commit) {
       self->logged_commit = true;
-      lbs_log(self, "first commit: %s (frames=%u)", ok ? "ok" : "WITHHELD (no source subscribed?)", n);
+      self->commit_ok = ok;
+      self->commit_frames = n;
+      atomic_store_explicit(&self->commit_pending, true, memory_order_release);
+      if (self->host && self->host->request_callback) self->host->request_callback(self->host);
    }
    return CLAP_PROCESS_CONTINUE;
 }
@@ -135,11 +151,15 @@ static bool CLAP_ABI lbs_activate(const clap_plugin_t *plugin, double sr, uint32
    lb_enable_audio(self->link, true);
    refresh_track_name(self);
    const char *name = self->track_name[0] ? self->track_name : "WAIL Send";
+   char stamp[64], modpath[512];
+   lb_module_stamp(stamp, sizeof(stamp), modpath, sizeof(modpath));
    if (self->rate_ok) {
       self->sink = lb_sink_create(self->link, name, 16384);
-      lbs_log(self, "=== send activated: host=\"%s %s\" sr=%.0f channel=\"%s\" ===",
+      lbs_log(self, "=== send activated: build %s (%s) host=\"%s %s\" sr=%.0f channel=\"%s\" ===",
+              WAIL_PLUGIN_VERSION, stamp,
               self->host && self->host->name ? self->host->name : "?",
               self->host && self->host->version ? self->host->version : "?", sr, name);
+      lbs_log(self, "    loaded from %s", modpath);
    } else {
       lbs_log(self, "!!! send activated at sr=%.0f — Link Audio is 48kHz-only; "
                     "this instance passes audio but publishes NOTHING "
@@ -212,7 +232,11 @@ static const void *CLAP_ABI lbs_get_extension(const clap_plugin_t *p, const char
    return NULL;
 }
 static void CLAP_ABI lbs_main_thread(const clap_plugin_t *p) {
-   (void)p;
+   lb_send *self = p->plugin_data;
+   if (!atomic_load_explicit(&self->commit_pending, memory_order_acquire)) return;
+   atomic_store_explicit(&self->commit_pending, false, memory_order_relaxed);
+   lbs_log(self, "first commit: %s (frames=%u)",
+           self->commit_ok ? "ok" : "WITHHELD (no source subscribed?)", self->commit_frames);
 }
 
 static const char *lbs_features[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY, NULL};
