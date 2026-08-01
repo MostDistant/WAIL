@@ -965,3 +965,38 @@ func TestGridJumpReRunsEntryConformance(t *testing.T) {
 		t.Fatalf("expected exactly one entry snap after the jump, got %v", f.snaps)
 	}
 }
+
+// Within one bucket the reported δ must track the real one. Emitting only on a
+// bucket change froze the number at whatever δ was when the state last
+// changed, so a grid recovering from 2.6s to 60ms still read 2605ms.
+func TestReportedErrorTracksDeltaInsideAState(t *testing.T) {
+	now := time.Now()
+	s, f, emits := newSteerer(16_600_000) // 2.6s late — "drifted"
+	observe(s, now)
+	now = now.Add(snapSettle + time.Second)
+	f.state.BPM = 130 // gate shut, so nothing steers and δ is ours to script
+	s.Tick(16, now)
+	if lastEmit(emits) != "drifted" {
+		t.Fatalf("expected drifted, got %q", lastEmit(emits))
+	}
+
+	// Still drifted, but much closer than before.
+	f.timeAtBeat = 14_060_000 // 60ms late
+	*emits = nil
+	s.Tick(16, now.Add(time.Second))
+
+	if len(*emits) == 0 {
+		t.Fatal("δ improved from 2.6s to 60ms inside one bucket and nothing was reported")
+	}
+	if errMs := (*emits)[len(*emits)-1].errMs; math.Abs(errMs-60) > 5 {
+		t.Fatalf("reported δ = %.1f ms, want ~60", errMs)
+	}
+
+	// Jitter below the step must not spam the UI.
+	f.timeAtBeat = 14_062_000 // 2ms of movement
+	*emits = nil
+	s.Tick(16, now.Add(2*time.Second))
+	if len(*emits) != 0 {
+		t.Fatalf("2ms of jitter emitted %d events", len(*emits))
+	}
+}

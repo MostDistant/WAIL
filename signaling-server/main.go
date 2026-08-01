@@ -769,6 +769,13 @@ func (h *hub) broadcastLog(room, peerID string, c *conn, msg clientMsg) {
 	if r == nil {
 		return
 	}
+	// Warnings and errors also land in the relay's own log. A client-side
+	// fault that hits a whole room (a Link session merge, say) is otherwise
+	// only visible on whichever machine happened to notice it — and only if
+	// someone thinks to collect that machine's log afterwards.
+	if msg.Level == "warn" || msg.Level == "error" {
+		log.Printf("room %s peer %s %s [%s] %s", room, peerID, msg.Level, msg.Target, msg.Message)
+	}
 	raw, err := json.Marshal(map[string]any{
 		"type": "log", "from": peerID, "level": msg.Level,
 		"target": msg.Target, "message": msg.Message, "timestamp_us": msg.TimestampUs,

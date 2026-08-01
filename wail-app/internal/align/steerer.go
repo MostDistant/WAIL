@@ -42,6 +42,11 @@ const (
 	// every two seconds in the field. Settling stays immediate — restoring
 	// the room tempo is always safe.
 	slewPersistenceTicks = 2
+	// emitDeltaUs is how far δ must move inside one state bucket before the
+	// UI is told again. Below it the number is jitter; above it the displayed
+	// error is stale enough to mislead. The UI only shows the figure past
+	// 10 ms, so this is the granularity that reads as "live".
+	emitDeltaUs = 10_000
 )
 
 // State is the slice of Link session state the steerer samples. Beat is
@@ -98,6 +103,7 @@ type Steerer struct {
 	slewPendingDir   int     // sign of the δ being confirmed (0 = none)
 	slewPendingCount int     // consecutive same-direction ticks past the deadband
 	lastState        string
+	lastEmittedUs    int64 // δ at the last emit — see emitState
 	currentBPM       float64
 	anchorIndex      int64
 	haveRoomAnchor   bool
@@ -513,12 +519,18 @@ func (s *Steerer) cancelSlew() {
 	s.slewPendingDir, s.slewPendingCount = 0, 0
 }
 
+// emitState reports alignment to the UI on a bucket change, and also when δ
+// itself has moved materially inside the same bucket. Bucket-only was a trap:
+// the reported error froze at whatever δ was when the state last changed, so a
+// grid recovering from 2.6 s to 60 ms still read "drifted 2605ms" — a number
+// with no relationship to the present.
 func (s *Steerer) emitState(deltaUs int64) {
 	state := stateName(deltaUs)
-	if state == s.lastState {
+	moved := abs64(deltaUs-s.lastEmittedUs) >= emitDeltaUs
+	if state == s.lastState && !moved {
 		return
 	}
-	s.lastState = state
+	s.lastState, s.lastEmittedUs = state, deltaUs
 	s.emit(state, float64(deltaUs)/1000)
 }
 

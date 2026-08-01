@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 // AudioEngine is WAIL's Link Audio audio path (ADR-0001/0002): capture subscribes
 // to local Link Audio channels and ships them as WAIF over the relay; playback
 // republishes remote streams as Link Audio channels one interval late. It
@@ -35,10 +37,11 @@ type AudioEngine interface {
 	// channel across a reconnect blip.
 	DropPeer(identity string)
 	// TakeGridJump reports (and clears) a local Link grid jump detected since
-	// the last call — a session merge or transport reset moved the beat
-	// timeline out from under us. The session re-arms grid alignment on it;
-	// the slew cannot walk back a jump of whole beats.
-	TakeGridJump() (beats float64, ok bool)
+	// the last call — something moved the beat timeline out from under us.
+	// The session re-arms grid alignment on it (the slew cannot walk back a
+	// jump of whole beats) and reports it to the room. Jumps WAIL caused
+	// itself are attributed and withheld rather than reported.
+	TakeGridJump() (GridJump, bool)
 	// SetRoomAnchor applies a fresh relay interval_anchor: aligns the local→room
 	// interval labeler and adopts the room tempo/config.
 	SetRoomAnchor(currentIndex int64, bpm float64, bars uint32, quantum float64)
@@ -89,6 +92,25 @@ type AudioEngine interface {
 	// diffs snapshots to surface them in the log panel and Network tab.
 	Health() EngineHealth
 }
+
+// GridJump is a detected discontinuity in the local Link beat timeline,
+// with what the engine could attribute it to. The cause is the point: a jump
+// is only actionable if you can tell a peer joining from a tempo change from
+// something WAIL did to itself.
+type GridJump struct {
+	Beats      float64 // signed jump, in beats
+	Ms         float64 // the same jump in milliseconds at the room tempo
+	Intervals  int64   // ≈ how many interval boundaries that is
+	Peers      uint64  // LAN Link peer count when it happened
+	Cause      string  // short attribution, for the headline
+	Detail     string  // the evidence behind it
+	SelfCaused bool    // WAIL moved its own grid (an entry snap) — not a fault
+}
+
+// gridSnapAttributionWindow is how recently our own snap must have run for a
+// detected jump to be credited to it. Comfortably longer than the poll
+// interval, far shorter than the gap between real merges.
+const gridSnapAttributionWindow = 2 * time.Second
 
 // EngineHealth is a snapshot of cumulative audio-path diagnostics.
 type EngineHealth struct {

@@ -150,12 +150,17 @@ type linkAudioEngine struct {
 	metronome   *metronomeStream
 	metronomeOn atomic.Bool
 
-	// Local-grid jump handoff: the emit loop detects the beat discontinuity,
-	// the session goroutine consumes it (TakeGridJump) and re-arms grid
-	// alignment. Two atomics rather than a lock — the magnitude is only for
-	// the log, so reading it a tick stale would be harmless.
-	gridJumpBeats   atomic.Uint64 // math.Float64bits of the jump, in beats
-	gridJumpPending atomic.Bool
+	// Local-grid jump handoff: the emit loop detects the beat discontinuity
+	// and attributes it; the session goroutine consumes it (TakeGridJump),
+	// re-arms grid alignment, and reports it to the room.
+	gridJump atomic.Pointer[GridJump]
+
+	// Our own entry snap moves the grid deliberately, which trips the same
+	// detector. Recording it is what separates "we did this" from "something
+	// out there did this" — the difference between a wasted re-alignment
+	// cycle and a real one.
+	lastSnapAtNs    atomic.Int64
+	lastSnapDeltaUs atomic.Int64
 
 	// curRoomIdx is the room index of the local interval currently in progress
 	// (emit loop publishes, HandleRemoteAudio reads) for label-offset
@@ -514,6 +519,10 @@ func (e *linkAudioEngine) RoomIndex(localIndex int64) (int64, bool) {
 // frames skip silently, never counting as underruns (the join-time ~500k
 // "underrun frames" were exactly this setup event misattributed as loss).
 func (e *linkAudioEngine) OnGridSnap(deltaUs int64) {
+	// Recorded before the early return: a backward snap moves the grid too,
+	// so it must still be attributable when the detector sees it.
+	e.lastSnapAtNs.Store(time.Now().UnixNano())
+	e.lastSnapDeltaUs.Store(deltaUs)
 	if deltaUs <= 0 {
 		return // backward jump: the playhead pauses; nothing to skip
 	}
@@ -1287,11 +1296,46 @@ func (e *linkAudioEngine) retireStreamLocked(key affinity.Key, st *emitStream) {
 // clearing it. The session polls this rather than the engine calling into the
 // steerer directly: the detector runs on the emit loop, and alignment state
 // belongs to the session goroutine.
-func (e *linkAudioEngine) TakeGridJump() (beats float64, ok bool) {
-	if !e.gridJumpPending.Swap(false) {
-		return 0, false
+func (e *linkAudioEngine) TakeGridJump() (GridJump, bool) {
+	j := e.gridJump.Swap(nil)
+	if j == nil {
+		return GridJump{}, false
 	}
-	return math.Float64frombits(e.gridJumpBeats.Load()), true
+	return *j, true
+}
+
+// classifyGridJump attributes a beat discontinuity to whatever evidence the
+// tick carries. Order matters: our own snap first (we know we did it), then a
+// changed peer set (a session merge re-phases the timeline), then a tempo
+// move. Anything left is reported as unattributed rather than guessed at.
+func (e *linkAudioEngine) classifyGridJump(beats, roomBPM, sessionBPM, lastSessionBPM float64, peers, lastPeers uint64, bpi float64) GridJump {
+	ms := 0.0
+	if roomBPM > 0 {
+		ms = beats * 60_000 / roomBPM
+	}
+	j := GridJump{Beats: beats, Ms: ms, Intervals: int64(math.Round(beats / bpi)), Peers: peers}
+
+	snapAge := time.Since(time.Unix(0, e.lastSnapAtNs.Load()))
+	switch {
+	case e.lastSnapAtNs.Load() != 0 && snapAge < gridSnapAttributionWindow:
+		j.SelfCaused = true
+		j.Cause = "our own grid snap"
+		j.Detail = fmt.Sprintf("entry conformance snapped %+.0f ms %s ago; peers=%d tempo=%.2f BPM",
+			float64(e.lastSnapDeltaUs.Load())/1000, snapAge.Round(time.Millisecond), peers, sessionBPM)
+	case peers != lastPeers:
+		j.Cause = "Link session merge"
+		j.Detail = fmt.Sprintf("LAN peer count %d→%d — a joining peer re-phased the shared timeline; tempo=%.2f BPM",
+			lastPeers, peers, sessionBPM)
+	case math.Abs(sessionBPM-lastSessionBPM) > 0.01:
+		j.Cause = "session tempo change"
+		j.Detail = fmt.Sprintf("session tempo %.2f→%.2f BPM (room %.2f); peers=%d",
+			lastSessionBPM, sessionBPM, roomBPM, peers)
+	default:
+		j.Cause = "unattributed"
+		j.Detail = fmt.Sprintf("no peer or tempo change this tick (peers=%d, tempo=%.2f BPM) — a transport reset or an external ForceBeatAtTime",
+			peers, sessionBPM)
+	}
+	return j
 }
 
 // Health sums the per-channel and per-stream diagnostic counters. Capture-side
@@ -1362,6 +1406,8 @@ func (e *linkAudioEngine) emitLoop() {
 	haveLast := false
 	var lastBeat, lastBeatAt float64
 	haveLastBeat := false
+	var lastPeers uint64
+	var lastSessionBPM float64
 
 	for {
 		select {
@@ -1370,6 +1416,10 @@ func (e *linkAudioEngine) emitLoop() {
 		case <-t.C:
 			e.link.CaptureAppSessionState(ss)
 			clockMicros := e.link.ClockMicros()
+			// Attribution evidence, sampled every tick so a jump can be
+			// explained rather than merely reported.
+			peers := e.link.NumPeers()
+			sessionBPM := ss.Tempo()
 
 			e.mu.Lock()
 			cfg := e.cfg
@@ -1395,17 +1445,20 @@ func (e *linkAudioEngine) emitLoop() {
 			if haveLastBeat {
 				expected := (float64(clockMicros)/1e6 - lastBeatAt) * tempo / 60.0
 				if d := localBeat - lastBeat; math.Abs(d-expected) > 0.5 {
-					log.Printf("[audio] WARN: local Link beat jumped %+.2f beats (expected %+.2f from elapsed time) — room-label offset stale until the next anchor (≈%+d intervals of potential shift)",
-						d, expected, int64(math.Round(d/bpi)))
-					// Hand it to the session so grid alignment can re-enter
-					// conformance: a jump of beats is far past what the slew
-					// can walk back, so without a re-snap the grid stays off
-					// for the rest of the session.
-					e.gridJumpBeats.Store(math.Float64bits(d))
-					e.gridJumpPending.Store(true)
+					jump := e.classifyGridJump(d, tempo, sessionBPM, lastSessionBPM, peers, lastPeers, bpi)
+					log.Printf("[audio] WARN: local Link beat jumped %+.2f beats (%+.0f ms, expected %+.2f from elapsed time) — cause: %s; %s",
+						jump.Beats, jump.Ms, expected, jump.Cause, jump.Detail)
+					// Our own snap moves the grid on purpose. Re-entering
+					// conformance over it would re-measure a grid we just
+					// aligned, and reporting it as a jump would send everyone
+					// hunting a merge that never happened.
+					if !jump.SelfCaused {
+						e.gridJump.Store(&jump)
+					}
 				}
 			}
 			lastBeat, lastBeatAt, haveLastBeat = localBeat, float64(clockMicros)/1e6, true
+			lastPeers, lastSessionBPM = peers, sessionBPM
 
 			if labeled && (!haveLast || localIdx > lastLocalIdx) {
 				e.onBoundary(cfg, tempo, localIdx, roomLabel)

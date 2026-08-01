@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"math"
 	"testing"
 	"time"
 
@@ -554,5 +555,65 @@ func TestImminentAudioStillBlocksRetirement(t *testing.T) {
 
 	if !hasStream(le, "id-A", 0) {
 		t.Fatal("retired a stream with audio still due to play")
+	}
+}
+
+// --- grid-jump attribution ---
+
+// A jump is only actionable if you can tell what moved the grid. The most
+// important case to get right is our own entry snap: it moves the grid on
+// purpose and trips the same detector, so reporting it would send someone
+// hunting a session merge that never happened — and acting on it would
+// re-align a grid we just aligned.
+func TestGridJumpAttributesOurOwnSnap(t *testing.T) {
+	le := newCaptureTestEngine(t)
+	le.OnGridSnap(2_600_000) // entry conformance just snapped +2.6s
+
+	j := le.classifyGridJump(5.22, 120, 120, 120, 3, 3, 16)
+
+	if !j.SelfCaused {
+		t.Fatalf("snap not recognised as self-caused: %+v", j)
+	}
+	if j.Cause != "our own grid snap" {
+		t.Fatalf("cause = %q", j.Cause)
+	}
+	// Self-caused jumps must never reach the session: no re-entry, no report.
+	le.gridJump.Store(nil)
+	if _, ok := le.TakeGridJump(); ok {
+		t.Fatal("a self-caused jump was handed to the session")
+	}
+}
+
+func TestGridJumpAttributesPeerAndTempoChanges(t *testing.T) {
+	le := newCaptureTestEngine(t)
+
+	// A peer joining re-phases the shared timeline.
+	j := le.classifyGridJump(5.22, 120, 120, 120, 4, 3, 16)
+	if j.Cause != "Link session merge" {
+		t.Fatalf("peer change cause = %q, want \"Link session merge\"", j.Cause)
+	}
+	if j.SelfCaused {
+		t.Fatal("a merge is not self-caused")
+	}
+	if j.Peers != 4 {
+		t.Fatalf("peers = %d, want 4", j.Peers)
+	}
+
+	// Tempo moved, peer set steady.
+	j = le.classifyGridJump(2.0, 120, 124, 120, 3, 3, 16)
+	if j.Cause != "session tempo change" {
+		t.Fatalf("tempo change cause = %q", j.Cause)
+	}
+
+	// Nothing observable — say so rather than guessing.
+	j = le.classifyGridJump(2.0, 120, 120, 120, 3, 3, 16)
+	if j.Cause != "unattributed" {
+		t.Fatalf("cause = %q, want \"unattributed\"", j.Cause)
+	}
+
+	// The magnitude conversions carry the units the log quotes.
+	j = le.classifyGridJump(4.0, 120, 120, 120, 3, 3, 16)
+	if math.Abs(j.Ms-2000) > 1 {
+		t.Fatalf("4 beats at 120 BPM = %.0f ms, want 2000", j.Ms)
 	}
 }

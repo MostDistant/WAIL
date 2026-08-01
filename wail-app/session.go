@@ -1007,10 +1007,17 @@ func sessionLoop(
 		// settling and tempo commits; never fires while entry is pending).
 		case <-alignTicker.C:
 			// A Link session merge or transport reset moves the local beat
-			// timeline bodily; the engine detects it, alignment has to act on
-			// it (the slew cannot walk back whole beats).
-			if beats, jumped := audioEngine.TakeGridJump(); jumped {
-				steer.OnGridJump(beats, time.Now())
+			// timeline bodily; the engine detects it and attributes it.
+			// Alignment has to act (the slew cannot walk back whole beats),
+			// and the room has to hear about it: a merge hits every peer on
+			// that LAN, so the cause belongs in the relay's log too, not just
+			// on whichever machine happened to notice.
+			if jump, jumped := audioEngine.TakeGridJump(); jumped {
+				steer.OnGridJump(jump.Beats, time.Now())
+				msg := fmt.Sprintf("grid jumped %+.2f beats (%+.0f ms, ≈%+d intervals) — cause: %s; %s",
+					jump.Beats, jump.Ms, jump.Intervals, jump.Cause, jump.Detail)
+				logWarn("%s", msg)
+				mesh.SendLog("warn", "align", msg, uint64(time.Now().UnixMicro()))
 			}
 			steer.Tick(intervalCfg.BeatsPerInterval(), time.Now())
 
