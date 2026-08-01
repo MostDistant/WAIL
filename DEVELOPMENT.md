@@ -95,6 +95,43 @@ For measuring a peer's rhythmic phase offset against the room grid (the
   same-period rhythmic content), and `-offset-dump <dir>` writes per-channel
   RMS envelopes as CSVs for offline analysis.
 
+### Log store (after-the-fact session forensics)
+
+Fly keeps relay logs for about seven days, but `flyctl logs --no-tail` returns
+only a short buffer — so by the time a jam is over and someone reports "it
+sounded crinkly around 10:42", the evidence is usually already out of reach.
+`wail-logstore` pulls the relay's logs from Fly's *paginated* logs API, which
+does reach back across the whole retention window, into a local SQLite DB:
+
+```sh
+cd signaling-server && go build -o wail-logstore ./cmd/wail-logstore
+
+./wail-logstore -db wail-logs.db                    # backfill 7 days of relay logs
+./wail-logstore -db wail-logs.db -since 24h -follow # a day, then keep pulling
+./wail-logstore -room synthseeker -password PW      # relay + that room's peer logs
+```
+
+The Fly token comes from `-token`, `$FLY_API_TOKEN`, or `flyctl auth token`.
+Re-running is idempotent (rows dedupe on time+source+origin+message), so it is
+safe to point at the same DB repeatedly, and overlapping windows cost nothing.
+
+Adding `-room` also records the room's peer-shared logs into the same table, so
+both sides land on one timeline and correlating a relay event against a peer's
+audio log is a query:
+
+```sql
+-- what the relay was doing either side of a peer's capture glitch
+SELECT ts, source, origin, message FROM logs
+WHERE ts_ns BETWEEN :t - 60e9 AND :t + 60e9 ORDER BY ts_ns;
+```
+
+Two things worth knowing. Peer logs **cannot** be backfilled — they only exist
+while someone is in the room, so `-room` has to be running during the jam,
+whereas relay logs can be collected days later. And peer rows are stamped on
+arrival at the recorder, because the relay does not carry a peer's wall clock
+and peer clocks disagree anyway; one receiver's arrival order is the only
+timeline all sources can share.
+
 ### Desktop App (dev mode)
 
 ```sh
