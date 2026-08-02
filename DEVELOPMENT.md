@@ -37,8 +37,7 @@ wail-app/                Go/Wails desktop app: session orchestration, Link + Lin
 
 signaling-server/        Go WebSocket relay (SQLite, deployed to fly.io)
 ├── main.go              Relay + room management
-├── roomclock.go         Relay-authoritative room interval clock
-└── interval_clock.go    interval_anchor broadcast
+└── interval_clock.go    Room tempo/BPI state + interval_anchor broadcast (joiner seeding, ADR-0009)
 
 vendor/
 └── link/                Ableton Link 4.0 SDK (git submodule, pinned to Link-4.0)

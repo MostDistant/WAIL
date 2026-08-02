@@ -9,16 +9,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// serverEpoch anchors the server's monotonic microsecond clock. The room clock
-// and the anchors it broadcasts are all in this domain; clients map it to their
-// local clock with interval-scale slack (ADR-0003), so millisecond one-way skew
-// is immaterial.
+// serverEpoch anchors the server's monotonic microsecond clock, which stamps
+// pongs for the clients' relay-RTT estimate (the anchor rides it too, for wire
+// shape stability with older clients).
 var serverEpoch = time.Now()
 
 func serverNowUs() int64 { return time.Since(serverEpoch).Microseconds() }
 
-// syncPayloadPeek reads only the fields the relay needs to own the interval
-// clock. Everything else in the sync payload stays opaque and is relayed as-is.
+// intervalConfig is a room's interval shape: Bars × Quantum beats.
+type intervalConfig struct {
+	Bars    uint32
+	Quantum float64
+}
+
+// syncPayloadPeek reads only the fields the relay needs to track room state.
+// Everything else in the sync payload stays opaque and is relayed as-is.
 type syncPayloadPeek struct {
 	Type    string  `json:"type"`
 	BPM     float64 `json:"bpm"`
@@ -26,38 +31,39 @@ type syncPayloadPeek struct {
 	Quantum float64 `json:"quantum"`
 }
 
-// anchorMsg is the interval_anchor the relay broadcasts so every client shares
-// the room interval index. current_index is the server's authoritative index
-// right now; bpm/bars/quantum let clients advance their own local boundaries.
-// next_boundary_micros is the server-clock time the current interval ends
-// (ADR-0006): with a relay RTT estimate clients map it into their local clock
-// domain and measure their grid alignment error δ against the room grid.
+// anchorMsg carries the room's tempo and interval shape (ADR-0009). This is
+// NINJAM's ConfigChangeNotify, not a clock: the relay-authoritative interval
+// index it used to carry retired with the shared round numbering — rounds are
+// sender-relative, so there is nothing for a room clock to arbitrate. The
+// message keeps its name and a zero current_index for wire-shape stability.
 type anchorMsg struct {
-	Type               string  `json:"type"`
-	CurrentIndex       int64   `json:"current_index"`
-	BPM                float64 `json:"bpm"`
-	Bars               uint32  `json:"bars"`
-	Quantum            float64 `json:"quantum"`
-	ServerNowMicros    int64   `json:"server_now_micros"`
-	NextBoundaryMicros int64   `json:"next_boundary_micros"`
+	Type            string  `json:"type"`
+	CurrentIndex    int64   `json:"current_index"`
+	BPM             float64 `json:"bpm"`
+	Bars            uint32  `json:"bars"`
+	Quantum         float64 `json:"quantum"`
+	ServerNowMicros int64   `json:"server_now_micros"`
 }
 
-// observeSync inspects a relayed sync payload; when it carries tempo or interval
-// config, it updates the room clock and returns the anchor to broadcast. The
-// returned bool is false for payloads that don't affect the clock. roomName is
-// for the fly.io-visible clock logs.
+// observeSync inspects a relayed sync payload; when it carries tempo or
+// interval config, it updates the room state and returns the config message to
+// broadcast. The returned bool is false for payloads that don't affect it.
 func (r *room) observeSync(roomName string, payload json.RawMessage) (anchorMsg, bool) {
 	// Cheap pre-filter: the vast majority of relayed sync traffic is Ping/Pong/
-	// StateSnapshot, which never re-anchors. Skip the unmarshal unless the payload
-	// could be one of the two anchor-bearing types.
-	if !bytes.Contains(payload, []byte(`"TempoChange"`)) && !bytes.Contains(payload, []byte(`"IntervalConfig"`)) {
+	// StateSnapshot, which never changes room config. Skip the unmarshal unless
+	// the payload could be one of the config-bearing types. TempoDeclare is
+	// watched alongside the legacy TempoChange so clients can eventually stop
+	// dual-sending.
+	if !bytes.Contains(payload, []byte(`"TempoChange"`)) &&
+		!bytes.Contains(payload, []byte(`"TempoDeclare"`)) &&
+		!bytes.Contains(payload, []byte(`"IntervalConfig"`)) {
 		return anchorMsg{}, false
 	}
 	var p syncPayloadPeek
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return anchorMsg{}, false
 	}
-	if p.Type != "TempoChange" && p.Type != "IntervalConfig" {
+	if p.Type != "TempoChange" && p.Type != "TempoDeclare" && p.Type != "IntervalConfig" {
 		return anchorMsg{}, false
 	}
 
@@ -85,58 +91,46 @@ func (r *room) observeSync(roomName string, payload json.RawMessage) (anchorMsg,
 		quantum = 4
 	}
 
-	// Values unchanged: no re-anchor, no broadcast. A redundant anchor only
-	// re-rolls every client's labeler alignment, and each re-roll can shift a
-	// peer's room labels by a whole interval — peers then disagree with each
-	// other until the next anchor. (Joins re-broadcast IntervalConfig per
-	// ADR-0004; without this guard every join flooded the room with re-rolls.)
-	if r.haveClock && bpm == r.tempoBPM && bars == r.cfg.Bars && quantum == r.cfg.Quantum {
+	// Values unchanged: no broadcast. Joins re-broadcast IntervalConfig per
+	// ADR-0004, and echoing every one back at the room is pure noise.
+	if r.haveConfig && bpm == r.tempoBPM && bars == r.cfg.Bars && quantum == r.cfg.Quantum {
 		return anchorMsg{}, false
 	}
-	r.tempoBPM, r.cfg.Bars, r.cfg.Quantum = bpm, bars, quantum
-
-	now := serverNowUs()
-	if !r.haveClock {
-		r.clk = newRoomClock(roomAnchor{Index: 0, AtMicros: now, TempoBPM: r.tempoBPM, Config: r.cfg})
-		r.haveClock = true
-		log.Printf("[roomclock] room %s clock created: tempo=%.1f cfg=%dx%.0f", roomName, r.tempoBPM, r.cfg.Bars, r.cfg.Quantum)
+	if !r.haveConfig {
+		log.Printf("[roomcfg] room %s config set: tempo=%.1f cfg=%dx%.0f", roomName, bpm, bars, quantum)
 	} else {
-		oldTempo := r.clk.anchor().TempoBPM
-		r.clk.reanchor(now, r.tempoBPM, r.cfg)
-		log.Printf("[roomclock] room %s re-anchor: tempo %.1f→%.1f cfg=%dx%.0f", roomName, oldTempo, r.tempoBPM, r.cfg.Bars, r.cfg.Quantum)
+		log.Printf("[roomcfg] room %s config change: tempo %.1f→%.1f cfg=%dx%.0f", roomName, r.tempoBPM, bpm, bars, quantum)
 	}
-	return r.anchorMsgLocked(now), true
+	r.tempoBPM, r.cfg.Bars, r.cfg.Quantum = bpm, bars, quantum
+	r.haveConfig = true
+	return r.anchorMsgLocked(), true
 }
 
-// currentAnchor returns the room's current anchor for a late joiner. false if no
-// tempo/config has been observed yet.
+// currentAnchor returns the room's config message for a late joiner. false if
+// no tempo/config has been observed yet.
 func (r *room) currentAnchor() (anchorMsg, bool) {
 	r.clockMu.Lock()
 	defer r.clockMu.Unlock()
-	if !r.haveClock {
+	if !r.haveConfig {
 		return anchorMsg{}, false
 	}
-	return r.anchorMsgLocked(serverNowUs()), true
+	return r.anchorMsgLocked(), true
 }
 
-// anchorMsgLocked builds an anchor message. Caller holds clockMu.
-func (r *room) anchorMsgLocked(now int64) anchorMsg {
-	idx := r.clk.indexAt(now)
+// anchorMsgLocked builds the room-config message. Caller holds clockMu.
+func (r *room) anchorMsgLocked() anchorMsg {
 	return anchorMsg{
-		Type:               "interval_anchor",
-		CurrentIndex:       idx,
-		BPM:                r.tempoBPM,
-		Bars:               r.cfg.Bars,
-		Quantum:            r.cfg.Quantum,
-		ServerNowMicros:    now,
-		NextBoundaryMicros: r.clk.boundaryMicros(idx + 1),
+		Type:            "interval_anchor",
+		BPM:             r.tempoBPM,
+		Bars:            r.cfg.Bars,
+		Quantum:         r.cfg.Quantum,
+		ServerNowMicros: serverNowUs(),
 	}
 }
 
-// serverPongPayload builds the relay's direct answer to a broadcast Ping
-// (ADR-0006 relay time service): clients estimate relay RTT from the echoed
-// ping timestamp and the server↔local clock offset from server_now_micros.
-// ok is false for non-Ping payloads, which get no direct reply.
+// serverPongPayload builds the relay's direct answer to a broadcast Ping:
+// clients estimate relay RTT from the echoed ping timestamp (the server clock
+// stamp remains for diagnostics). ok is false for non-Ping payloads.
 func serverPongPayload(payload json.RawMessage) (json.RawMessage, bool) {
 	if !bytes.Contains(payload, []byte(`"Ping"`)) {
 		return nil, false
@@ -163,8 +157,8 @@ func serverPongPayload(payload json.RawMessage) (json.RawMessage, bool) {
 	return pong, true
 }
 
-// broadcastAnchor sends the interval_anchor to every peer in the room, including
-// the tempo setter, so all peers adopt the one authoritative room index.
+// broadcastAnchor sends the room-config message to every peer in the room,
+// including the peer whose change triggered it.
 func (r *room) broadcastAnchor(am anchorMsg) {
 	raw, err := json.Marshal(am)
 	if err != nil {
