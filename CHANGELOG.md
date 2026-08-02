@@ -1,5 +1,11 @@
 # Changelog
 
+## 5.1.0-beta.0 (2026-08-02)
+
+### Features
+
+- retire the relay room clock — the room is two numbers now (ADR-0009 final) (#513)
+
 ## 5.0.0 (2026-08-01)
 
 ### Breaking Changes
