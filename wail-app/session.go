@@ -431,6 +431,7 @@ func sessionLoop(
 				// so a UI tempo change never reached the room at all.
 				logInfo("BPM changed to %.1f (declared)", cmd.BPM)
 				currentBPM = cmd.BPM
+				audioEngine.SetRoomConfig(cmd.BPM, 0, 0)
 				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: cmd.BPM}
 				declareTempo(cmd.BPM)
 				emitter.Emit("tempo:changed", TempoChangedEvent{BPM: cmd.BPM, Source: "local"})
@@ -440,6 +441,7 @@ func sessionLoop(
 				// finishes under the old config.
 				if cmd.Bars > 0 && cmd.Quantum > 0 {
 					intervalCfg = interval.Config{Bars: cmd.Bars, Quantum: cmd.Quantum}
+					audioEngine.SetRoomConfig(0, cmd.Bars, cmd.Quantum)
 					link.SetIntervalQuantum(intervalCfg.BeatsPerInterval())
 					logInfo("Interval changed to %d bars x %.0f beats (%d BPI) — applies at the next interval boundary",
 						cmd.Bars, cmd.Quantum, uint32(float64(cmd.Bars)*cmd.Quantum))
@@ -857,6 +859,7 @@ func sessionLoop(
 					if math.Abs(msg.BPM-currentBPM) > 0.01 {
 						logInfo("Tempo declared by %s: %.1f BPM", msg.Owner, msg.BPM)
 						currentBPM = msg.BPM
+						audioEngine.SetRoomConfig(msg.BPM, 0, 0)
 						linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
 						emitter.Emit("tempo:changed", TempoChangedEvent{BPM: msg.BPM, Source: "remote"})
 					}
@@ -884,6 +887,7 @@ func sessionLoop(
 					tempoOrigin, tempoOwner = now, from
 				}
 				currentBPM = msg.BPM
+				audioEngine.SetRoomConfig(msg.BPM, 0, 0)
 				linkCmdCh <- LinkCommand{Type: "SetTempo", BPM: msg.BPM}
 				emitter.Emit("tempo:changed", TempoChangedEvent{BPM: msg.BPM, Source: "remote"})
 
@@ -895,6 +899,7 @@ func sessionLoop(
 			case "IntervalConfig":
 				logInfo("Remote interval config: %d bars, quantum %.0f", msg.Bars, msg.Quantum)
 				intervalCfg = interval.Config{Bars: msg.Bars, Quantum: msg.Quantum}
+				audioEngine.SetRoomConfig(0, msg.Bars, msg.Quantum)
 				link.SetIntervalQuantum(intervalCfg.BeatsPerInterval())
 
 			case "AudioStatus":
@@ -1050,6 +1055,7 @@ func sessionLoop(
 					logInfo("Local tempo changed to %.1f BPM (declaring)", ev.BPM)
 					declareTempo(ev.BPM)
 					currentBPM = ev.BPM
+					audioEngine.SetRoomConfig(ev.BPM, 0, 0)
 					emitter.Emit("tempo:changed", TempoChangedEvent{BPM: ev.BPM, Source: "local"})
 				}
 				handleBoundary(ev.Beat)
