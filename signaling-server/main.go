@@ -750,14 +750,14 @@ func (h *hub) broadcastSync(room, peerID string, c *conn, msg clientMsg) {
 			e.c.sendWS(wsMsg)
 		}
 	}
-	// The relay owns the room interval clock (ADR-0003): if this sync carried a
-	// tempo/config change, update the clock and broadcast the new anchor to all.
+	// Room config tracking (ADR-0009): if this sync carried a tempo/config
+	// change, update the room's two values and broadcast them to all.
 	if am, ok := r.observeSync(room, msg.Payload); ok {
 		r.broadcastAnchor(am)
 	}
-	// Relay time service (ADR-0006): answer a broadcast Ping directly with a
-	// server-stamped Pong so the sender can estimate relay RTT and the
-	// server↔local clock offset for grid alignment. Peer pongs are unaffected.
+	// Relay time service: answer a broadcast Ping directly with a
+	// server-stamped Pong so the sender can estimate relay RTT (diagnostics).
+	// Peer pongs are unaffected.
 	if pong, ok := serverPongPayload(msg.Payload); ok {
 		envelope, err := json.Marshal(map[string]any{"type": "sync", "from": "", "payload": json.RawMessage(pong)})
 		if err == nil {
