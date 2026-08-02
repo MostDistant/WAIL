@@ -57,11 +57,9 @@ wail-app/                Go/Wails desktop app: session orchestration, Ableton Li
 
 signaling-server/         Go WebSocket relay server (deployed to fly.io)
 ├── main.go               Relay + room management (SQLite)
-├── roomclock.go          Relay-authoritative room interval clock (ADR-0003)
-├── interval_clock.go     interval_anchor broadcast (carries tempo/BPI to joiners;
-│                         its room index is ignored by ADR-0009 clients)
-├── labelwatch.go         Label watchdog (inert for ADR-0009 clients; retires with
-│                         the room clock after the beta soak)
+├── interval_clock.go     Room tempo/BPI state + interval_anchor broadcast
+│                         (joiner seeding — NINJAM's ConfigChangeNotify, not a
+│                         clock; the clock and label watchdog retired, ADR-0009)
 ├── cmd/wail-metrics/     CLI metrics client
 ├── cmd/wail-logtail/     Tails a room's peer-shared logs live (joins as an observer)
 └── cmd/wail-logstore/    Backfills relay logs from Fly's logs API (~7 days) into a

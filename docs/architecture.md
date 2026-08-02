@@ -55,7 +55,7 @@ wail-app/ (Go/Wails desktop app — session orchestration, Link Audio engine, re
     └── affinity ((identity, stream) → stable published channel)
 
 signaling-server/ (Go WebSocket relay server, deployed to fly.io)
-├── roomclock.go / interval_clock.go (interval_anchor: carries tempo/BPI to joiners; the clock role retires after the ADR-0009 beta soak)
+├── interval_clock.go (room tempo/BPI state + interval_anchor broadcast — joiner seeding, ADR-0009)
 └── cmd/wail-metrics (CLI metrics client)
 ```
 
@@ -205,7 +205,7 @@ The beat position is obtained from Link at quantum = **bars × quantum (BPI)**, 
 
 **Sender-relative rounds (ADR-0009):** there is no shared interval numbering. Senders stamp WAIF frames with their *own* local interval index — an opaque, monotonic per-sender sequence — and each receiver's adaptive scheduler plays whatever round is ready at its next boundary. Nothing ever compares a sender's index to a receiver's, so the whole class of label-offset bugs (off-by-one alignment, frozen wrong offsets, watchdog healing) is structurally impossible rather than defended against. The cost, accepted deliberately: no coordinated same-round changes ("everyone switch NOW" can land a round apart for different listeners — the NINJAM trade), and per-pair delay is grid luck within one interval rather than a fixed constant.
 
-The relay still broadcasts an `interval_anchor`, but its only consumed job is carrying the room's tempo and interval config to joiners; ADR-0009 clients ignore the index it carries. The room clock behind it, and the label watchdog (`labelwatch.go`, now inert for new clients), retire once no supported client needs anchors — one beta cycle after this ships (betas and stable share the production relay, so wire changes stay backward compatible for a cycle).
+The relay still broadcasts an `interval_anchor`, but it is a config message now — the room's tempo and interval shape for joiner seeding (NINJAM's `ConfigChangeNotify`), with a vestigial zero index for wire-shape stability. The room clock and the label watchdog are gone; the relay tracks two plain values per room and forwards everything else opaquely (pillar 5, fully honored again). The relay also watches `TempoDeclare` alongside the legacy `TempoChange`, so clients can eventually stop dual-sending.
 
 **Grid alignment is retired (ADR-0009).** WAIL never moves a Link session's grid or tempo: capture stores audio as beats-from-round-start on the sender's grid, playback starts each round on the listener's own boundary, so sender beat 3 lands on listener beat 3 whatever the absolute offset between their grids — cross-LAN phase never reaches the ear. The honest alignment requirement was always coarse (delivery headroom within the interval), not the 25 ms the retired ADR-0006 stack pursued; NINJAM has run this model with zero cross-client clock sync for twenty years. What survives of the alignment math is its audibility bound, `SlewAuthorityBPM` (0.05% = 0.86 cents), as the tempo detector's de-noising bar; and grid-*jump* detection survives as pure observability — a Link session merge or transport reset that moves the local timeline is attributed (peer-count and tempo evidence) and reported to the local and relay logs, because a musician whose bar lines just moved deserves the explanation, but nothing acts on it.
 

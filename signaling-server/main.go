@@ -332,20 +332,16 @@ type room struct {
 	activeSession     *session
 	completedSessions []*session
 
-	// Relay-authoritative interval clock (ADR-0003). Guarded by clockMu.
-	clockMu   sync.Mutex
-	clk       *roomClock
-	haveClock bool
-	tempoBPM  float64
-	cfg       intervalConfig
-
-	// Label watchdog: heals peers whose room-label offset froze wrong
-	// (see labelwatch.go). Owns its mutex.
-	watch *labelWatchdog
+	// Room tempo + interval shape (ADR-0009): plain values for joiner seeding
+	// — NINJAM's ConfigChangeNotify, not a clock. Guarded by clockMu.
+	clockMu    sync.Mutex
+	haveConfig bool
+	tempoBPM   float64
+	cfg        intervalConfig
 }
 
 func newRoom() *room {
-	r := &room{connMap: make(map[string]*conn), watch: newLabelWatchdog()}
+	r := &room{connMap: make(map[string]*conn)}
 	empty := make([]connEntry, 0)
 	r.conns.Store(&empty)
 	return r
@@ -665,10 +661,10 @@ func (h *hub) join(c *conn, msg clientMsg) (string, string, int) {
 		"type": "join_ok", "peers": peers, "peer_display_names": peerDisplayNames,
 		"lan_peer_present": lanPeerPresent,
 	})
-	// Give a late joiner the current room interval anchor so it aligns immediately.
+	// Give a late joiner the room's tempo + interval shape so it can seed.
 	if am, ok := r.currentAnchor(); ok {
-		log.Printf("[roomclock] room %s late-join anchor for %s (%s): idx=%d tempo=%.1f cfg=%dx%.0f",
-			roomName, peerID, c.displayName, am.CurrentIndex, am.BPM, am.Bars, am.Quantum)
+		log.Printf("[roomcfg] room %s late-join config for %s (%s): tempo=%.1f cfg=%dx%.0f",
+			roomName, peerID, c.displayName, am.BPM, am.Bars, am.Quantum)
 		c.sendJSON(am)
 	}
 	return roomName, peerID, streamCount
@@ -799,16 +795,6 @@ func (h *hub) broadcastAudioBinary(room, peerID string, c *conn, data []byte, lo
 		return
 	}
 
-	// Label watchdog: peek the sender's interval label and heal frozen
-	// offsets (see labelwatch.go). Cheap: one header parse per frame.
-	if label, ok := waifIntervalIndex(data); ok {
-		if am, haveAnchor := r.currentAnchor(); haveAnchor {
-			r.watch.observe(room, peerID, label, am.CurrentIndex, time.Now(), func() {
-				c.sendJSON(am)
-			})
-		}
-	}
-
 	pidBytes := []byte(peerID)
 	frame := make([]byte, 1+len(pidBytes)+len(data))
 	frame[0] = byte(len(pidBytes))
@@ -937,7 +923,6 @@ func (h *hub) leave(room, peerID string, c *conn) {
 	}
 	r := h.getRoom(room)
 	if r != nil {
-		r.watch.forget(peerID)
 	}
 	if r == nil {
 		c.room = ""
