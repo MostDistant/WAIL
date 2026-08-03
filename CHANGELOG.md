@@ -1,5 +1,12 @@
 # Changelog
 
+## 5.1.0 (2026-08-03)
+
+### Features
+
+- retire the relay room clock — the room is two numbers now (ADR-0009 final) (#513)
+- ship a macOS .dmg installer (WAIL.app with bundled libopus) (#515)
+
 ## 5.0.0 (2026-08-01)
 
 ### Breaking Changes
