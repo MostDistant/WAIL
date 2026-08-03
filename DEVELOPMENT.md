@@ -296,6 +296,11 @@ brew unlink wail-beta && brew link --overwrite wail   # back to stable, instantl
 `brew upgrade wail-beta` rebuilds the newest beta from source. Both kegs stay on
 disk, so falling back to stable mid-session is a `link`, not a reinstall.
 
+Beta prereleases also ship the same `wail-macos-arm64-<version>.dmg` as stable
+(Apple Silicon, ad-hoc signed — right-click → Open on first launch). Dragging
+the beta WAIL.app into Applications replaces any stable .app install; keep it
+somewhere else (e.g. `~/Applications`) to run both.
+
 ### Windows
 
 Download the `wail-windows-x64-<version>.zip` asset from the beta's prerelease on

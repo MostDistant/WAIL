@@ -60,6 +60,14 @@ jobs:
         run: go build ./... && go test ./...
         working-directory: signaling-server
 
+      - name: Smoke-test macOS packaging
+        # Exercises scripts/package-macos.sh end to end (bundle, dylib
+        # bundling, ad-hoc sign, dmg) so a broken script fails on the PR
+        # instead of on release day.
+        run: |
+          scripts/package-macos.sh --version 0.0.0-ci --plugins build/plugins --out /tmp/wail-pkg
+          test -f /tmp/wail-pkg/wail-macos-arm64-0.0.0-ci.dmg
+
   build-windows:
     # Pinned to windows-2022 to match the release workflow's toolchain (older
     # MinGW GCC + CMake). windows-latest rolled over to the 2025/2026 image

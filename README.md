@@ -8,7 +8,9 @@ WAIL is an Ableton **Link Audio** peer — it captures and plays audio directly 
 
 Download the latest release from the [Releases page](https://github.com/MostDistant/WAIL/releases).
 
-**macOS (Homebrew, from source)** — Build and install directly from source:
+**macOS (download, Apple Silicon)** — Download `wail-macos-arm64-<version>.dmg` from the Releases page, open it, and drag **WAIL.app** into Applications. The app is not notarized, so on first launch right-click the app and choose **Open** (Gatekeeper), then confirm — after that it launches normally. The CLAP plugins auto-install on first launch into `~/.clap`.
+
+**macOS (Homebrew, from source)** — Build and install directly from source (also the path for Intel Macs):
 
 ```sh
 brew tap MostDistant/wail
@@ -33,7 +35,7 @@ For DAWs that don't support Ableton Link Audio, load the **WAIL Send** and **WAI
 
 Two requirements: your DAW must load **CLAP** plugins (Bitwig, REAPER, Studio One, Qtractor; not Logic or Pro Tools), and the project must run at **48 kHz** — Link Audio is 48 kHz only, so at any other rate Send publishes nothing and Recv outputs silence.
 
-On the Windows and Linux release builds the plugins auto-install on first launch into your per-user CLAP folder (`%LOCALAPPDATA%\Programs\Common\CLAP` / `~/.clap`); if that's blocked, copy the `.clap` bundles from the release's `lib/` folder there yourself and rescan. On Homebrew, run `wail-install-plugins`.
+On the Windows, macOS (dmg), and Linux release builds the plugins auto-install on first launch into your per-user CLAP folder (`%LOCALAPPDATA%\Programs\Common\CLAP` / `~/.clap`); if that's blocked, copy the `.clap` bundles from the release's `lib/` folder there yourself and rescan. On Homebrew, run `wail-install-plugins`.
 
 ## Getting Started
 
