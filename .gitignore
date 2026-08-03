@@ -5,3 +5,4 @@ wail-app/wail-app
 .envrc
 debug-runs/
 /.pi-subagents/
+/dist/

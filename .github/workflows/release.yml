@@ -345,13 +345,63 @@ jobs:
           name: wail-release-linux
           path: dist/
 
+  build-macos:
+    # macOS (Apple Silicon): WAIL.app + .dmg. libopus is bundled into
+    # Contents/Frameworks by scripts/package-macos.sh, so the .app runs on
+    # machines without Homebrew. Ad-hoc signed — first launch is right-click
+    # → Open (no Developer ID notarization yet). Intel Macs stay on the
+    # Homebrew source tarball.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          submodules: recursive
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: wail-app/go.mod
+          # Both Go modules live in subdirs, so point the built-in cache at every
+          # go.sum — otherwise setup-go looks only at the repo root and warns.
+          cache-dependency-path: "**/go.sum"
+
+      - name: Install opus
+        run: brew install opus
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "value=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build CLAP plugins
+        run: |
+          cmake -S plugins -B build/plugins -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/plugins
+
+      - name: Package WAIL.app + .dmg
+        run: |
+          scripts/package-macos.sh \
+            --version "${{ steps.version.outputs.value }}" \
+            --plugins build/plugins \
+            --out dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wail-release-macos
+          path: dist/
+
   create-release:
-    needs: [build-windows, build-linux, build-homebrew-tarball]
+    needs: [build-windows, build-linux, build-macos, build-homebrew-tarball]
     # A failed platform build must not sink the whole release: run whenever at
     # least one artifact source succeeded and upload what exists (e.g. a
     # mac-only release is the Homebrew source tarball when Windows/Linux fail).
     # The run still reports failure overall, so a missing platform is visible.
-    if: always() && (needs.build-windows.result == 'success' || needs.build-linux.result == 'success' || needs.build-homebrew-tarball.result == 'success')
+    if: always() && (needs.build-windows.result == 'success' || needs.build-linux.result == 'success' || needs.build-macos.result == 'success' || needs.build-homebrew-tarball.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -395,6 +445,10 @@ jobs:
           else
             echo "::warning::no Linux artifact — releasing without it"
           fi
+          # macOS: the dmg is final as built by scripts/package-macos.sh.
+          if [ ! -d wail-release-macos ]; then
+            echo "::warning::no macOS artifact — releasing without it"
+          fi
 
       - name: Find individual installers
         id: files
@@ -402,6 +456,7 @@ jobs:
           echo "src_tarball=$(ls wail-homebrew-src/wail-*-src.tar.gz 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "windows_zip=$(ls wail-windows-x64-*.zip 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
           echo "linux_tarball=$(ls wail-linux-x64-*.tar.gz 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
+          echo "macos_dmg=$(ls wail-release-macos/wail-macos-arm64-*.dmg 2>/dev/null | head -1 || true)" >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v3
         with:
@@ -413,6 +468,7 @@ jobs:
             ${{ steps.files.outputs.src_tarball }}
             ${{ steps.files.outputs.windows_zip }}
             ${{ steps.files.outputs.linux_tarball }}
+            ${{ steps.files.outputs.macos_dmg }}
 
       # Update the Homebrew tap formula with the new version and SHA256.
       # Requires a HOMEBREW_TAP_TOKEN secret with push access to MostDistant/homebrew-wail.
